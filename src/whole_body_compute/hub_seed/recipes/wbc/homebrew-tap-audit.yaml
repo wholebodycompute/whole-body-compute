@@ -1,0 +1,113 @@
+schema_version: '1.0'
+namespace: wbc
+id: homebrew-tap-audit
+name: Homebrew Tap Formula Syntax & SHA-256 Gate
+version: 1.0.0
+description: Validates Homebrew Ruby formula syntax (`ruby -c`) and records its deterministic
+  SHA-256 release receipt.
+license: Apache-2.0
+author: Whole Body Compute Official Hub
+tags:
+- homebrew
+- packaging
+- macos
+- release
+- ruby
+triggers:
+- homebrew tap audit
+- check brew formula
+- verify formula syntax
+destructive: false
+timeout_total_ms: 30000
+app_compatibility:
+  platforms:
+  - macos
+  - linux
+  min_wbc_version: 0.1.0
+  target_apps: []
+  required_clis:
+  - ruby
+  - shasum
+parameters:
+  formula_path:
+    type: path
+    description: Path to Homebrew .rb formula
+    default: ./packaging/homebrew/whole-body-compute.rb
+    required: false
+  output_path:
+    type: path
+    description: Audit receipt file
+    default: ./homebrew_audit_receipt.txt
+    required: false
+preconditions:
+- getter_type: file_exists
+  target: ${formula_path}
+  description: Formula .rb file must exist
+steps:
+- name: Verify Ruby Syntax & Compute Formula Digest
+  action: run_shell
+  timeout_ms: 8000
+  on_failure: abort
+  command: ruby -c ${formula_path} && shasum -a 256 ${formula_path} > ${output_path}
+  postconditions:
+  - getter_type: file_nonempty
+    target: ${output_path}
+    description: Formula digest written
+postconditions:
+- getter_type: file_nonempty
+  target: ${output_path}
+  description: Verified Homebrew formula receipt
+success_summary: Completed Homebrew Tap Formula Syntax & SHA-256 Gate deterministically
+  at $0.00 cloud token cost
+error_summary: Homebrew Tap Formula Syntax & SHA-256 Gate halted safely at {step_name}
+tier_summary:
+  archetype: release_packaging_gate
+  raw_step_count: 3
+  compiled_step_count: 1
+  dominant_tier: TIER_0_LOCAL
+  tier_breakdown:
+    TIER_0_LOCAL: 1
+  reliability_score: 0.99
+  contracts_attached:
+  - homebrew_formula_gate_contract
+  fallback_ladder:
+  - 'ir_1_ruby_check: TIER_0_LOCAL'
+contract_summary:
+  contracts:
+  - name: homebrew_formula_gate_contract
+    preconditions:
+    - FORMULA_FILE_EXISTS
+    - RUBY_INSTALLED
+    idempotency_strategy: PURE_SYNTAX_AND_HASH_CHECK
+    natural_key_fields:
+    - formula_path
+    postconditions:
+    - RUBY_SYNTAX_OK
+    - DIGEST_RECORDED
+  ssa_edges: []
+procedural_dna:
+  archetype: release_packaging_gate
+  dominant_tier: TIER_0_LOCAL
+  ir_signature_hash: 99ab6094d30a4a01
+  estimated_cloud_tokens_saved: 19000
+  estimated_usd_saved_per_run: 0.095
+  zero_pii_attestation:
+    sanitized: true
+    contains_credentials: false
+    contains_personal_paths: false
+    redaction_engine: whole_body_compute.procedural_telemetry
+    pii_patterns_checked:
+    - credentials
+    - personal_paths
+    - emails
+    - ssn
+    - public_ipv4
+    - vascular_egress
+signature:
+  algorithm: ed25519+sha256
+  key_id: wbc-hub-official-2026-ed25519
+  public_key: BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=
+  canonical_payload_sha256: 9e74473866d07ba1b20372d626708cc846aabce99190849a9e4898565eca434a
+  hoare_contract_sha256: c1b6bbf8a2d2269c50f5f69e457864b7bb4a44ea84abb4735b8e8f22427c0b14
+  ed25519_signature: hCjAjMHu0S6eceX2M6QOPOAMyAAVUQbHHIYQR2x77vw3OEDeTWL8e1rmC7pta22ifZ0bdCfC2XV/x8/X2YzZBw==
+  signed_at: '2026-11-10T18:00:00Z'

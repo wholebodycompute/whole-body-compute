@@ -1,0 +1,689 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wholebodycompute.org/schemas/pal_workflow_v1.json",
+  "title": "Whole Body Compute PalWorkflow + ProceduralDNA v1 Schema",
+  "description": "Open specification for cryptographically signed, zero-PII PalWorkflow recipes and Procedural DNA envelopes executing across OrganEyes (AXUIElement Foveal DOM) and OrganHands (Tier 0/1/2 deterministic runtime).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "namespace",
+    "id",
+    "name",
+    "version",
+    "description",
+    "app_compatibility",
+    "steps",
+    "contract_summary",
+    "procedural_dna"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": ["1.0", "1.0.0"],
+      "description": "PalWorkflow + ProceduralDNA specification version."
+    },
+    "namespace": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{1,38}$",
+      "description": "Publisher organization or user namespace on hub.wholebodycompute.org (e.g. 'wbc')."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{1,63}$",
+      "description": "Unique recipe slug within the namespace (e.g. 'github-pr-triage')."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 120,
+      "description": "Human-readable workflow title."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z.-]+)?$",
+      "description": "Semantic version of this recipe."
+    },
+    "description": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 1000,
+      "description": "Zero-PII summary of workflow behavior, target surfaces, and deterministic guarantees."
+    },
+    "license": {
+      "type": "string",
+      "default": "Apache-2.0",
+      "description": "SPDX license identifier for the recipe definition."
+    },
+    "author": {
+      "type": "string",
+      "maxLength": 120,
+      "description": "Publisher handle or organization display name (no personal email required)."
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_-]{1,39}$"
+      },
+      "maxItems": 16,
+      "uniqueItems": true
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 500
+      },
+      "description": "Sanitized architectural or spoken demonstration notes."
+    },
+    "triggers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 2,
+        "maxLength": 120
+      },
+      "description": "Spoken or CLI trigger phrases."
+    },
+    "destructive": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether this workflow performs irreversible external mutations requiring human confirmation."
+    },
+    "timeout_total_ms": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 600000,
+      "default": 30000
+    },
+    "app_compatibility": {
+      "$ref": "#/$defs/AppCompatibilityEnvelope"
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ParameterDefinition"
+      }
+    },
+    "preconditions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/StateConditionCheck"
+      },
+      "description": "Deterministic Hoare preconditions {P} verified before any step executes."
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/WorkflowStep"
+      }
+    },
+    "postconditions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/StateConditionCheck"
+      },
+      "description": "Deterministic Hoare postconditions {Q} verified after step execution completes."
+    },
+    "success_summary": {
+      "type": "string",
+      "maxLength": 300
+    },
+    "error_summary": {
+      "type": "string",
+      "maxLength": 300
+    },
+    "tier_summary": {
+      "$ref": "#/$defs/TierSummary"
+    },
+    "contract_summary": {
+      "$ref": "#/$defs/ContractSummary"
+    },
+    "procedural_dna": {
+      "$ref": "#/$defs/ProceduralDNAEnvelope"
+    },
+    "signature": {
+      "$ref": "#/$defs/SignatureEnvelope"
+    }
+  },
+  "$defs": {
+    "AppCompatibilityEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platforms", "min_wbc_version", "target_apps"],
+      "properties": {
+        "platforms": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["macos", "linux"]
+          }
+        },
+        "min_wbc_version": {
+          "type": "string",
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$"
+        },
+        "target_apps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["app_name", "bundle_id"],
+            "properties": {
+              "app_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
+              "bundle_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+$",
+                "description": "Reverse-DNS macOS CFBundleIdentifier or canonical application identifier (e.g. 'com.apple.Safari', 'com.linear')."
+              },
+              "min_app_version": {
+                "type": "string"
+              },
+              "max_app_version": {
+                "type": "string"
+              },
+              "required": {
+                "type": "boolean",
+                "default": false
+              }
+            }
+          }
+        },
+        "required_clis": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9._+-]{1,40}$"
+          }
+        }
+      }
+    },
+    "ParameterDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["string", "int", "float", "boolean", "path", "enum"]
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "default": {
+          "type": ["string", "number", "boolean", "null"]
+        },
+        "required": {
+          "type": "boolean",
+          "default": false
+        },
+        "choices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extract_patterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "StateConditionCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["getter_type", "target"],
+      "properties": {
+        "getter_type": {
+          "type": "string",
+          "enum": [
+            "file_exists",
+            "file_nonempty",
+            "window_title_contains",
+            "clipboard_matches",
+            "browser_url_contains",
+            "dom_selector_exists",
+            "shell_exit_zero",
+            "app_running",
+            "ax_element_exists",
+            "cli_installed"
+          ]
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "expected": {
+          "type": ["string", "null"]
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 300
+        }
+      }
+    },
+    "SemanticClickTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_type"],
+      "properties": {
+        "target_type": {
+          "type": "string",
+          "enum": ["menu_path", "ui_element", "dom_selector", "coordinates"]
+        },
+        "menu_path": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "role": {
+          "type": "string",
+          "pattern": "^AX[A-Z][A-Za-z0-9]*$",
+          "description": "macOS Accessibility AXRole selector (e.g. 'AXButton', 'AXTextField', 'AXOutline', 'AXWebArea', 'AXMenuItem')."
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "dom_selector": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "aria_label": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "bid": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "window_anchor_dx": {
+          "type": "number"
+        },
+        "window_anchor_dy": {
+          "type": "number"
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "end_x": {
+          "type": "number"
+        },
+        "end_y": {
+          "type": "number"
+        },
+        "relative_to": {
+          "type": "string",
+          "enum": ["window", "screen"],
+          "default": "window"
+        }
+      }
+    },
+    "WorkflowStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "action"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 160
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "activate_app",
+            "wait_for_window",
+            "hotkey",
+            "keystroke",
+            "press_key",
+            "click",
+            "double_click",
+            "right_click",
+            "drag",
+            "applescript",
+            "run_shell",
+            "wait",
+            "system_action",
+            "notify",
+            "open_url"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 300000,
+          "default": 4000
+        },
+        "on_failure": {
+          "type": "string",
+          "enum": ["abort", "ignore", "retry"],
+          "default": "abort"
+        },
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10,
+          "default": 1
+        },
+        "app_name": {
+          "type": "string"
+        },
+        "bundle_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+$"
+        },
+        "window_title": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "modifiers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "combo": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "press_enter": {
+          "type": "boolean",
+          "default": false
+        },
+        "click_target": {
+          "$ref": "#/$defs/SemanticClickTarget"
+        },
+        "script": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "is_authenticated": {
+          "type": "boolean",
+          "default": false
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "message": {
+          "type": "string"
+        },
+        "visual_anchor": {
+          "type": "string"
+        },
+        "grounding_prompt": {
+          "type": "string"
+        },
+        "postconditions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StateConditionCheck"
+          }
+        }
+      }
+    },
+    "HoareContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "preconditions",
+        "idempotency_strategy",
+        "postconditions"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{1,79}$"
+        },
+        "preconditions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 2
+          }
+        },
+        "idempotency_strategy": {
+          "type": "string",
+          "minLength": 3
+        },
+        "natural_key_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "postconditions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 2
+          }
+        },
+        "blast_radius": {
+          "type": ["object", "null"],
+          "properties": {
+            "max_unattended_batch": { "type": "integer", "minimum": 1 },
+            "require_template_validation": { "type": "boolean" },
+            "require_dedupe_ledger": { "type": "boolean" },
+            "supports_dry_run": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "ContractSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contracts"],
+      "properties": {
+        "contracts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/HoareContract"
+          }
+        },
+        "ssa_edges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ssa_var", "register", "def_step", "use_step", "symbolic_expr"],
+            "properties": {
+              "ssa_var": { "type": "string" },
+              "register": { "type": "string" },
+              "def_step": { "type": "integer", "minimum": 1 },
+              "use_step": { "type": "integer", "minimum": 1 },
+              "def_app": { "type": "string" },
+              "use_app": { "type": "string" },
+              "symbolic_expr": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "TierSummary": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["archetype", "dominant_tier", "reliability_score"],
+      "properties": {
+        "archetype": { "type": "string" },
+        "raw_step_count": { "type": "integer", "minimum": 1 },
+        "compiled_step_count": { "type": "integer", "minimum": 1 },
+        "dominant_tier": {
+          "type": "string",
+          "enum": [
+            "TIER_0_LOCAL",
+            "TIER_1_HEADLESS_API",
+            "TIER_1_5_BROWSER_DOM_JS",
+            "TIER_2_SEMANTIC_UI",
+            "TIER_3_COORDINATE_GUI"
+          ]
+        },
+        "tier_breakdown": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "reliability_score": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "contracts_attached": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "fallback_ladder": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "ProceduralDNAEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "archetype",
+        "dominant_tier",
+        "ir_signature_hash",
+        "estimated_cloud_tokens_saved",
+        "estimated_usd_saved_per_run",
+        "zero_pii_attestation"
+      ],
+      "properties": {
+        "archetype": {
+          "type": "string",
+          "minLength": 2
+        },
+        "dominant_tier": {
+          "type": "string",
+          "enum": [
+            "TIER_0_LOCAL",
+            "TIER_1_HEADLESS_API",
+            "TIER_1_5_BROWSER_DOM_JS",
+            "TIER_2_SEMANTIC_UI"
+          ]
+        },
+        "ir_signature_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+        },
+        "estimated_cloud_tokens_saved": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "estimated_usd_saved_per_run": {
+          "type": "number",
+          "minimum": 0.0
+        },
+        "zero_pii_attestation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sanitized",
+            "contains_credentials",
+            "contains_personal_paths",
+            "redaction_engine"
+          ],
+          "properties": {
+            "sanitized": { "const": true },
+            "contains_credentials": { "const": false },
+            "contains_personal_paths": { "const": false },
+            "redaction_engine": { "type": "string" },
+            "pii_patterns_checked": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "SignatureEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "key_id",
+        "public_key",
+        "canonical_payload_sha256",
+        "hoare_contract_sha256",
+        "ed25519_signature",
+        "signed_at"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "ed25519+sha256"
+        },
+        "key_id": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 128
+        },
+        "public_key": {
+          "type": "string",
+          "minLength": 40,
+          "maxLength": 88,
+          "description": "Base64-encoded 32-byte RFC 8032 Ed25519 public key."
+        },
+        "canonical_payload_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 hex digest of deterministic sorted-key JSON of the unsigned recipe body."
+        },
+        "hoare_contract_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 hex digest binding {id, namespace, version, destructive, app_compatibility, preconditions, steps, postconditions, contract_summary}."
+        },
+        "ed25519_signature": {
+          "type": "string",
+          "minLength": 80,
+          "maxLength": 128,
+          "description": "Base64-encoded 64-byte Ed25519 signature over 'WBC-PAL-WORKFLOW-V1\\n<canonical_payload_sha256>\\n<hoare_contract_sha256>'."
+        },
+        "signed_at": {
+          "type": "string",
+          "description": "ISO-8601 UTC signing timestamp."
+        }
+      }
+    }
+  }
+}

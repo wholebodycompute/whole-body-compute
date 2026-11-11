@@ -1,0 +1,135 @@
+diff --git a/seaborn/_core/plot.py b/seaborn/_core/plot.py
+index 4f0290a..9c82edb 100644
+--- a/seaborn/_core/plot.py
++++ b/seaborn/_core/plot.py
+@@ -25,7 +25,7 @@ from seaborn._marks.base import Mark
+ from seaborn._stats.base import Stat
+ from seaborn._core.data import PlotData
+ from seaborn._core.moves import Move
+-from seaborn._core.scales import Scale
++from seaborn._core.scales import Scale, Nominal
+ from seaborn._core.subplots import Subplots
+ from seaborn._core.groupby import GroupBy
+ from seaborn._core.properties import PROPERTIES, Property
+@@ -1238,7 +1238,6 @@ class Plotter:
+             # This only affects us when sharing *paired* axes. This is a novel/niche
+             # behavior, so we will raise rather than hack together a workaround.
+             if axis is not None and Version(mpl.__version__) < Version("3.4.0"):
+-                from seaborn._core.scales import Nominal
+                 paired_axis = axis in p._pair_spec.get("structure", {})
+                 cat_scale = isinstance(scale, Nominal)
+                 ok_dim = {"x": "col", "y": "row"}[axis]
+@@ -1631,10 +1630,23 @@ class Plotter:
+             ax = sub["ax"]
+             for axis in "xy":
+                 axis_key = sub[axis]
++                axis_obj = getattr(ax, f"{axis}axis")
+ 
+                 # Axis limits
++                if any(
++                    isinstance(self._scales[k], Nominal)
++                    for k in self._scales if re.match(rf"^{axis_key}(\D|$)", k)
++                ):
++                    axis_obj.grid(False)
++                    if axis_obj.units is not None:
++                        n = len(getattr(ax, f"get_{axis}ticks")())
++                        if axis == "x":
++                            ax.set_xlim(-.5, n - .5, auto=None)
++                        else:
++                            ax.set_ylim(n - .5, -.5, auto=None)
++
+                 if axis_key in p._limits:
+-                    convert_units = getattr(ax, f"{axis}axis").convert_units
++                    convert_units = axis_obj.convert_units
+                     a, b = p._limits[axis_key]
+                     lo = a if a is None else convert_units(a)
+                     hi = b if b is None else convert_units(b)
+diff --git a/seaborn/_core/scales.py b/seaborn/_core/scales.py
+index bbd71ec..ba43872 100644
+--- a/seaborn/_core/scales.py
++++ b/seaborn/_core/scales.py
+@@ -197,7 +197,8 @@ class Nominal(Scale):
+         # TODO array cast necessary to handle float/int mixture, which we need
+         # to solve in a more systematic way probably
+         # (i.e. if we have [1, 2.5], do we want [1.0, 2.5]? Unclear)
+-        axis.update_units(stringify(np.array(units_seed)))
++        if len(units_seed):
++            axis.update_units(stringify(np.array(units_seed)))
+ 
+         # TODO define this more centrally
+         def convert_units(x):
+@@ -208,7 +209,8 @@ class Nominal(Scale):
+             # keep = x.isin(units_seed)
+             keep = np.array([x_ in units_seed for x_ in x], bool)
+             out = np.full(len(x), np.nan)
+-            out[keep] = axis.convert_units(stringify(x[keep]))
++            if keep.any():
++                out[keep] = axis.convert_units(stringify(x[keep]))
+             return out
+ 
+         new._pipeline = [
+diff --git a/tests/_core/test_plot.py b/tests/_core/test_plot.py
+index 03a6491..b87d589 100644
+--- a/tests/_core/test_plot.py
++++ b/tests/_core/test_plot.py
+@@ -365,6 +365,60 @@ class TestScaling:
+         ax = p._figure.axes[0]
+         assert ax.yaxis.convert_units("3") == 2
+ 
++    def test_nominal_x_axis_tweaks(self):
++
++        p1 = Plot(x=["a", "b", "c"], y=[1, 2, 3]).theme({"axes.grid": True})
++        ax1 = p1.plot()._figure.axes[0]
++        assert ax1.get_xlim() == (-0.5, 2.5)
++        assert not any(line.get_visible() for line in ax1.xaxis.get_gridlines())
++        assert all(line.get_visible() for line in ax1.yaxis.get_gridlines())
++        assert not ax1.yaxis_inverted()
++
++        p2 = p1.scale(x=Nominal(order=["a", "b", "c", "d"])).add(MockMark())
++        ax2 = p2.plot()._figure.axes[0]
++        assert ax2.get_xlim() == (-0.5, 3.5)
++        assert not any(line.get_visible() for line in ax2.xaxis.get_gridlines())
++
++        p3 = p1.limit(x=("b", None))
++        ax3 = p3.plot()._figure.axes[0]
++        assert ax3.get_xlim() == (0.5, 2.5)
++        assert not any(line.get_visible() for line in ax3.xaxis.get_gridlines())
++
++    def test_nominal_y_axis_tweaks(self):
++
++        p1 = Plot(x=[1, 2, 3], y=["a", "b", "c"]).theme({"axes.grid": True})
++        ax1 = p1.plot()._figure.axes[0]
++        assert ax1.get_ylim() == (2.5, -0.5)
++        assert ax1.yaxis_inverted()
++        assert not any(line.get_visible() for line in ax1.yaxis.get_gridlines())
++        assert all(line.get_visible() for line in ax1.xaxis.get_gridlines())
++
++        p2 = Plot(x=[1, 2, 3], y=[10, 20, 30]).scale(y=Nominal()).add(MockMark())
++        ax2 = p2.plot()._figure.axes[0]
++        assert ax2.get_ylim() == (2.5, -0.5)
++        assert ax2.yaxis_inverted()
++        assert not any(line.get_visible() for line in ax2.yaxis.get_gridlines())
++
++    def test_nominal_facets_and_pairs_tweaks(self):
++
++        p1 = (
++            Plot(y=["a", "b", "a", "c", "d"])
++            .facet(row=["r1", "r1", "r2", "r2", "r2"])
++            .share(y=False)
++            .plot()
++        )
++        ax1, ax2 = p1._figure.axes
++        assert ax1.get_ylim() == (1.5, -0.5)
++        assert ax2.get_ylim() == (2.5, -0.5)
++
++        df = pd.DataFrame({"a": ["x", "y", "z"], "n": [1.0, 2.0, 3.0]})
++        p2 = Plot(df, x="n").pair(y=["a", "n"]).theme({"axes.grid": True}).plot()
++        ax_nom, ax_con = p2._figure.axes
++        assert ax_nom.get_ylim() == (2.5, -0.5)
++        assert not any(line.get_visible() for line in ax_nom.yaxis.get_gridlines())
++        assert not ax_con.yaxis_inverted()
++        assert all(line.get_visible() for line in ax_con.yaxis.get_gridlines())
++
+     @pytest.mark.xfail(reason="Temporal auto-conversion not implemented")
+     def test_categorical_as_datetime(self):
+ 

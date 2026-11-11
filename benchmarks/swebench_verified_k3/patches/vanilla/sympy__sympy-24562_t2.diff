@@ -1,0 +1,46 @@
+diff --git a/sympy/core/numbers.py b/sympy/core/numbers.py
+index 52f7ea4..e166a2b 100644
+--- a/sympy/core/numbers.py
++++ b/sympy/core/numbers.py
+@@ -1625,19 +1625,20 @@ def __new__(cls, p, q=None, gcd=None):
+             q = 1
+             gcd = 1
+ 
++        if not isinstance(q, SYMPY_INTS):
++            q = Rational(q)
++            qdiv = q.q
++            q = q.p
++        else:
++            qdiv = 1
++            q = int(q)
+         if not isinstance(p, SYMPY_INTS):
+             p = Rational(p)
+             q *= p.q
+             p = p.p
+         else:
+             p = int(p)
+-
+-        if not isinstance(q, SYMPY_INTS):
+-            q = Rational(q)
+-            p *= q.q
+-            q = q.p
+-        else:
+-            q = int(q)
++        p *= qdiv
+ 
+         # p and q are now ints
+         if q == 0:
+diff --git a/sympy/core/tests/test_numbers.py b/sympy/core/tests/test_numbers.py
+index 8baf408..4dca747 100644
+--- a/sympy/core/tests/test_numbers.py
++++ b/sympy/core/tests/test_numbers.py
+@@ -368,6 +368,9 @@ def test_Rational_new():
+     n = Rational(2, -4, gcd=1)
+     assert n.q == 4
+     assert n.p == -2
++    assert Rational('0.5', '100') == Rational(1, 200)
++    assert Rational('0.5', 100) == Rational(1, 200)
++    assert Rational(0.5, '100') == Rational(1, 200)
+ 
+ 
+ def test_Number_new():

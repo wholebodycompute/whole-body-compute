@@ -1,0 +1,126 @@
+schema_version: '1.0'
+namespace: wbc
+id: linear-issue-sync
+name: Linear Active Cycle Foveal Issue Sync
+version: 1.0.0
+description: Captures active cycle issues from Linear desktop (`com.linear`) via zero-screenshot
+  AXOutline/AXStaticText Foveal DOM inspection into local JSON.
+license: Apache-2.0
+author: Whole Body Compute Official Hub
+tags:
+- linear
+- issues
+- roadmap
+- pm
+- foveal
+triggers:
+- linear issue sync
+- sync linear cycle
+- active linear issues
+destructive: false
+timeout_total_ms: 30000
+app_compatibility:
+  platforms:
+  - macos
+  min_wbc_version: 0.1.0
+  target_apps:
+  - app_name: Linear
+    bundle_id: com.linear
+    min_app_version: 1.20.0
+    required: true
+  required_clis:
+  - body
+parameters:
+  output_path:
+    type: path
+    description: Synced cycle snapshot path
+    default: ./linear_active_cycle.json
+    required: false
+preconditions:
+- getter_type: cli_installed
+  target: body
+  description: Whole Body Compute CLI installed
+steps:
+- name: Focus Linear Desktop App
+  action: activate_app
+  app_name: Linear
+  bundle_id: com.linear
+  timeout_ms: 4000
+  on_failure: abort
+- name: Select Active Cycle AXOutline View
+  action: click
+  app_name: Linear
+  bundle_id: com.linear
+  timeout_ms: 4000
+  on_failure: ignore
+  click_target:
+    target_type: ui_element
+    role: AXOutline
+    title: Active
+    relative_to: window
+- name: Capture Foveal Accessibility Issue Tree to JSON
+  action: run_shell
+  timeout_ms: 8000
+  on_failure: abort
+  command: body eyes --app Linear --max-elements 40 --json > ${output_path}
+  postconditions:
+  - getter_type: file_nonempty
+    target: ${output_path}
+    description: Linear DOM snapshot written
+postconditions:
+- getter_type: file_nonempty
+  target: ${output_path}
+  description: Verified Linear issue sync artifact
+success_summary: Completed Linear Active Cycle Foveal Issue Sync deterministically
+  at $0.00 cloud token cost
+error_summary: Linear Active Cycle Foveal Issue Sync halted safely at {step_name}
+tier_summary:
+  archetype: project_tracker_sync
+  raw_step_count: 5
+  compiled_step_count: 3
+  dominant_tier: TIER_2_SEMANTIC_UI
+  tier_breakdown:
+    TIER_2_SEMANTIC_UI: 3
+  reliability_score: 0.94
+  contracts_attached:
+  - linear_foveal_sync_contract
+  fallback_ladder:
+  - 'ir_1_linear_foveal: TIER_2_SEMANTIC_UI -> TIER_1_5_BROWSER_DOM_JS'
+contract_summary:
+  contracts:
+  - name: linear_foveal_sync_contract
+    preconditions:
+    - LINEAR_APP_ACCESSIBLE
+    - AX_TRUSTED
+    idempotency_strategy: UPSERT_BY_ISSUE_IDENTIFIER
+    natural_key_fields:
+    - issue_id
+    postconditions:
+    - CYCLE_SNAPSHOT_NONEMPTY
+  ssa_edges: []
+procedural_dna:
+  archetype: project_tracker_sync
+  dominant_tier: TIER_2_SEMANTIC_UI
+  ir_signature_hash: e0882c1073cd9890
+  estimated_cloud_tokens_saved: 54000
+  estimated_usd_saved_per_run: 0.27
+  zero_pii_attestation:
+    sanitized: true
+    contains_credentials: false
+    contains_personal_paths: false
+    redaction_engine: whole_body_compute.procedural_telemetry
+    pii_patterns_checked:
+    - credentials
+    - personal_paths
+    - emails
+    - ssn
+    - public_ipv4
+    - vascular_egress
+signature:
+  algorithm: ed25519+sha256
+  key_id: wbc-hub-official-2026-ed25519
+  public_key: BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=
+  canonical_payload_sha256: 951b30fc13d4bceef4daf76ddca689a202b186522f88250a63d9627a5eaed7d3
+  hoare_contract_sha256: af54bd836be671bcb839def5966a91d0b5416ee3a5ad3930267157936e335791
+  ed25519_signature: ZMAet+lcHsGKHTAN0Amf37hxKoFO2vAI2K4mqQS6tDEphND6TIqg7dincH+JmsNi1gVhf3wT2H8Z6qiQT06uBg==
+  signed_at: '2026-11-10T18:00:00Z'

@@ -1,0 +1,122 @@
+diff --git a/seaborn/_core/plot.py b/seaborn/_core/plot.py
+index 4f0290a..a694e5e 100644
+--- a/seaborn/_core/plot.py
++++ b/seaborn/_core/plot.py
+@@ -25,7 +25,7 @@ from seaborn._marks.base import Mark
+ from seaborn._stats.base import Stat
+ from seaborn._core.data import PlotData
+ from seaborn._core.moves import Move
+-from seaborn._core.scales import Scale
++from seaborn._core.scales import Scale, Nominal
+ from seaborn._core.subplots import Subplots
+ from seaborn._core.groupby import GroupBy
+ from seaborn._core.properties import PROPERTIES, Property
+@@ -1631,10 +1631,25 @@ class Plotter:
+             ax = sub["ax"]
+             for axis in "xy":
+                 axis_key = sub[axis]
++                axis_obj = getattr(ax, f"{axis}axis")
++
++                # Axis limits and Nominal scale defaults
++                scale = (
++                    self._scales.get(axis_key)
++                    or self._scales.get(f"{axis_key}min")
++                    or self._scales.get(f"{axis_key}max")
++                )
++                if isinstance(scale, Nominal):
++                    axis_obj.grid(False)
++                    n = len(axis_obj.get_majorticklocs())
++                    if n:
++                        lo, hi = -.5, n - .5
++                        if axis == "y":
++                            lo, hi = hi, lo
++                        getattr(ax, f"set_{axis}lim")(lo, hi, auto=None)
+ 
+-                # Axis limits
+                 if axis_key in p._limits:
+-                    convert_units = getattr(ax, f"{axis}axis").convert_units
++                    convert_units = axis_obj.convert_units
+                     a, b = p._limits[axis_key]
+                     lo = a if a is None else convert_units(a)
+                     hi = b if b is None else convert_units(b)
+diff --git a/seaborn/_core/scales.py b/seaborn/_core/scales.py
+index bbd71ec..d333e77 100644
+--- a/seaborn/_core/scales.py
++++ b/seaborn/_core/scales.py
+@@ -157,7 +157,7 @@ class Nominal(Scale):
+             new = new.label()
+ 
+         # TODO flexibility over format() which isn't great for numbers / dates
+-        stringify = np.vectorize(format)
++        stringify = np.vectorize(format, otypes=["U"])
+ 
+         units_seed = categorical_order(data, new.order)
+ 
+diff --git a/tests/_core/test_plot.py b/tests/_core/test_plot.py
+index 03a6491..e1dfe69 100644
+--- a/tests/_core/test_plot.py
++++ b/tests/_core/test_plot.py
+@@ -613,6 +613,63 @@ class TestScaling:
+         Plot(y=y).add(MockMark(), s).plot()
+         assert s.scales["y"].__class__.__name__ == "Nominal"
+ 
++    def test_nominal_axis_behavior(self):
++
++        cats = ["a", "b", "c"]
++        nums = [1, 2, 3]
++
++        # Inferred Nominal on x
++        p1 = Plot(x=cats, y=nums).add(MockMark()).plot()
++        ax1 = p1._figure.axes[0]
++        assert ax1.get_xlim() == (-0.5, 2.5)
++        assert not any(line.get_visible() for line in ax1.xaxis.get_gridlines())
++        assert all(line.get_visible() for line in ax1.yaxis.get_gridlines())
++
++        # Inferred Nominal on y (inverted)
++        p2 = Plot(x=nums, y=cats).add(MockMark()).plot()
++        ax2 = p2._figure.axes[0]
++        assert ax2.get_ylim() == (2.5, -0.5)
++        assert not any(line.get_visible() for line in ax2.yaxis.get_gridlines())
++        assert all(line.get_visible() for line in ax2.xaxis.get_gridlines())
++
++        # Explicit Nominal on numeric data and explicit grid style
++        p3 = (
++            Plot(x=nums, y=nums)
++            .scale(y=Nominal(order=[1, 2, 3, 4]))
++            .theme({"axes.grid": True})
++            .add(MockMark())
++            .plot()
++        )
++        ax3 = p3._figure.axes[0]
++        assert ax3.get_ylim() == (3.5, -0.5)
++        assert not any(line.get_visible() for line in ax3.yaxis.get_gridlines())
++
++        # Paired Nominal and Continuous axes
++        p4 = Plot(x=nums).pair(y=[cats, nums]).add(MockMark()).plot()
++        ax4_0, ax4_1 = p4._figure.axes
++        assert ax4_0.get_ylim() == (2.5, -0.5)
++        assert not any(line.get_visible() for line in ax4_0.yaxis.get_gridlines())
++        assert ax4_1.get_ylim()[0] < ax4_1.get_ylim()[1]
++        assert all(line.get_visible() for line in ax4_1.yaxis.get_gridlines())
++
++        # Unshared faceted Nominal axes with different category counts
++        p5 = (
++            Plot(x=["a", "b", "c"], y=[1, 2, 3])
++            .facet(col=["f1", "f2", "f2"])
++            .share(x=False)
++            .add(MockMark())
++            .plot()
++        )
++        ax5_0, ax5_1 = p5._figure.axes
++        assert ax5_0.get_xlim() == (-0.5, 0.5)
++        assert ax5_1.get_xlim() == (-0.5, 1.5)
++
++        # Partial limit override preserves default Nominal bound on unset side
++        p6 = Plot(x=cats, y=nums).limit(x=("b", None)).add(MockMark()).plot()
++        ax6 = p6._figure.axes[0]
++        assert ax6.get_xlim() == (0.5, 2.5)
++        assert not any(line.get_visible() for line in ax6.xaxis.get_gridlines())
++
+     # TODO where should RGB consistency be enforced?
+     @pytest.mark.xfail(
+         reason="Correct output representation for color with identity scale undefined"

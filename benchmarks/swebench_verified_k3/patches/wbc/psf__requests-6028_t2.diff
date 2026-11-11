@@ -1,0 +1,55 @@
+diff --git a/requests/utils.py b/requests/utils.py
+index 1c2ae4e..9fad8bd 100644
+--- a/requests/utils.py
++++ b/requests/utils.py
+@@ -971,6 +971,10 @@ def prepend_scheme_if_needed(url, new_scheme):
+     # netloc and path. Due to a lack of tests on the original defect, this is
+     # maintained with parse_url for backwards compatibility.
+     netloc = parsed.netloc
++    if auth:
++        # parse_url doesn't provide the netloc with auth
++        # so we'll add it ourselves.
++        netloc = '@'.join([auth, netloc or ''])
+     if not netloc:
+         netloc, path = path, netloc
+ 
+diff --git a/tests/test_requests.py b/tests/test_requests.py
+index 29b3aca..585bf95 100644
+--- a/tests/test_requests.py
++++ b/tests/test_requests.py
+@@ -1896,6 +1896,16 @@ class TestRequests:
+         headers = adapter.proxy_headers("http://user:@httpbin.org")
+         assert headers == {'Proxy-Authorization': 'Basic dXNlcjo='}
+ 
++    def test_proxy_auth_preserved_in_get_connection(self):
++        adapter = HTTPAdapter()
++        conn = adapter.get_connection(
++            "https://example.org/",
++            proxies={"https": "http://user:pass@proxy.example.org:8080"},
++        )
++        assert "http://user:pass@proxy.example.org:8080" in adapter.proxy_manager
++        pm = adapter.proxy_manager["http://user:pass@proxy.example.org:8080"]
++        assert pm.proxy_headers == {'Proxy-Authorization': 'Basic dXNlcjpwYXNz'}
++
+     def test_response_json_when_content_is_None(self, httpbin):
+         r = requests.get(httpbin('/status/204'))
+         # Make sure r.content is None
+diff --git a/tests/test_utils.py b/tests/test_utils.py
+index c2186b8..390d9ea 100644
+--- a/tests/test_utils.py
++++ b/tests/test_utils.py
+@@ -602,6 +602,14 @@ def test_parse_header_links(value, expected):
+         ('example.com/path', 'http://example.com/path'),
+         ('//example.com/path', 'http://example.com/path'),
+         ('example.com:80', 'http://example.com:80'),
++        (
++            'http://user:pass@example.com/path?query',
++            'http://user:pass@example.com/path?query'
++        ),
++        (
++            'http://user@example.com/path?query',
++            'http://user@example.com/path?query'
++        ),
+     ))
+ def test_prepend_scheme_if_needed(value, expected):
+     assert prepend_scheme_if_needed(value, 'http') == expected

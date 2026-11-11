@@ -1,0 +1,114 @@
+schema_version: '1.0'
+namespace: wbc
+id: pypi-twine-preflight
+name: Python Wheel & sdist Clean-Room Build Preflight
+version: 1.0.0
+description: Builds Python wheel + sdist distributions via `uv build` and records
+  artifact checksums prior to Trusted Publisher release.
+license: Apache-2.0
+author: Whole Body Compute Official Hub
+tags:
+- pypi
+- python
+- uv
+- packaging
+- release
+triggers:
+- pypi twine preflight
+- verify python wheel
+- preflight pypi build
+destructive: false
+timeout_total_ms: 30000
+app_compatibility:
+  platforms:
+  - macos
+  - linux
+  min_wbc_version: 0.1.0
+  target_apps: []
+  required_clis:
+  - uv
+parameters:
+  dist_dir:
+    type: path
+    description: Target dist directory
+    default: ./dist
+    required: false
+  output_path:
+    type: path
+    description: Artifact checksum manifest
+    default: ./dist_checksums.txt
+    required: false
+preconditions:
+- getter_type: cli_installed
+  target: uv
+  description: uv package builder required
+- getter_type: file_exists
+  target: ./pyproject.toml
+  description: pyproject.toml must exist in workspace
+steps:
+- name: Build Wheel & sdist and Record SHA-256 Checksums
+  action: run_shell
+  timeout_ms: 30000
+  on_failure: abort
+  command: uv build --out-dir ${dist_dir} && shasum -a 256 ${dist_dir}/* > ${output_path}
+  postconditions:
+  - getter_type: file_nonempty
+    target: ${output_path}
+    description: Distribution checksums recorded
+postconditions:
+- getter_type: file_nonempty
+  target: ${output_path}
+  description: PyPI build preflight verified
+success_summary: Completed Python Wheel & sdist Clean-Room Build Preflight deterministically
+  at $0.00 cloud token cost
+error_summary: Python Wheel & sdist Clean-Room Build Preflight halted safely at {step_name}
+tier_summary:
+  archetype: release_packaging_gate
+  raw_step_count: 3
+  compiled_step_count: 1
+  dominant_tier: TIER_0_LOCAL
+  tier_breakdown:
+    TIER_0_LOCAL: 1
+  reliability_score: 0.99
+  contracts_attached:
+  - pypi_build_preflight_contract
+  fallback_ladder:
+  - 'ir_1_uv_build: TIER_0_LOCAL'
+contract_summary:
+  contracts:
+  - name: pypi_build_preflight_contract
+    preconditions:
+    - UV_INSTALLED
+    - PYPROJECT_PRESENT
+    idempotency_strategy: DETERMINISTIC_DIST_BUILD
+    natural_key_fields:
+    - version
+    postconditions:
+    - WHEEL_AND_SDIST_HASHED
+  ssa_edges: []
+procedural_dna:
+  archetype: release_packaging_gate
+  dominant_tier: TIER_0_LOCAL
+  ir_signature_hash: ec78a3227b0a4442
+  estimated_cloud_tokens_saved: 24000
+  estimated_usd_saved_per_run: 0.12
+  zero_pii_attestation:
+    sanitized: true
+    contains_credentials: false
+    contains_personal_paths: false
+    redaction_engine: whole_body_compute.procedural_telemetry
+    pii_patterns_checked:
+    - credentials
+    - personal_paths
+    - emails
+    - ssn
+    - public_ipv4
+    - vascular_egress
+signature:
+  algorithm: ed25519+sha256
+  key_id: wbc-hub-official-2026-ed25519
+  public_key: BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=
+  canonical_payload_sha256: de6dc62cb856f5b77a766f051377c89c521041dfe01142ad467dc1c5717d4f40
+  hoare_contract_sha256: 5166717aec142de764b8ad9d24967a3da578d714cdb81bd05dc38c45eee86984
+  ed25519_signature: /ejzV0kHu1+4XuUyaN4cRDaMg55GRSfArRM0YezZRtaxM7sji1zr8OqtwarwyFXXDLt39MgEXtfVdhMPfHeAAw==
+  signed_at: '2026-11-10T18:00:00Z'

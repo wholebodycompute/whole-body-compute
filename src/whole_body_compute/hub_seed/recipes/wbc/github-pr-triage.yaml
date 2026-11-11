@@ -1,0 +1,121 @@
+schema_version: '1.0'
+namespace: wbc
+id: github-pr-triage
+name: GitHub PR Triage & CI Check Digest
+version: 1.0.0
+description: Queries open pull requests, review states, and failing CI checks via
+  headless `gh` CLI into a deterministic JSON triage artifact at $0.00.
+license: Apache-2.0
+author: Whole Body Compute Official Hub
+tags:
+- github
+- git
+- ci
+- triage
+- devops
+triggers:
+- github pr triage
+- triage pull requests
+- check open prs
+destructive: false
+timeout_total_ms: 30000
+app_compatibility:
+  platforms:
+  - macos
+  - linux
+  min_wbc_version: 0.1.0
+  target_apps:
+  - app_name: Safari
+    bundle_id: com.apple.Safari
+    required: false
+  - app_name: Google Chrome
+    bundle_id: com.google.Chrome
+    required: false
+  required_clis:
+  - gh
+parameters:
+  limit:
+    type: int
+    description: Max open PRs to inspect
+    default: 20
+    required: false
+  output_path:
+    type: path
+    description: Output JSON digest path
+    default: ./pr_triage_digest.json
+    required: false
+preconditions:
+- getter_type: cli_installed
+  target: gh
+  description: GitHub CLI (`gh`) must be installed
+steps:
+- name: Export Open PRs & Check Rollups via Headless gh CLI
+  action: run_shell
+  description: Fetches structured PR metadata without browser screenshots.
+  timeout_ms: 15000
+  on_failure: abort
+  max_retries: 1
+  command: gh pr list --state open --limit ${limit} --json number,title,headRefName,reviewDecision,statusCheckRollup
+    > ${output_path}
+  postconditions:
+  - getter_type: file_nonempty
+    target: ${output_path}
+    description: PR digest JSON must be non-empty
+postconditions:
+- getter_type: file_nonempty
+  target: ${output_path}
+  description: Verified non-empty PR triage report
+success_summary: Completed GitHub PR Triage & CI Check Digest deterministically at
+  $0.00 cloud token cost
+error_summary: GitHub PR Triage & CI Check Digest halted safely at {step_name}
+tier_summary:
+  archetype: code_review_triage
+  raw_step_count: 3
+  compiled_step_count: 1
+  dominant_tier: TIER_1_HEADLESS_API
+  tier_breakdown:
+    TIER_1_HEADLESS_API: 1
+  reliability_score: 0.99
+  contracts_attached:
+  - github_pr_triage_contract
+  fallback_ladder:
+  - 'ir_1_gh_pr_list: TIER_1_HEADLESS_API -> TIER_2_SEMANTIC_UI'
+contract_summary:
+  contracts:
+  - name: github_pr_triage_contract
+    preconditions:
+    - GH_CLI_INSTALLED
+    - REPO_CONTEXT_VALID
+    idempotency_strategy: READ_ONLY_SNAPSHOT_OVERWRITE
+    natural_key_fields:
+    - number
+    - headRefName
+    postconditions:
+    - OUTPUT_JSON_NONEMPTY
+  ssa_edges: []
+procedural_dna:
+  archetype: code_review_triage
+  dominant_tier: TIER_1_HEADLESS_API
+  ir_signature_hash: c6dd3f5af27b2964
+  estimated_cloud_tokens_saved: 48000
+  estimated_usd_saved_per_run: 0.24
+  zero_pii_attestation:
+    sanitized: true
+    contains_credentials: false
+    contains_personal_paths: false
+    redaction_engine: whole_body_compute.procedural_telemetry
+    pii_patterns_checked:
+    - credentials
+    - personal_paths
+    - emails
+    - ssn
+    - public_ipv4
+    - vascular_egress
+signature:
+  algorithm: ed25519+sha256
+  key_id: wbc-hub-official-2026-ed25519
+  public_key: BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=
+  canonical_payload_sha256: aad6bb4d1eb2a3357400e3b3974e63cc7b91c0bcf99a0a811646b0b895ffff6e
+  hoare_contract_sha256: 4c82e58b35d9426fba03e81f49179f4411e95631580ec4cc2c1b5fb5c07e749e
+  ed25519_signature: FcxL1J75bWa3XJdDVyGlJp64UDjKQF+JPU9whY6KxNQ7bkkrQrxHpfE/QB57Et58PpXPmTuiKz4CL9WGqEtABQ==
+  signed_at: '2026-11-10T18:00:00Z'

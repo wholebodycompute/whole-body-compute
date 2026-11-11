@@ -1,0 +1,930 @@
+"""
+Active Listening, Intent Safety, and Conversational Triage Engine.
+Filters non-actionable acoustic mic checks and conversational filler,
+normalizes phonetic spoken code slang, and manages contextual disambiguation.
+"""
+
+import re
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional, Dict, Any, List
+import difflib
+
+from whole_body_compute.stt.biasing import PhoneticNormalizer
+from whole_body_compute.audio.cognitive_safety import (
+    AcousticSafetyDecision,
+    default_cognitive_safety,
+)
+
+
+class SpokenIntentCategory(str, Enum):
+    MIC_CHECK = "MIC_CHECK"
+    CONVERSATIONAL_FILLER = "CONVERSATIONAL_FILLER"
+    PENDING_ANSWER = "PENDING_ANSWER"
+    ACTIONABLE_COMMAND = "ACTIONABLE_COMMAND"
+    ROUTED_COMMAND = "ROUTED_COMMAND"
+    UNSAFE_COMMAND = "UNSAFE_COMMAND"
+    EXPAND_READOUT = "EXPAND_READOUT"
+    IGNORED = "IGNORED"
+    BACKCHANNEL = "BACKCHANNEL"
+    INTERRUPTION = "INTERRUPTION"
+
+
+class SpokenTargetChannel(str, Enum):
+    ANTIGRAVITY = "antigravity"
+    CLAUDE = "claude"
+    GOOSE = "goose"
+    SLACK = "slack"
+    LINEAR = "linear"
+    GENERAL = "general"
+
+
+@dataclass
+class ActiveListeningResult:
+    category: SpokenIntentCategory
+    raw_text: str
+    normalized_text: str
+    is_actionable: bool
+    target_channel: SpokenTargetChannel = SpokenTargetChannel.ANTIGRAVITY
+    routed_prompt: Optional[str] = None
+    target_metadata: Optional[Dict[str, Any]] = None
+    quick_spoken_reply: Optional[str] = None
+    selected_option: Optional[str] = None
+    confidence: float = 1.0
+
+
+class ActiveListeningEngine:
+    """Evaluates developer speech against acoustic safety and intent verification rules."""
+
+    MIC_CHECK_PATTERNS = [
+        r"^(?:(?:okay|ok|hey|hi)\s+)?(?:can|could|do)?\s*(?:you\s+)?(?:hear|hearing)\s+me[\s.?!]*$",
+        r"^(?:mic\s+)?check(?:ing)?(?:\s+(?:one|1|two|2|three|3|check|testing))*[\s.?!]*$",
+        r"^(?:testing|test)(?:\s+(?:one|1|two|2|three|3|mic|audio|check))*[\s.?!]*$",
+        r"^(?:audio|sound|voice)\s+check[\s.?!]*$",
+        r"^(?:is\s+(?:this\s+thing\s+on|anyone\s+there|the\s+mic\s+working))[\s.?!]*$",
+    ]
+
+    CONVERSATIONAL_FILLER_PATTERNS = [
+        r"^(?:okay|ok|nice|cool|sweet|awesome|perfect|thank you|thanks|got it|sounds good|sounds great|no problem|you're welcome|yep|yeah|sure|alright|all right|i see|understood)[\s.?!]*$",
+        r"^(?:okay\s+)?(?:nice\s+)?(?:that\s+)?(?:sounds|looks)\s+(?:great|good|awesome|nice|fine|solid)[\s.?!]*$",
+    ]
+
+    EXPAND_READOUT_PATTERNS = [
+        r"\b(?:tell\s+me\s+everything|read\s+(?:it\s+)?(?:to\s+me\s+)?fully|read\s+(?:the\s+)?whole\s+thing|read\s+(?:it\s+)?all|give\s+me\s+the\s+full\s+(?:report|readout|story)|what\s+else)\b",
+    ]
+
+    # Stop words for word overlap comparison
+    STOP_WORDS = {
+        "the",
+        "a",
+        "an",
+        "is",
+        "it",
+        "to",
+        "in",
+        "on",
+        "of",
+        "and",
+        "or",
+        "for",
+        "do",
+        "you",
+        "we",
+        "i",
+        "now",
+    }
+
+    @classmethod
+    def is_mic_check(cls, text: str) -> bool:
+        """Return True if text is a microphone test or audio check phrase."""
+        if not text or not text.strip():
+            return False
+        clean = text.strip().lower()
+        for pat in cls.MIC_CHECK_PATTERNS:
+            if re.match(pat, clean, re.IGNORECASE):
+                return True
+        # Check repeated check tokens like "check check check check"
+        words = clean.split()
+        if len(words) >= 2 and all(
+            w in ("check", "testing", "test", "one", "two", "three", "1", "2", "3") for w in words
+        ):
+            return True
+        return False
+
+    @classmethod
+    def is_conversational_filler(cls, text: str) -> bool:
+        """Return True if text is conversational filler or non-actionable affirmation."""
+        if not text or not text.strip():
+            return True
+        clean = text.strip().lower()
+        for pat in cls.CONVERSATIONAL_FILLER_PATTERNS:
+            if re.match(pat, clean, re.IGNORECASE):
+                return True
+        return False
+
+    @classmethod
+    def is_expand_readout(cls, text: str) -> bool:
+        """Return True if user asks to expand or read the full turn output."""
+        if not text or not text.strip():
+            return False
+        clean = text.strip().lower()
+        for pat in cls.EXPAND_READOUT_PATTERNS:
+            if re.search(pat, clean, re.IGNORECASE):
+                return True
+        return False
+
+    @classmethod
+    def is_backchannel(cls, text: str) -> bool:
+        """Return True if text is a passive conversational backchannel affirmation."""
+        return default_cognitive_safety.is_backchannel_text(text)
+
+    @classmethod
+    def is_interruption_command(cls, text: str) -> bool:
+        """Return True if text is an explicit barge-in or interruption command."""
+        return default_cognitive_safety.is_interruption_text(text)
+
+    @classmethod
+    def evaluate_barge_in(
+        cls,
+        text: str = "",
+        pcm: Any = None,
+        sample_rate: int = 16000,
+        onset_duration_ms: float = 0.0,
+    ) -> Any:
+        """
+        Sub-80ms Acoustic Cognitive Safety evaluation for full-duplex speech.
+        """
+        if (not text or not text.strip()) and pcm is not None:
+            return default_cognitive_safety.analyze_pcm_frame(
+                pcm=pcm,
+                sample_rate=sample_rate,
+                onset_duration_ms=onset_duration_ms,
+            )
+        return default_cognitive_safety.classify_utterance(
+            text=text,
+            pcm=pcm,
+            sample_rate=sample_rate,
+            onset_duration_ms=onset_duration_ms,
+        )
+
+    @classmethod
+    def trigger_vagus_nerve_barge_in(
+        cls,
+        text: str = "",
+        pcm: Any = None,
+        sample_rate: int = 16000,
+        onset_duration_ms: float = 0.0,
+        execute_kill: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Phase 13.3 — Vagus Nerve Brake: Sub-50ms Acoustic Barge-In -> Goose PID Kill-Switch.
+        Evaluates full-duplex speech via `cognitive_safety.py` and, when an intentional abort
+        ("stop", "wait", "hold on", "cancel") is detected, dispatches `os.killpg(pgid, SIGINT)`
+        to any active Goose process group and rolls back its APFS CoW shadow sandbox.
+        """
+        decision = cls.evaluate_barge_in(
+            text=text,
+            pcm=pcm,
+            sample_rate=sample_rate,
+            onset_duration_ms=onset_duration_ms,
+        )
+        cat_val = getattr(decision.category, "value", str(decision.category))
+        is_abort = cat_val == "INTENTIONAL_INTERRUPTION" or cls.is_interruption_command(text)
+
+        brake_report: Dict[str, Any] = {
+            "halted": False,
+            "killed_sessions": [],
+            "killed_pids": [],
+            "sandboxes_rolled_back": [],
+            "latency_ms": 0.0,
+        }
+        browser_brake_report: Dict[str, Any] = {
+            "triggered": False,
+            "latency_ms": 0.0,
+        }
+        if is_abort and execute_kill:
+            try:
+                from whole_body_compute.integrations.goose_runner import trigger_vagus_nerve_brake
+
+                brake_report = trigger_vagus_nerve_brake(reason=text or decision.reason)
+            except Exception as exc:
+                brake_report["error"] = str(exc)
+
+            try:
+                from whole_body_compute.local.supervisor import trigger_browser_vagus_brake
+
+                browser_brake_report = trigger_browser_vagus_brake(spoken_text=text or decision.reason)
+            except Exception as exc:
+                browser_brake_report["error"] = str(exc)
+
+        return {
+            "interrupted": is_abort,
+            "category": cat_val,
+            "should_stop_tts": bool(getattr(decision, "should_stop_tts", is_abort)),
+            "gain_db": float(getattr(decision, "recommended_tts_gain_db", 0.0)),
+            "reason": getattr(decision, "reason", ""),
+            "vagus_brake": brake_report,
+            "browser_brake": browser_brake_report,
+        }
+
+    @classmethod
+    def inject_dot_preferences(cls, prompt: str, top_k: int = 3) -> str:
+        """
+        Phase 13.1 — Prepend personal facts, consolidated habits, and LGTM edit lessons
+        from `~/.voicefi/dot_memory.db` to an actionable prompt when relevant.
+        """
+        if not prompt or not prompt.strip():
+            return prompt
+        try:
+            from whole_body_compute.local.dot_memory import get_dot_store
+
+            ctx = get_dot_store().build_context_injection(prompt, top_k=top_k)
+            if ctx:
+                return f"{ctx}\n\n{prompt.strip()}"
+        except Exception:
+            pass
+        return prompt
+
+    ORDINAL_INDEX_MAP = {
+        "first": 0,
+        "1st": 0,
+        "one": 0,
+        "1": 0,
+        "second": 1,
+        "2nd": 1,
+        "two": 1,
+        "2": 1,
+        "third": 2,
+        "3rd": 2,
+        "three": 2,
+        "3": 2,
+        "fourth": 3,
+        "4th": 3,
+        "four": 3,
+        "4": 3,
+        "fifth": 4,
+        "5th": 4,
+        "five": 4,
+        "5": 4,
+    }
+
+    @classmethod
+    def match_pending_choice(cls, text: str, pending_question: Dict[str, Any]) -> Optional[str]:
+        """
+        Match spoken response against multiple choices in pending question.
+        Returns the matched canonical option string, or None if no match.
+        Supports:
+          1. Ordinals & indices ("the first one", "option 2", "number 1", "3")
+          2. Relational references ("former", "latter")
+          3. Polar confirmation for binary questions ("yes", "sure" vs "no", "cancel")
+          4. Literal substring matching
+          5. Fuzzy key content word overlap with prefix stemming
+        """
+        if not pending_question or "options" not in pending_question:
+            return None
+
+        clean_text = text.strip().lower()
+        clean_text = re.sub(r"[.,!?;]+$", "", clean_text).strip()
+        norm_clean = re.sub(r"\b(?:please|thanks|thank you)\b", "", clean_text).strip()
+        norm_clean = re.sub(r"\s+", " ", norm_clean)
+        options = pending_question["options"]
+        if not options:
+            return None
+
+        # 1. Ordinal & numeric index matching ("the first one", "option 2", "choice 1", "pick the second option")
+        for candidate_str in (norm_clean, clean_text):
+            idx_match = re.search(
+                r"^(?:(?:go\s+with|pick|choose|select|take|opt\s+for)\s+)?(?:the\s+)?(?:(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|last|final)(?:\s+(?:one|option|choice))?|(?:option|choice|number|#)\s*([1-5]|one|two|three|four|five)|([1-5]))[\s.?!]*$",
+                candidate_str,
+                re.IGNORECASE,
+            )
+            if idx_match:
+                word = (
+                    idx_match.group(1) or idx_match.group(2) or idx_match.group(3) or ""
+                ).lower()
+                if word in ("last", "final"):
+                    return options[-1]
+                mapped_idx = cls.ORDINAL_INDEX_MAP.get(word)
+                if mapped_idx is not None and mapped_idx < len(options):
+                    return options[mapped_idx]
+
+        # 2. Relational references for binary options
+        if len(options) == 2:
+            if re.search(r"\bformer\b", clean_text):
+                return options[0]
+            if re.search(r"\blatter\b", clean_text):
+                return options[1]
+
+            # Binary affirmative / rejection (rejection checked first to prevent "no don't do it" matching "do it")
+            if re.search(r"\b(?:no|nope|nah|cancel|abort|stop|don'?t)\b", clean_text):
+                for opt in options:
+                    if any(w in opt.lower() for w in ("no", "cancel", "abort", "skip", "stop")):
+                        return opt
+                return options[1]
+            elif re.search(
+                r"\b(?:yes|yeah|yep|sure|go\s+ahead|do\s+it|proceed|confirm|sounds\s+good)\b",
+                clean_text,
+            ):
+                for opt in options:
+                    if any(
+                        w in opt.lower()
+                        for w in ("yes", "proceed", "continue", "stage", "confirm", "ship")
+                    ):
+                        return opt
+                return options[0]
+
+        # 3. Exact match against option text
+        for opt in options:
+            opt_clean = opt.strip().lower()
+            if clean_text == opt_clean:
+                return opt
+            if opt_clean in clean_text:
+                return opt
+
+        # 4. Key content word matching
+        text_words = set(re.findall(r"\b[a-z0-9]+\b", clean_text)) - cls.STOP_WORDS
+        best_opt = None
+        best_overlap = 0.0
+        best_opt_len = 0
+
+        for opt in options:
+            opt_words = set(re.findall(r"\b[a-z0-9]+\b", opt.lower())) - cls.STOP_WORDS
+            if not opt_words:
+                continue
+            overlap = text_words.intersection(opt_words)
+            overlap_score = float(len(overlap))
+            # Prefix/stem overlap (e.g. stage <-> staging, deploy <-> deployment)
+            for tw in text_words:
+                for ow in opt_words:
+                    if len(tw) >= 4 and len(ow) >= 4:
+                        if (tw.startswith(ow[:4]) or ow.startswith(tw[:4])) and tw != ow:
+                            overlap_score += 0.8
+            if overlap_score > best_overlap:
+                best_overlap = overlap_score
+                best_opt = opt
+                best_opt_len = len(opt_words)
+
+        # Require meaningful match: at least 0.8 overlap score (e.g. prefix match like stage <-> staging)
+        if best_opt and (
+            best_overlap >= 0.8 or (best_opt_len > 0 and (best_overlap / best_opt_len) >= 0.4)
+        ):
+            return best_opt
+
+        return None
+
+    @classmethod
+    def resolve_target_channel(cls, text: str) -> tuple[SpokenTargetChannel, str, Dict[str, Any]]:
+        """
+        Detect if spoken command is explicitly directed to a specific tool or agent channel
+        (e.g., Claude Code, Slack, Linear, or default Antigravity).
+        """
+        if not text or not text.strip():
+            return SpokenTargetChannel.ANTIGRAVITY, text, {}
+
+        clean = text.strip()
+
+        # 1. Claude Code Direct Routing
+        claude_patterns = [
+            r"^(?:(?:hey|hi|ok|okay)\s+)?(?:ask|tell|have|send\s+to|switch\s+to|message|talk\s+to)\s+claude(?:\s+code)?(?:\s+to|\s*:\s*|\s*,\s*|\s+)\s*(.+)$",
+            r"^(?:(?:can|could)\s+you\s+)?(?:ask|tell|message)\s+claude(?:\s+to|\s+that|\s+)\s*(.+)$",
+            r"^(?:hey\s+)?claude(?:,\s*|\s*:\s*|\s+)(.+)$",
+        ]
+        for pat in claude_patterns:
+            m = re.match(pat, clean, re.IGNORECASE)
+            if m:
+                routed = m.group(1).strip()
+                return SpokenTargetChannel.CLAUDE, routed, {"original_agent": "claude"}
+
+        # 1.5 Goose / Local Sovereign OS Direct Routing
+        goose_patterns = [
+            r"^(?:(?:hey|hi|ok|okay)\s+)?(?:ask|tell|have|send\s+to|switch\s+to|message|talk\s+to)\s+goose(?:\s+to|\s*:\s*|\s*,\s*|\s+)\s*(.+)$",
+            r"^(?:(?:can|could)\s+you\s+)?(?:ask|tell|message)\s+goose(?:\s+to|\s+that|\s+)\s*(.+)$",
+            r"^(?:hey\s+)?goose(?:,\s*|\s*:\s*|\s+)(.+)$",
+        ]
+        for pat in goose_patterns:
+            m = re.match(pat, clean, re.IGNORECASE)
+            if m:
+                routed = m.group(1).strip()
+                return SpokenTargetChannel.GOOSE, routed, {"original_agent": "goose"}
+
+        # 2. Slack Channel Routing
+        slack_explicit_ch = r"^(?:(?:post|send|message|share|drop)\s+(?:in|into|to|on)\s+slack\s+(?:channel\s+)?#?([a-zA-Z0-9_-]+)(?:\s+that|\s+saying|\s*:\s*|\s*,\s*|\s+)\s*(.+))$"
+        slack_general = r"^(?:(?:post|send|message|share|drop)\s+(?:in|into|to|on)\s+slack(?:\s+that|\s+saying|\s*:\s*|\s*,\s*|\s+)\s*(.+))$"
+
+        m_slack_ch = re.match(slack_explicit_ch, clean, re.IGNORECASE)
+        if m_slack_ch:
+            ch_cand = m_slack_ch.group(1).lower().lstrip("#")
+            if ch_cand not in ("that", "this", "saying", "a", "an", "the"):
+                msg = m_slack_ch.group(2).strip()
+                return SpokenTargetChannel.SLACK, msg, {"channel": ch_cand}
+
+        m_slack_gen = re.match(slack_general, clean, re.IGNORECASE)
+        if m_slack_gen:
+            msg = m_slack_gen.group(1).strip()
+            return SpokenTargetChannel.SLACK, msg, {"channel": "general"}
+
+        # 3. Linear Ticket Routing
+        linear_pattern = r"^(?:(?:create|open|log|file|make)\s+(?:a\s+)?(?:new\s+)?linear\s+(?:ticket|issue|bug|task)(?:\s+for|\s+to|\s+titled|\s*:\s*|\s+)?\s*(.+))$"
+        m_linear = re.match(linear_pattern, clean, re.IGNORECASE)
+        if m_linear:
+            title = m_linear.group(1).strip()
+            return SpokenTargetChannel.LINEAR, title, {"title": title}
+
+        # 4. Antigravity Direct Routing
+        ag_pattern = (
+            r"^(?:(?:ask|tell|have|send\s+to)\s+)?antigravity(?:\s+to|\s*:\s*|\s*,\s*|\s+)\s*(.+)$"
+        )
+        m_ag = re.match(ag_pattern, clean, re.IGNORECASE)
+        if m_ag:
+            return (
+                SpokenTargetChannel.ANTIGRAVITY,
+                m_ag.group(1).strip(),
+                {"routed_to": "antigravity"},
+            )
+
+        return SpokenTargetChannel.ANTIGRAVITY, clean, {}
+
+    @classmethod
+    def evaluate(
+        cls,
+        raw_text: str,
+        pending_question: Optional[Dict[str, Any]] = None,
+        is_ambient: bool = False,
+    ) -> ActiveListeningResult:
+        """
+        Evaluate transcribed spoken audio against intent taxonomy.
+        """
+        if not raw_text or not raw_text.strip():
+            return ActiveListeningResult(
+                category=SpokenIntentCategory.CONVERSATIONAL_FILLER,
+                raw_text="",
+                normalized_text="",
+                is_actionable=False,
+            )
+
+        # 1. Spoken Code Normalization
+        normalized_text = PhoneticNormalizer.normalize(raw_text)
+
+        # 2. Check for Mic Check / Audio Test
+        if cls.is_mic_check(raw_text):
+            if pending_question and pending_question.get("question_text"):
+                q_text = pending_question["question_text"]
+                reply = f"Loud and clear! I'm waiting on your choice: {q_text}"
+            else:
+                reply = "Loud and clear! Ready for your command."
+
+            return ActiveListeningResult(
+                category=SpokenIntentCategory.MIC_CHECK,
+                raw_text=raw_text,
+                normalized_text=normalized_text,
+                is_actionable=False,
+                quick_spoken_reply=None if is_ambient else reply,
+            )
+
+        # 3. Check for Pending Question / Choice Match
+        if pending_question:
+            from voicefi.audio.echo_canceller import is_acoustic_echo
+
+            if not is_acoustic_echo(raw_text) and not is_acoustic_echo(normalized_text):
+                matched_option = cls.match_pending_choice(normalized_text, pending_question)
+                if matched_option:
+                    return ActiveListeningResult(
+                        category=SpokenIntentCategory.PENDING_ANSWER,
+                        raw_text=raw_text,
+                        normalized_text=normalized_text,
+                        is_actionable=True,
+                        selected_option=matched_option,
+                    )
+
+        # 3.5 Check for Turn Readout Expansion ("Tell me everything", "Read it fully")
+        if cls.is_expand_readout(raw_text) or cls.is_expand_readout(normalized_text):
+            return ActiveListeningResult(
+                category=SpokenIntentCategory.EXPAND_READOUT,
+                raw_text=raw_text,
+                normalized_text=normalized_text,
+                is_actionable=True,
+            )
+
+        # 3.75 Phase 13.3 — Vagus Nerve Brake: Spoken Interruption / Abort ("Stop", "Hold on", "Cancel")
+        if not pending_question and (
+            cls.is_interruption_command(raw_text) or cls.is_interruption_command(normalized_text)
+        ):
+            vagus_meta = cls.trigger_vagus_nerve_barge_in(
+                text=normalized_text or raw_text,
+                execute_kill=True,
+            )
+            return ActiveListeningResult(
+                category=SpokenIntentCategory.INTERRUPTION,
+                raw_text=raw_text,
+                normalized_text=normalized_text,
+                is_actionable=True,
+                quick_spoken_reply=None if is_ambient else "Stopped.",
+                target_metadata=vagus_meta,
+            )
+
+        # 4. Check for Conversational Filler / Smalltalk
+        if cls.is_conversational_filler(raw_text) or cls.is_conversational_filler(normalized_text):
+            # Check if there is an actionable command attached (e.g. "Looks great, deploy to staging now")
+            has_action_verb = any(
+                re.search(rf"\b{verb}\b", normalized_text, re.IGNORECASE)
+                for verb in [
+                    "deploy",
+                    "build",
+                    "run",
+                    "ship",
+                    "push",
+                    "test",
+                    "fix",
+                    "add",
+                    "create",
+                    "delete",
+                    "stage",
+                ]
+            )
+            if not has_action_verb:
+                return ActiveListeningResult(
+                    category=SpokenIntentCategory.CONVERSATIONAL_FILLER,
+                    raw_text=raw_text,
+                    normalized_text=normalized_text,
+                    is_actionable=False,
+                    quick_spoken_reply=None if is_ambient else "Got it.",
+                )
+
+        # 4.5 Check for Conversational Backchannel ("yeah", "yep", "uh-huh", "mhm", "right", "sure")
+        if not pending_question and (
+            cls.is_backchannel(raw_text) or cls.is_backchannel(normalized_text)
+        ):
+            return ActiveListeningResult(
+                category=SpokenIntentCategory.BACKCHANNEL,
+                raw_text=raw_text,
+                normalized_text=normalized_text,
+                is_actionable=False,
+                quick_spoken_reply=None,
+            )
+
+        # 5. Safety Guardrail: Protect against destructive commands
+        is_unsafe, reason = cls.is_unsafe_command(normalized_text)
+        if is_unsafe:
+            display_cmd = (
+                normalized_text[:60] + "..." if len(normalized_text) > 60 else normalized_text
+            )
+            return ActiveListeningResult(
+                category=SpokenIntentCategory.UNSAFE_COMMAND,
+                raw_text=raw_text,
+                normalized_text=normalized_text,
+                is_actionable=False,
+                quick_spoken_reply=f"Blocked destructive command: '{display_cmd}'. Confirmation required.",
+            )
+
+        # 6. Check for Routed Intent vs Standard Actionable Command
+        target_ch, routed_text, metadata = cls.resolve_target_channel(normalized_text)
+        is_routed = target_ch != SpokenTargetChannel.ANTIGRAVITY
+
+        return ActiveListeningResult(
+            category=SpokenIntentCategory.ROUTED_COMMAND
+            if is_routed
+            else SpokenIntentCategory.ACTIONABLE_COMMAND,
+            raw_text=raw_text,
+            normalized_text=normalized_text,
+            is_actionable=True,
+            target_channel=target_ch,
+            routed_prompt=routed_text,
+            target_metadata=metadata,
+        )
+
+    @classmethod
+    def is_unsafe_command(cls, text: str) -> tuple[bool, str]:
+        """
+        Cognitive guardrail that checks if a command is destructive/irreversible.
+        Uses fast deterministic regexes for standard destructive operations,
+        and local Ollama structured outputs for sub-100ms semantic classification
+        only when destructive keywords are present.
+        """
+        import os
+        import urllib.request
+        import json
+
+        if not text or not text.strip():
+            return (False, "")
+
+        text_clean = text.strip()
+        text_lower = text_clean.lower()
+
+        # 1. Fast deterministic heuristics first: destructive patterns
+        destructive_patterns = [
+            r"\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*)\b",                       # rm -rf, rm -r, rm -f
+            r"\bdrop\s+(table|database|schema|column)\b",                # DROP TABLE, DROP DATABASE
+            r"\btruncate\s+(table)?\b",                                  # TRUNCATE TABLE
+            r"\bdelete\s+from\s+[a-zA-Z0-9_.]+(\s+where\s+1\s*=\s*1|\s*;|\s*$)\b", # DELETE FROM without safe where
+            r"\bgit\s+push\s+.*(--force|-f\b)",                          # git push --force
+            r"\bgit\s+reset\s+--hard\b",                                 # git reset --hard
+            r"\bgit\s+clean\s+(-[a-zA-Z]*[fx][a-zA-Z]*)\b",             # git clean -f, -fd, -fx
+            r"\bgit\s+branch\s+(-[dD]|--delete)\b",                      # git branch -D or -d
+            r"\bwipe\s+(out\s+)?(the\s+)?(database|disk|repo|drive|partition|all\s+data)\b",
+            r"\bnuke\s+(the\s+)?(database|repo|disk|cluster|branch)\b",
+            r"\bdelete\s+(the\s+)?(entire\s+)?(production\s+)?(database|cluster|all\s+files)\b",
+            r"\bdd\s+if=\S+\s+of=\S+\b",                                 # dd if=... of=...
+            r"\bmkfs(\.[a-zA-Z0-9]+)?\b",                                # mkfs.ext4, mkfs
+            r"\bchmod\s+(-[a-zA-Z]*R[a-zA-Z]*\s+)?777\s+/\b",            # chmod 777 /
+            r"\bformat\s+[a-zA-Z]:",                                     # format C:
+            r"\bshred\s+(-[a-zA-Z]+\s+)?",                               # shred
+            r"\bkill\s+-9\s+(-1|1\b)",                                   # kill -9 -1
+        ]
+        for pat in destructive_patterns:
+            if re.search(pat, text_lower):
+                return (True, f"Matched destructive pattern: {pat}")
+
+        # 2. Fast deterministic heuristics: safe actions (transcription, app switching, macOS commands)
+        try:
+            from whole_body_compute.integrations.app_focus import AppFocusRegistry
+
+            is_t, _, _ = AppFocusRegistry.parse_transcribe_intent(text_clean)
+            if is_t:
+                return (False, "")
+        except Exception:
+            pass
+
+        try:
+            from whole_body_compute.integrations.pal_harness import PalHarness
+
+            if PalHarness.is_deterministic_os_command(text_clean):
+                return (False, "")
+        except Exception:
+            pass
+
+        # 3. Fast filter: check if ANY destructive keyword is present
+        # If the utterance does not contain any destructive stem, it cannot be a destructive command
+        destructive_stems = {
+            "rm", "delete", "drop", "wipe", "truncate", "destroy",
+            "format", "erase", "kill", "purge", "reset", "overwrite",
+            "shred", "clean", "force", "discard", "nuke"
+        }
+        tokens = set(re.findall(r"\b[a-z0-9_-]+\b", text_lower))
+        if not tokens.intersection(destructive_stems):
+            return (False, "")
+
+        # 4. Semantic LLM classification (Ollama / Gemma 2)
+        # Disabled by default to prevent false-positive spoken interrupts and battery churn.
+        # Downstream agent & WBC ImmuneGate provide execution-level protection.
+        # Set VOICEFI_ENABLE_SEMANTIC_SAFETY=1 to enable.
+        enable_semantic_llm = os.environ.get("VOICEFI_ENABLE_SEMANTIC_SAFETY", "0") == "1"
+        if not enable_semantic_llm or (
+            os.environ.get("VOICEFI_TESTING") == "1"
+            and not os.environ.get("VOICEFI_TEST_LIVE_OLLAMA")
+        ):
+            return (False, "")
+
+        system_prompt = (
+            "You are VoiceFi's cognitive safety guardrail.\n"
+            "Your job is ONLY to identify whether the user is giving a DESTRUCTIVE execution command to a computer "
+            "(such as permanently deleting files, dropping databases, destroying git history, wiping disks, or killing root system processes).\n\n"
+            "Classification Rules:\n"
+            "- 'unsafe': ONLY explicit commands that permanently destroy files, drop databases, wipe disks, force push over remote branches, or perform destructive irreversible system changes.\n"
+            "- 'safe': All normal conversation, questions, observations, meeting speech, casual chat, affirmations ('yeah', 'cool'), and standard non-destructive developer tasks (reading files, writing code, running tests, editing, git status, git commit).\n\n"
+            "If the text is conversational chatter, personal narrative, or not an explicit destructive action, it MUST be marked 'safe'."
+        )
+
+        payload = {
+            "model": "gemma2:2b",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Input: {text_clean}"},
+            ],
+            "format": {
+                "type": "object",
+                "properties": {
+                    "safety": {"type": "string", "enum": ["safe", "unsafe"]},
+                    "reason": {"type": "string"},
+                },
+                "required": ["safety", "reason"],
+            },
+            "stream": False,
+            "options": {"temperature": 0.0},
+        }
+
+        req = urllib.request.Request(
+            "http://localhost:11434/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=3.0) as response:
+                result = json.loads(response.read().decode())
+                parsed = json.loads(result["message"]["content"])
+                return (parsed.get("safety") == "unsafe", parsed.get("reason", ""))
+        except Exception:
+            return (False, "")
+
+    @classmethod
+    def extract_wakeword_and_prompt(
+        cls,
+        text: str,
+        aliases: Optional[List[str]] = None,
+    ) -> tuple[Optional[str], str]:
+        """
+        Detect if spoken text begins with or contains a wake word (e.g. 'Hey Viv', 'Viv', 'Hey ViFi'),
+        and return (matched_phrase, clean_prompt).
+        If the utterance only contained the wake word, clean_prompt will be empty string.
+        """
+        if not text or not text.strip():
+            return None, ""
+
+        clean = text.strip()
+        try:
+            from whole_body_compute.stt.biasing import PhoneticNormalizer
+
+            clean = PhoneticNormalizer.normalize(clean)
+        except Exception:
+            pass
+
+        claude_names = [
+            "claude",
+            "claud",
+            "clawed",
+            "clod",
+            "glenn",
+            "hagueclaud",
+            "hague claud",
+            "hague claude",
+        ]
+        transcribe_names = [
+            "transcribe",
+            "transcription",
+            "start transcribing",
+            "start dictation",
+            "dictate",
+        ]
+        talk_now_names = [
+            "talk now",
+            "talk-now",
+            "talknow",
+            "tock now",
+            "tok now",
+        ] + transcribe_names
+        pal_phonetic_prefixed = [
+            "hey pay",
+            "hi pay",
+            "ok pay",
+            "okay pay",
+            "yo pay",
+            "talk to pay",
+            "speak to pay",
+            "ask pay",
+            "tell pay",
+            "pay pal",
+            "hey pale",
+            "talk to pale",
+            "hey pow",
+            "talk to pow",
+            "hey pel",
+            "talk to pel",
+            "hey hal",
+            "talk to hal",
+            "hey cal",
+            "talk to cal",
+            "hey bell",
+            "talk to bell",
+        ]
+        default_names = [
+            "voicefi",
+            "voice fi",
+            "voice-fi",
+            "vi-fi",
+            "vi fi",
+            "vifi",
+            "viv",
+            "vive",
+            "vivi",
+            "wi-fi",
+            "wifi",
+            "antigravity",
+            "anti-gravity",
+            "anti gravity",
+            "pal",
+            "paul",
+            "paypal",
+            "brok",
+            "brock",
+            "broc",
+            "brook",
+            "grok",
+        ] + claude_names + talk_now_names
+        prefixes = [
+            "hey",
+            "hi",
+            "okay",
+            "ok",
+            "yo",
+            "hello",
+            "all right",
+            "alright",
+            "so",
+            "talk to",
+            "speak to",
+            "ask",
+            "tell",
+        ]
+
+        all_aliases = list(aliases or []) + pal_phonetic_prefixed
+        for name in default_names:
+            all_aliases.append(name)
+            for p in prefixes:
+                all_aliases.append(f"{p} {name}")
+        for p in ("hey", "hi", "okay", "ok", "yo"):
+            all_aliases.append(f"{p} channel")
+
+        # Sort aliases by length descending so longer phrases match first
+        sorted_aliases = sorted(list(set(all_aliases)), key=lambda a: len(a), reverse=True)
+
+        # Strip optional leading vocal filler (e.g., "Um, Hey Viv", "Uh, Hey Brok")
+        candidate_clean = re.sub(
+            r"^(?:(?:um|uh|ah|er|oh|well|like)[\s,.:;!?-]+)+",
+            "",
+            clean,
+            flags=re.IGNORECASE,
+        ).strip() or clean
+
+        def _normalize_match(matched_phrase: str, raw_remainder: str) -> tuple[str, str]:
+            mp_lower = matched_phrase.lower()
+            has_pfx = any(p in mp_lower for p in prefixes) or "hague" in mp_lower
+            if any(c in mp_lower for c in claude_names):
+                matched_phrase = "hey claude" if has_pfx else "claude"
+            elif any(t in mp_lower for t in transcribe_names):
+                matched_phrase = "transcribe"
+            elif any(t in mp_lower for t in ("talk now", "talk-now", "talknow", "tock now", "tok now")):
+                matched_phrase = "talk now"
+            elif "voice" in mp_lower and "fi" in mp_lower:
+                matched_phrase = "hey voicefi" if has_pfx else "voicefi"
+            elif mp_lower in ("hey vi-fi", "hey vi fi", "hey vifi") and "vifi" in text.lower():
+                matched_phrase = "hey vifi"
+            elif mp_lower in ("vi-fi", "vi fi", "vifi") and "vifi" in text.lower():
+                matched_phrase = "vifi"
+            elif mp_lower in ("hey vi fi",):
+                matched_phrase = "hey vi-fi"
+            elif mp_lower in ("vi fi",):
+                matched_phrase = "vi-fi"
+            elif any(k in mp_lower for k in ("antigravity", "anti-gravity", "anti gravity")):
+                matched_phrase = "hey antigravity" if has_pfx else "antigravity"
+            elif any(
+                k in mp_lower
+                for k in ("pal", "paul", "paypal", "pay", "pale", "pow", "pel", "hal", "cal", "bell")
+            ):
+                matched_phrase = "hey pal" if (has_pfx or mp_lower == "pay pal") else "pal"
+            elif any(k in mp_lower for k in ("brok", "brock", "broc", "brook", "grok")):
+                matched_phrase = "hey brok" if has_pfx else "brok"
+            elif "channel" in mp_lower:
+                matched_phrase = "hey channel"
+
+            remainder = re.sub(r"^[\s,.:;!?-]+", "", raw_remainder or "").strip()
+            # Strip trailing repeated bare wake-word echoes (e.g., "Talk to Pal, Pal." -> remainder="")
+            if remainder:
+                rem_bare = re.sub(r"[\s,.:;!?-]+$", "", remainder).strip().lower()
+                if rem_bare in (
+                    "pal",
+                    "paul",
+                    "pay",
+                    "pale",
+                    "pow",
+                    "pel",
+                    "paypal",
+                    "hey pal",
+                    "hey pay",
+                    "brok",
+                    "brock",
+                    "hey brok",
+                    "viv",
+                    "hey viv",
+                    "vifi",
+                    "vi-fi",
+                    "voicefi",
+                    "claude",
+                    "hey claude",
+                ):
+                    remainder = ""
+            return matched_phrase, remainder
+
+        for alias in sorted_aliases:
+            words = alias.strip().split()
+            pattern_words = r"[\s,.:;!?-]+".join(re.escape(w) for w in words)
+            pattern = rf"^(?:{pattern_words})(?:[\s,.:;!?-]+(.*)|$)"
+            for target_str in (clean, candidate_clean):
+                m = re.match(pattern, target_str, re.IGNORECASE)
+                if m:
+                    return _normalize_match(alias.strip(), m.group(1) or "")
+
+        # Fallback: check if an explicit prefixed wake phrase (e.g., "hey viv", "hey brok")
+        # occurs right after a sentence/clause boundary inside the utterance.
+        prefixed_aliases = [
+            a for a in sorted_aliases if any(a.lower().startswith(f"{p} ") for p in prefixes)
+        ]
+        for alias in prefixed_aliases:
+            words = alias.strip().split()
+            pattern_words = r"[\s,.:;!?-]+".join(re.escape(w) for w in words)
+            mid_pattern = rf"(?:^|[,.:;!?-]\s+|\s+)(?:{pattern_words})(?:[\s,.:;!?-]+(.*)|$)"
+            m = re.search(mid_pattern, clean, re.IGNORECASE)
+            if m:
+                return _normalize_match(alias.strip(), m.group(1) or "")
+
+        return None, clean

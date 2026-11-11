@@ -1,0 +1,630 @@
+{
+  "schema_version": "1.0",
+  "hub_name": "Whole Body Compute Procedural DNA Hub",
+  "hub_url": "https://hub.wholebodycompute.org/index.json",
+  "schema_url": "https://wholebodycompute.org/schemas/pal_workflow_v1.json",
+  "generated_at": "2026-11-10T18:00:00Z",
+  "official_key_id": "wbc-hub-official-2026-ed25519",
+  "official_public_key": "BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=",
+  "total_recipes": 12,
+  "recipes": [
+    {
+      "ref": "wbc/github-pr-triage",
+      "namespace": "wbc",
+      "id": "github-pr-triage",
+      "name": "GitHub PR Triage & CI Check Digest",
+      "version": "1.0.0",
+      "description": "Queries open pull requests, review states, and failing CI checks via headless `gh` CLI into a deterministic JSON triage artifact at $0.00.",
+      "license": "Apache-2.0",
+      "author": "Whole Body Compute Official Hub",
+      "price_usd": 0.0,
+      "tags": [
+        "github",
+        "git",
+        "ci",
+        "triage",
+        "devops"
+      ],
+      "triggers": [
+        "github pr triage",
+        "triage pull requests",
+        "check open prs"
+      ],
+      "destructive": false,
+      "platforms": [
+        "macos",
+        "linux"
+      ],
+      "min_wbc_version": "0.1.0",
+      "target_apps": [
+        {
+          "app_name": "Safari",
+          "bundle_id": "com.apple.Safari",
+          "required": false
+        },
+        {
+          "app_name": "Google Chrome",
+          "bundle_id": "com.google.Chrome",
+          "required": false
+        }
+      ],
+      "required_clis": [
+        "gh"
+      ],
+      "dominant_tier": "TIER_1_HEADLESS_API",
+      "archetype": "code_review_triage",
+      "ir_signature_hash": "c6dd3f5af27b2964",
+      "estimated_cloud_tokens_saved": 48000,
+      "estimated_usd_saved_per_run": 0.24,
+      "steps_count": 1,
+      "hoare_contracts_count": 1,
+      "download_path": "recipes/wbc/github-pr-triage.yaml",
+      "key_id": "wbc-hub-official-2026-ed25519",
+      "public_key": "BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=",
+      "canonical_payload_sha256": "aad6bb4d1eb2a3357400e3b3974e63cc7b91c0bcf99a0a811646b0b895ffff6e",
+      "hoare_contract_sha256": "4c82e58b35d9426fba03e81f49179f4411e95631580ec4cc2c1b5fb5c07e749e",
+      "ed25519_signature": "FcxL1J75bWa3XJdDVyGlJp64UDjKQF+JPU9whY6KxNQ7bkkrQrxHpfE/QB57Et58PpXPmTuiKz4CL9WGqEtABQ==",
+      "signed_at": "2026-11-10T18:00:00Z"
+    },
+    {
+      "ref": "wbc/linear-issue-sync",
+      "namespace": "wbc",
+      "id": "linear-issue-sync",
+      "name": "Linear Active Cycle Foveal Issue Sync",
+      "version": "1.0.0",
+      "description": "Captures active cycle issues from Linear desktop (`com.linear`) via zero-screenshot AXOutline/AXStaticText Foveal DOM inspection into local JSON.",
+      "license": "Apache-2.0",
+      "author": "Whole Body Compute Official Hub",
+      "price_usd": 0.0,
+      "tags": [
+        "linear",
+        "issues",
+        "roadmap",
+        "pm",
+        "foveal"
+      ],
+      "triggers": [
+        "linear issue sync",
+        "sync linear cycle",
+        "active linear issues"
+      ],
+      "destructive": false,
+      "platforms": [
+        "macos"
+      ],
+      "min_wbc_version": "0.1.0",
+      "target_apps": [
+        {
+          "app_name": "Linear",
+          "bundle_id": "com.linear",
+          "min_app_version": "1.20.0",
+          "required": true
+        }
+      ],
+      "required_clis": [
+        "body"
+      ],
+      "dominant_tier": "TIER_2_SEMANTIC_UI",
+      "archetype": "project_tracker_sync",
+      "ir_signature_hash": "e0882c1073cd9890",
+      "estimated_cloud_tokens_saved": 54000,
+      "estimated_usd_saved_per_run": 0.27,
+      "steps_count": 3,
+      "hoare_contracts_count": 1,
+      "download_path": "recipes/wbc/linear-issue-sync.yaml",
+      "key_id": "wbc-hub-official-2026-ed25519",
+      "public_key": "BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=",
+      "canonical_payload_sha256": "951b30fc13d4bceef4daf76ddca689a202b186522f88250a63d9627a5eaed7d3",
+      "hoare_contract_sha256": "af54bd836be671bcb839def5966a91d0b5416ee3a5ad3930267157936e335791",
+      "ed25519_signature": "ZMAet+lcHsGKHTAN0Amf37hxKoFO2vAI2K4mqQS6tDEphND6TIqg7dincH+JmsNi1gVhf3wT2H8Z6qiQT06uBg==",
+      "signed_at": "2026-11-10T18:00:00Z"
+    },
+    {
+      "ref": "wbc/stripe-csv-export",
+      "namespace": "wbc",
+      "id": "stripe-csv-export",
+      "name": "Stripe Balance & Payout Reconciliation Export",
+      "version": "1.0.0",
+      "description": "Exports parameterized Stripe balance transactions via official `stripe` CLI into a deterministic local audit artifact with zero dashboard screenshots.",
+      "license": "Apache-2.0",
+      "author": "Whole Body Compute Official Hub",
+      "price_usd": 0.0,
+      "tags": [
+        "stripe",
+        "finops",
+        "csv",
+        "accounting",
+        "billing"
+      ],
+      "triggers": [
+        "stripe csv export",
+        "export stripe payouts",
+        "stripe reconciliation"
+      ],
+      "destructive": false,
+      "platforms": [
+        "macos",
+        "linux"
+      ],
+      "min_wbc_version": "0.1.0",
+      "target_apps": [
+        {
+          "app_name": "Google Chrome",
+          "bundle_id": "com.google.Chrome",
+          "required": false
+        }
+      ],
+      "required_clis": [
+        "stripe"
+      ],
+      "dominant_tier": "TIER_1_HEADLESS_API",
+      "archetype": "finops_ledger_export",
+      "ir_signature_hash": "4cbb1d4fc3c768b8",
+      "estimated_cloud_tokens_saved": 62000,
+      "estimated_usd_saved_per_run": 0.31,
+      "steps_count": 1,
+      "hoare_contracts_count": 1,
+      "download_path": "recipes/wbc/stripe-csv-export.yaml",
+      "key_id": "wbc-hub-official-2026-ed25519",
+      "public_key": "BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=",
+      "canonical_payload_sha256": "92cb31883ec4280df4d4c502fc057607b65444c960f1a52731589c1c28d601a2",
+      "hoare_contract_sha256": "90ba3eff289c63099190038580158d18edab6656440ed222d125119324816ed5",
+      "ed25519_signature": "BImwS30Rp+iwbfiZMl441FvWLYy/1DQxRGMz5l5/Q4lhOPQIVAb+S9bVWSaFGlAR0hPxHrh1siUsBCUSWNnNAQ==",
+      "signed_at": "2026-11-10T18:00:00Z"
+    },
+    {
+      "ref": "wbc/cloudflare-deploy-check",
+      "namespace": "wbc",
+      "id": "cloudflare-deploy-check",
+      "name": "Cloudflare Workers & Pages Deployment Audit",
+      "version": "1.0.0",
+      "description": "Audits recent Cloudflare Workers deployments via `wrangler` CLI and records active deployment metadata for release verification.",
+      "license": "Apache-2.0",
+      "author": "Whole Body Compute Official Hub",
+      "price_usd": 0.0,
+      "tags": [
+        "cloudflare",
+        "workers",
+        "pages",
+        "deploy",
+        "devops"
+      ],
+      "triggers": [
+        "cloudflare deploy check",
+        "verify cloudflare worker",
+        "wrangler deploy status"
+      ],
+      "destructive": false,
+      "platforms": [
+        "macos",
+        "linux"
+      ],
+      "min_wbc_version": "0.1.0",
+      "target_apps": [
+        {
+          "app_name": "Safari",
+          "bundle_id": "com.apple.Safari",
+          "required": false
+        }
+      ],
+      "required_clis": [
+        "wrangler"
+      ],
+      "dominant_tier": "TIER_1_HEADLESS_API",
+      "archetype": "edge_deployment_verification",
+      "ir_signature_hash": "4fa485f9452305a6",
+      "estimated_cloud_tokens_saved": 39000,
+      "estimated_usd_saved_per_run": 0.195,
+      "steps_count": 1,
+      "hoare_contracts_count": 1,
+      "download_path": "recipes/wbc/cloudflare-deploy-check.yaml",
+      "key_id": "wbc-hub-official-2026-ed25519",
+      "public_key": "BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=",
+      "canonical_payload_sha256": "887ad91818f614e78b7706789a6389ad27189b15869f319edcf29dccf26ae83e",
+      "hoare_contract_sha256": "f806690603d180f14b6446884218b15e6d0b228908556d65ff38865ad771d6a7",
+      "ed25519_signature": "wIe9jhzxQAXUI3o9pbbo/2TYbLWOSk/hfCBusNXIl6DhWbdP83aMN/3lm2zA2A4ypOVwb/19PAnYm/EoNJWiDQ==",
+      "signed_at": "2026-11-10T18:00:00Z"
+    },
+    {
+      "ref": "wbc/slack-daily-digest",
+      "namespace": "wbc",
+      "id": "slack-daily-digest",
+      "name": "Slack Unread Channel Foveal Daily Digest",
+      "version": "1.0.0",
+      "description": "Reads unread Slack channel messages (`com.tinyspeck.slackmacgap`) using <15ms Foveal AXOutline/AXStaticText inspection without requiring admin Slack OAuth bots.",
+      "license": "Apache-2.0",
+      "author": "Whole Body Compute Official Hub",
+      "price_usd": 0.0,
+      "tags": [
+        "slack",
+        "digest",
+        "messaging",
+        "foveal",
+        "morning"
+      ],
+      "triggers": [
+        "slack daily digest",
+        "summarize unread slack",
+        "morning slack check"
+      ],
+      "destructive": false,
+      "platforms": [
+        "macos"
+      ],
+      "min_wbc_version": "0.1.0",
+      "target_apps": [
+        {
+          "app_name": "Slack",
+          "bundle_id": "com.tinyspeck.slackmacgap",
+          "min_app_version": "4.35.0",
+          "required": true
+        }
+      ],
+      "required_clis": [
+        "body"
+      ],
+      "dominant_tier": "TIER_2_SEMANTIC_UI",
+      "archetype": "communication_digest",
+      "ir_signature_hash": "0aa0185b1dee1dfd",
+      "estimated_cloud_tokens_saved": 64000,
+      "estimated_usd_saved_per_run": 0.32,
+      "steps_count": 3,
+      "hoare_contracts_count": 1,
+      "download_path": "recipes/wbc/slack-daily-digest.yaml",
+      "key_id": "wbc-hub-official-2026-ed25519",
+      "public_key": "BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=",
+      "canonical_payload_sha256": "1778f2dca395b86fba4e3d402d66498fb405385614c98da01ae61caa70256b27",
+      "hoare_contract_sha256": "b6e2e0d935160c5f75d32d7ededeebd7f19fbd8f878f05bd1ed0f057a4c12df9",
+      "ed25519_signature": "2nL5mJmpz42llHqkhKjyLPnsfeV1PQnrO6F9SC+pOTb+PYqlD4hKvjh2vdk1Fzj6tc45sNuwfLrJYTw7+MJkCw==",
+      "signed_at": "2026-11-10T18:00:00Z"
+    },
+    {
+      "ref": "wbc/git-release-changelog",
+      "namespace": "wbc",
+      "id": "git-release-changelog",
+      "name": "Deterministic Git Conventional Changelog Builder",
+      "version": "1.0.0",
+      "description": "Synthesizes a clean Markdown release changelog from recent git commit history in <50ms at 100% Tier 0 Local execution.",
+      "license": "Apache-2.0",
+      "author": "Whole Body Compute Official Hub",
+      "price_usd": 0.0,
+      "tags": [
+        "git",
+        "release",
+        "changelog",
+        "markdown",
+        "local"
+      ],
+      "triggers": [
+        "git release changelog",
+        "build changelog",
+        "draft release notes"
+      ],
+      "destructive": false,
+      "platforms": [
+        "macos",
+        "linux"
+      ],
+      "min_wbc_version": "0.1.0",
+      "target_apps": [],
+      "required_clis": [
+        "git"
+      ],
+      "dominant_tier": "TIER_0_LOCAL",
+      "archetype": "git_release",
+      "ir_signature_hash": "4b14e7321a43e29d",
+      "estimated_cloud_tokens_saved": 26000,
+      "estimated_usd_saved_per_run": 0.13,
+      "steps_count": 1,
+      "hoare_contracts_count": 1,
+      "download_path": "recipes/wbc/git-release-changelog.yaml",
+      "key_id": "wbc-hub-official-2026-ed25519",
+      "public_key": "BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=",
+      "canonical_payload_sha256": "54a559820199cf15624c92e80fb5780630a4d87f2e27952042101a6f4ff99467",
+      "hoare_contract_sha256": "6daaed4aa88e269f2cd993872aff7ebfce22ea9c03eb1a545bd6f900343ee03f",
+      "ed25519_signature": "XJx76hcu2eO06CGo1pkVb94zCkdk1bs9o/QIhqw/NiipcLDZcjZqPXhlgEmJdDxohqLV757PX9+CBU0DciJJBw==",
+      "signed_at": "2026-11-10T18:00:00Z"
+    },
+    {
+      "ref": "wbc/sentry-crash-triage",
+      "namespace": "wbc",
+      "id": "sentry-crash-triage",
+      "name": "Local Crash Log & Stacktrace AST Triage",
+      "version": "1.0.0",
+      "description": "Runs on-device `body scout` over noisy crash/application logs to extract the innermost failing stack frame and source slice with zero cloud log uploads.",
+      "license": "Apache-2.0",
+      "author": "Whole Body Compute Official Hub",
+      "price_usd": 0.0,
+      "tags": [
+        "sentry",
+        "logs",
+        "debugging",
+        "crash",
+        "scout"
+      ],
+      "triggers": [
+        "sentry crash triage",
+        "triage crash log",
+        "scout traceback"
+      ],
+      "destructive": false,
+      "platforms": [
+        "macos",
+        "linux"
+      ],
+      "min_wbc_version": "0.1.0",
+      "target_apps": [],
+      "required_clis": [
+        "body"
+      ],
+      "dominant_tier": "TIER_0_LOCAL",
+      "archetype": "crash_log_triage",
+      "ir_signature_hash": "d248e8107eb34b79",
+      "estimated_cloud_tokens_saved": 58000,
+      "estimated_usd_saved_per_run": 0.29,
+      "steps_count": 1,
+      "hoare_contracts_count": 1,
+      "download_path": "recipes/wbc/sentry-crash-triage.yaml",
+      "key_id": "wbc-hub-official-2026-ed25519",
+      "public_key": "BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=",
+      "canonical_payload_sha256": "e445526190f0444a39dc4c848f5862b20ce62347ec9c88a7c140ad7e5eb41388",
+      "hoare_contract_sha256": "0fef552aa194ac95d2d53fd170564335dd3cb24048b0bdda2eb3b5e7f5e12666",
+      "ed25519_signature": "g5XYVehblcRGZIMse7RP19otF95ivGipcg37mIWgMX9oz14rqVxRbb6Hj0VqNoYApfcKfzoxJMw2MhY/bRJeAA==",
+      "signed_at": "2026-11-10T18:00:00Z"
+    },
+    {
+      "ref": "wbc/postgres-schema-snapshot",
+      "namespace": "wbc",
+      "id": "postgres-schema-snapshot",
+      "name": "Zero-Mutation Postgres DDL & Index Drift Snapshot",
+      "version": "1.0.0",
+      "description": "Captures a read-only `--schema-only` PostgreSQL DDL snapshot (`pg_dump`) for migration review without touching row data.",
+      "license": "Apache-2.0",
+      "author": "Whole Body Compute Official Hub",
+      "price_usd": 0.0,
+      "tags": [
+        "postgres",
+        "database",
+        "sql",
+        "schema",
+        "migrations"
+      ],
+      "triggers": [
+        "postgres schema snapshot",
+        "dump db schema",
+        "audit sql drift"
+      ],
+      "destructive": false,
+      "platforms": [
+        "macos",
+        "linux"
+      ],
+      "min_wbc_version": "0.1.0",
+      "target_apps": [],
+      "required_clis": [
+        "pg_dump"
+      ],
+      "dominant_tier": "TIER_0_LOCAL",
+      "archetype": "database_schema_audit",
+      "ir_signature_hash": "d8cce7dba96f44b3",
+      "estimated_cloud_tokens_saved": 31000,
+      "estimated_usd_saved_per_run": 0.155,
+      "steps_count": 1,
+      "hoare_contracts_count": 1,
+      "download_path": "recipes/wbc/postgres-schema-snapshot.yaml",
+      "key_id": "wbc-hub-official-2026-ed25519",
+      "public_key": "BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=",
+      "canonical_payload_sha256": "ec61f6b71d4a553b453a5792c1ea9a84c6edfed1ef97af1e73315502a7b12417",
+      "hoare_contract_sha256": "406bfabd9efc6d6b57fde5fbb5ee9599ff02c587bdeeed02a843457db0f28c3c",
+      "ed25519_signature": "+kedFzUR++iZ/ofg8RxPGDgX+4uxMj8/0wNinoszxPyIts7A4de8Bvw8sq98ljou8u0+rgQ7EdPKsFoT/H8kAQ==",
+      "signed_at": "2026-11-10T18:00:00Z"
+    },
+    {
+      "ref": "wbc/homebrew-tap-audit",
+      "namespace": "wbc",
+      "id": "homebrew-tap-audit",
+      "name": "Homebrew Tap Formula Syntax & SHA-256 Gate",
+      "version": "1.0.0",
+      "description": "Validates Homebrew Ruby formula syntax (`ruby -c`) and records its deterministic SHA-256 release receipt.",
+      "license": "Apache-2.0",
+      "author": "Whole Body Compute Official Hub",
+      "price_usd": 0.0,
+      "tags": [
+        "homebrew",
+        "packaging",
+        "macos",
+        "release",
+        "ruby"
+      ],
+      "triggers": [
+        "homebrew tap audit",
+        "check brew formula",
+        "verify formula syntax"
+      ],
+      "destructive": false,
+      "platforms": [
+        "macos",
+        "linux"
+      ],
+      "min_wbc_version": "0.1.0",
+      "target_apps": [],
+      "required_clis": [
+        "ruby",
+        "shasum"
+      ],
+      "dominant_tier": "TIER_0_LOCAL",
+      "archetype": "release_packaging_gate",
+      "ir_signature_hash": "99ab6094d30a4a01",
+      "estimated_cloud_tokens_saved": 19000,
+      "estimated_usd_saved_per_run": 0.095,
+      "steps_count": 1,
+      "hoare_contracts_count": 1,
+      "download_path": "recipes/wbc/homebrew-tap-audit.yaml",
+      "key_id": "wbc-hub-official-2026-ed25519",
+      "public_key": "BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=",
+      "canonical_payload_sha256": "9e74473866d07ba1b20372d626708cc846aabce99190849a9e4898565eca434a",
+      "hoare_contract_sha256": "c1b6bbf8a2d2269c50f5f69e457864b7bb4a44ea84abb4735b8e8f22427c0b14",
+      "ed25519_signature": "hCjAjMHu0S6eceX2M6QOPOAMyAAVUQbHHIYQR2x77vw3OEDeTWL8e1rmC7pta22ifZ0bdCfC2XV/x8/X2YzZBw==",
+      "signed_at": "2026-11-10T18:00:00Z"
+    },
+    {
+      "ref": "wbc/pypi-twine-preflight",
+      "namespace": "wbc",
+      "id": "pypi-twine-preflight",
+      "name": "Python Wheel & sdist Clean-Room Build Preflight",
+      "version": "1.0.0",
+      "description": "Builds Python wheel + sdist distributions via `uv build` and records artifact checksums prior to Trusted Publisher release.",
+      "license": "Apache-2.0",
+      "author": "Whole Body Compute Official Hub",
+      "price_usd": 0.0,
+      "tags": [
+        "pypi",
+        "python",
+        "uv",
+        "packaging",
+        "release"
+      ],
+      "triggers": [
+        "pypi twine preflight",
+        "verify python wheel",
+        "preflight pypi build"
+      ],
+      "destructive": false,
+      "platforms": [
+        "macos",
+        "linux"
+      ],
+      "min_wbc_version": "0.1.0",
+      "target_apps": [],
+      "required_clis": [
+        "uv"
+      ],
+      "dominant_tier": "TIER_0_LOCAL",
+      "archetype": "release_packaging_gate",
+      "ir_signature_hash": "ec78a3227b0a4442",
+      "estimated_cloud_tokens_saved": 24000,
+      "estimated_usd_saved_per_run": 0.12,
+      "steps_count": 1,
+      "hoare_contracts_count": 1,
+      "download_path": "recipes/wbc/pypi-twine-preflight.yaml",
+      "key_id": "wbc-hub-official-2026-ed25519",
+      "public_key": "BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=",
+      "canonical_payload_sha256": "de6dc62cb856f5b77a766f051377c89c521041dfe01142ad467dc1c5717d4f40",
+      "hoare_contract_sha256": "5166717aec142de764b8ad9d24967a3da578d714cdb81bd05dc38c45eee86984",
+      "ed25519_signature": "/ejzV0kHu1+4XuUyaN4cRDaMg55GRSfArRM0YezZRtaxM7sji1zr8OqtwarwyFXXDLt39MgEXtfVdhMPfHeAAw==",
+      "signed_at": "2026-11-10T18:00:00Z"
+    },
+    {
+      "ref": "wbc/docker-container-vitals",
+      "namespace": "wbc",
+      "id": "docker-container-vitals",
+      "name": "Docker & Colima Container Memory/OOM Sweep",
+      "version": "1.0.0",
+      "description": "Captures a non-streaming JSON snapshot of running container CPU, RSS memory, and PID headroom to prevent silent exit-137 OOM kills.",
+      "license": "Apache-2.0",
+      "author": "Whole Body Compute Official Hub",
+      "price_usd": 0.0,
+      "tags": [
+        "docker",
+        "containers",
+        "oom",
+        "vitals",
+        "devops"
+      ],
+      "triggers": [
+        "docker container vitals",
+        "check container memory",
+        "audit docker oom"
+      ],
+      "destructive": false,
+      "platforms": [
+        "macos",
+        "linux"
+      ],
+      "min_wbc_version": "0.1.0",
+      "target_apps": [],
+      "required_clis": [
+        "docker"
+      ],
+      "dominant_tier": "TIER_0_LOCAL",
+      "archetype": "infrastructure_vitals",
+      "ir_signature_hash": "a3edcf4f2ece1a49",
+      "estimated_cloud_tokens_saved": 22000,
+      "estimated_usd_saved_per_run": 0.11,
+      "steps_count": 1,
+      "hoare_contracts_count": 1,
+      "download_path": "recipes/wbc/docker-container-vitals.yaml",
+      "key_id": "wbc-hub-official-2026-ed25519",
+      "public_key": "BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=",
+      "canonical_payload_sha256": "72234975b10c07d13adb707e9b579b95c6e34aae5daa5adf8e739048fbb0b299",
+      "hoare_contract_sha256": "0e75d3844c3b3a18af85ae0ac2e99280c653b628ce0879daf78d7113dbd73edb",
+      "ed25519_signature": "pQUOZM5ZAY2QkzC4t0BBdgcmSJQY6y5GW2fspyEwzcTovlAVWSTFcaJA2hBUVkQx8qssxsQex5WOVamnNfOFCQ==",
+      "signed_at": "2026-11-10T18:00:00Z"
+    },
+    {
+      "ref": "wbc/chrome-tab-research-digest",
+      "namespace": "wbc",
+      "id": "chrome-tab-research-digest",
+      "name": "Chromium & Arc Active Tab Foveal DOM Capture",
+      "version": "1.0.0",
+      "description": "Extracts structured headings, links, and article text from the active browser tab via AXWebArea Foveal DOM in <15ms, avoiding 1.8 MB Retina screenshots.",
+      "license": "Apache-2.0",
+      "author": "Whole Body Compute Official Hub",
+      "price_usd": 0.0,
+      "tags": [
+        "chrome",
+        "arc",
+        "browser",
+        "research",
+        "foveal"
+      ],
+      "triggers": [
+        "chrome tab research digest",
+        "capture browser tab",
+        "foveal read tab"
+      ],
+      "destructive": false,
+      "platforms": [
+        "macos"
+      ],
+      "min_wbc_version": "0.1.0",
+      "target_apps": [
+        {
+          "app_name": "Google Chrome",
+          "bundle_id": "com.google.Chrome",
+          "required": false
+        },
+        {
+          "app_name": "Arc",
+          "bundle_id": "company.thebrowser.Browser",
+          "required": false
+        }
+      ],
+      "required_clis": [
+        "body"
+      ],
+      "dominant_tier": "TIER_2_SEMANTIC_UI",
+      "archetype": "web_collection_extract",
+      "ir_signature_hash": "5e6dced10060c199",
+      "estimated_cloud_tokens_saved": 46000,
+      "estimated_usd_saved_per_run": 0.23,
+      "steps_count": 3,
+      "hoare_contracts_count": 1,
+      "download_path": "recipes/wbc/chrome-tab-research-digest.yaml",
+      "key_id": "wbc-hub-official-2026-ed25519",
+      "public_key": "BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=",
+      "canonical_payload_sha256": "75d95a6985ea0d13c7b34205eb358651004c30f9d72d97a116c1398c1dad9f56",
+      "hoare_contract_sha256": "70dce390265e880ca26db84bdf4d381c6defa6ddab78e13d108fc558d14870e2",
+      "ed25519_signature": "1Pm1t2zPM0azcpobJkg0P/MSuYNEO3l1kxuLhBZpBH0rD0AvMUwW5alEUVRX8OxVV6MvlIxj/WY+4tIjanQ6Cw==",
+      "signed_at": "2026-11-10T18:00:00Z"
+    }
+  ],
+  "signature": {
+    "algorithm": "ed25519+sha256",
+    "key_id": "wbc-hub-official-2026-ed25519",
+    "public_key": "BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=",
+    "canonical_index_sha256": "37e4c68865bc118220016fd267b15d646872144fc81a6398b9c6ed52fe6a63ca",
+    "ed25519_signature": "cTLxJKcAR8YGsNA2FJ9OV7Z/tkk/17rdNS8jbUWE/RCwYQ7AKiCnkBdXRycEMyzs59H5K2AHF4s4fwLTrcalBA==",
+    "signed_at": "2026-11-10T18:00:00Z"
+  }
+}

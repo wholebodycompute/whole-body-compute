@@ -1,0 +1,446 @@
+{
+  "config": {
+    "agent_name": "Gemini 4 Carbon + Whole Body Compute",
+    "benchmark_name": "swebench_verified",
+    "date": "2026-11-10",
+    "run_id": "swebench_verified_wbc_t1",
+    "agent_args": {
+      "model": "Gemini 4 Carbon (Low)",
+      "model_name_or_path": "gemini-4-carbon-low-wbc",
+      "arm": "wbc",
+      "trial": 1,
+      "trials_per_instance_k": 3,
+      "whole_body_compute_enabled": true
+    },
+    "run_command": "uv run python benchmarks/upstream_swebench_verified_harness.py --setup --verify-gold --trials 3",
+    "prompt_sensitivity": false
+  },
+  "results": {
+    "accuracy": 1.0,
+    "pass_at_1_pct": 100.0,
+    "pass_hat_3_pct": 100.0,
+    "pass_at_3_pct": 100.0,
+    "successful_tasks": [
+      "psf__requests-6028",
+      "pytest-dev__pytest-8399",
+      "pydata__xarray-6721",
+      "sympy__sympy-24562",
+      "pallets__flask-5014",
+      "mwaskom__seaborn-3069",
+      "pylint-dev__pylint-6528",
+      "sphinx-doc__sphinx-10435",
+      "django__django-17084",
+      "matplotlib__matplotlib-25960"
+    ],
+    "failed_tasks": [],
+    "total_cost": 15.372781,
+    "latencies": {
+      "psf__requests-6028": {
+        "first_call_timestamp": "2026-11-10",
+        "last_call_timestamp": "2026-11-10",
+        "total_time": 338.0
+      },
+      "pytest-dev__pytest-8399": {
+        "first_call_timestamp": "2026-11-10",
+        "last_call_timestamp": "2026-11-10",
+        "total_time": 412.0
+      },
+      "pydata__xarray-6721": {
+        "first_call_timestamp": "2026-11-10",
+        "last_call_timestamp": "2026-11-10",
+        "total_time": 543.0
+      },
+      "sympy__sympy-24562": {
+        "first_call_timestamp": "2026-11-10",
+        "last_call_timestamp": "2026-11-10",
+        "total_time": 164.0
+      },
+      "pallets__flask-5014": {
+        "first_call_timestamp": "2026-11-10",
+        "last_call_timestamp": "2026-11-10",
+        "total_time": 110.0
+      },
+      "mwaskom__seaborn-3069": {
+        "first_call_timestamp": "2026-11-10",
+        "last_call_timestamp": "2026-11-10",
+        "total_time": 1917.0
+      },
+      "pylint-dev__pylint-6528": {
+        "first_call_timestamp": "2026-11-10",
+        "last_call_timestamp": "2026-11-10",
+        "total_time": 810.0
+      },
+      "sphinx-doc__sphinx-10435": {
+        "first_call_timestamp": "2026-11-10",
+        "last_call_timestamp": "2026-11-10",
+        "total_time": 314.0
+      },
+      "django__django-17084": {
+        "first_call_timestamp": "2026-11-10",
+        "last_call_timestamp": "2026-11-10",
+        "total_time": 733.0
+      },
+      "matplotlib__matplotlib-25960": {
+        "first_call_timestamp": "2026-11-10",
+        "last_call_timestamp": "2026-11-10",
+        "total_time": 1478.0
+      }
+    }
+  },
+  "raw_eval_results": {
+    "total_instances": 10,
+    "submitted_instances": 10,
+    "completed_instances": 10,
+    "resolved_instances": 10,
+    "unresolved_instances": 0,
+    "empty_patch_instances": 0,
+    "error_instances": 0,
+    "resolved_ids": [
+      "psf__requests-6028",
+      "pytest-dev__pytest-8399",
+      "pydata__xarray-6721",
+      "sympy__sympy-24562",
+      "pallets__flask-5014",
+      "mwaskom__seaborn-3069",
+      "pylint-dev__pylint-6528",
+      "sphinx-doc__sphinx-10435",
+      "django__django-17084",
+      "matplotlib__matplotlib-25960"
+    ],
+    "unresolved_ids": [],
+    "error_ids": []
+  },
+  "raw_logging_results": [
+    {
+      "task_id": "psf__requests-6028",
+      "conversation_id": "401575c8-e7c0-4a10-b6d9-d61253a7dcff",
+      "worker_name": "wbc-req6028-t1",
+      "trial": 1,
+      "turns": 20,
+      "wall_seconds": 338.0,
+      "usage": {
+        "input_tokens": 103530,
+        "cache_read_tokens": 1143566,
+        "total_context_tokens": 1247096,
+        "output_tokens": 2735
+      },
+      "cost_usd": 0.468593
+    },
+    {
+      "task_id": "pytest-dev__pytest-8399",
+      "conversation_id": "e5a68298-0144-41aa-a333-3933f1f5209c",
+      "worker_name": "wbc-pyt8399-t1",
+      "trial": 1,
+      "turns": 29,
+      "wall_seconds": 412.0,
+      "usage": {
+        "input_tokens": 114814,
+        "cache_read_tokens": 1658519,
+        "total_context_tokens": 1773333,
+        "output_tokens": 11298
+      },
+      "cost_usd": 0.696908
+    },
+    {
+      "task_id": "pydata__xarray-6721",
+      "conversation_id": "a361635a-e659-4c34-aaa3-1a320286587e",
+      "worker_name": "wbc-xar6721-t1",
+      "trial": 1,
+      "turns": 38,
+      "wall_seconds": 543.0,
+      "usage": {
+        "input_tokens": 125091,
+        "cache_read_tokens": 2132125,
+        "total_context_tokens": 2257216,
+        "output_tokens": 18329
+      },
+      "cost_usd": 0.896555
+    },
+    {
+      "task_id": "sympy__sympy-24562",
+      "conversation_id": "f0f888ca-47c9-48af-994e-fc016d0cd209",
+      "worker_name": "wbc-sym24562-t1",
+      "trial": 1,
+      "turns": 11,
+      "wall_seconds": 164.0,
+      "usage": {
+        "input_tokens": 53563,
+        "cache_read_tokens": 299807,
+        "total_context_tokens": 353370,
+        "output_tokens": 10223
+      },
+      "cost_usd": 0.289763
+    },
+    {
+      "task_id": "pallets__flask-5014",
+      "conversation_id": "93589a53-aea9-4acb-8916-350908a3b77b",
+      "worker_name": "wbc-flk5014-t1",
+      "trial": 1,
+      "turns": 11,
+      "wall_seconds": 110.0,
+      "usage": {
+        "input_tokens": 103478,
+        "cache_read_tokens": 644969,
+        "total_context_tokens": 748447,
+        "output_tokens": 1566
+      },
+      "cost_usd": 0.354742
+    },
+    {
+      "task_id": "mwaskom__seaborn-3069",
+      "conversation_id": "7ce83b56-5c44-46e4-b044-888d0804dfb7",
+      "worker_name": "wbc-sea3069-t1",
+      "trial": 1,
+      "turns": 118,
+      "wall_seconds": 1917.0,
+      "usage": {
+        "input_tokens": 561155,
+        "cache_read_tokens": 15463980,
+        "total_context_tokens": 16025135,
+        "output_tokens": 76617
+      },
+      "cost_usd": 5.13451
+    },
+    {
+      "task_id": "pylint-dev__pylint-6528",
+      "conversation_id": "991351de-7ab0-4929-a689-5dce07e64a1b",
+      "worker_name": "wbc-pyl6528-t1",
+      "trial": 1,
+      "turns": 69,
+      "wall_seconds": 810.0,
+      "usage": {
+        "input_tokens": 238510,
+        "cache_read_tokens": 6517141,
+        "total_context_tokens": 6755651,
+        "output_tokens": 18973
+      },
+      "cost_usd": 2.008124
+    },
+    {
+      "task_id": "sphinx-doc__sphinx-10435",
+      "conversation_id": "0ef5303f-b56c-437e-a91c-038c9db30d8f",
+      "worker_name": "wbc-sph10435-t1",
+      "trial": 1,
+      "turns": 37,
+      "wall_seconds": 314.0,
+      "usage": {
+        "input_tokens": 107516,
+        "cache_read_tokens": 1216629,
+        "total_context_tokens": 1324145,
+        "output_tokens": 5476
+      },
+      "cost_usd": 0.52407
+    },
+    {
+      "task_id": "django__django-17084",
+      "conversation_id": "92d7fff1-cad6-4e63-bfd7-16a342d0e64f",
+      "worker_name": "wbc-dja17084-t1",
+      "trial": 1,
+      "turns": 54,
+      "wall_seconds": 733.0,
+      "usage": {
+        "input_tokens": 156119,
+        "cache_read_tokens": 2889532,
+        "total_context_tokens": 3045651,
+        "output_tokens": 13662
+      },
+      "cost_usd": 1.054088
+    },
+    {
+      "task_id": "matplotlib__matplotlib-25960",
+      "conversation_id": "3e97108b-6500-4495-a9ab-b46713cd799b",
+      "worker_name": "wbc-mpl25960-t1",
+      "trial": 1,
+      "turns": 119,
+      "wall_seconds": 1478.0,
+      "usage": {
+        "input_tokens": 368886,
+        "cache_read_tokens": 14479841,
+        "total_context_tokens": 14848727,
+        "output_tokens": 25974
+      },
+      "cost_usd": 3.945428
+    }
+  ],
+  "total_usage": {
+    "Gemini 4 Carbon (Low)": {
+      "prompt_tokens": 1932662,
+      "cache_read_input_tokens": 46446109,
+      "total_context_tokens": 48378771,
+      "completion_tokens": 184853,
+      "total_tokens": 48563624
+    }
+  },
+  "total_cost": 15.372781,
+  "git_info": {
+    "repository": "https://github.com/wholebodycompute/whole-body-compute",
+    "dataset": "princeton-nlp/SWE-bench_Verified",
+    "split": "test"
+  },
+  "wall_clock_times": {
+    "psf__requests-6028": 338.0,
+    "pytest-dev__pytest-8399": 412.0,
+    "pydata__xarray-6721": 543.0,
+    "sympy__sympy-24562": 164.0,
+    "pallets__flask-5014": 110.0,
+    "mwaskom__seaborn-3069": 1917.0,
+    "pylint-dev__pylint-6528": 810.0,
+    "sphinx-doc__sphinx-10435": 314.0,
+    "django__django-17084": 733.0,
+    "matplotlib__matplotlib-25960": 1478.0
+  },
+  "task_step_counts": {
+    "psf__requests-6028": 20,
+    "pytest-dev__pytest-8399": 29,
+    "pydata__xarray-6721": 38,
+    "sympy__sympy-24562": 11,
+    "pallets__flask-5014": 11,
+    "mwaskom__seaborn-3069": 118,
+    "pylint-dev__pylint-6528": 69,
+    "sphinx-doc__sphinx-10435": 37,
+    "django__django-17084": 54,
+    "matplotlib__matplotlib-25960": 119
+  },
+  "task_metrics": {
+    "psf__requests-6028": {
+      "step_count": 20,
+      "wall_seconds": 338.0,
+      "billed_input_tokens": 103530,
+      "cache_read_tokens": 1143566,
+      "total_context_tokens": 1247096,
+      "net_task_context_tokens": 961136,
+      "output_tokens": 2735,
+      "read_file_calls": 9,
+      "run_command_calls": 11,
+      "edit_file_calls": 2,
+      "cost_usd": 0.468593,
+      "conversation_id": "401575c8-e7c0-4a10-b6d9-d61253a7dcff"
+    },
+    "pytest-dev__pytest-8399": {
+      "step_count": 29,
+      "wall_seconds": 412.0,
+      "billed_input_tokens": 114814,
+      "cache_read_tokens": 1658519,
+      "total_context_tokens": 1773333,
+      "net_task_context_tokens": 1358198,
+      "output_tokens": 11298,
+      "read_file_calls": 20,
+      "run_command_calls": 11,
+      "edit_file_calls": 8,
+      "cost_usd": 0.696908,
+      "conversation_id": "e5a68298-0144-41aa-a333-3933f1f5209c"
+    },
+    "pydata__xarray-6721": {
+      "step_count": 38,
+      "wall_seconds": 543.0,
+      "billed_input_tokens": 125091,
+      "cache_read_tokens": 2132125,
+      "total_context_tokens": 2257216,
+      "net_task_context_tokens": 1713284,
+      "output_tokens": 18329,
+      "read_file_calls": 26,
+      "run_command_calls": 20,
+      "edit_file_calls": 3,
+      "cost_usd": 0.896555,
+      "conversation_id": "a361635a-e659-4c34-aaa3-1a320286587e"
+    },
+    "sympy__sympy-24562": {
+      "step_count": 11,
+      "wall_seconds": 164.0,
+      "billed_input_tokens": 53563,
+      "cache_read_tokens": 299807,
+      "total_context_tokens": 353370,
+      "net_task_context_tokens": 195894,
+      "output_tokens": 10223,
+      "read_file_calls": 9,
+      "run_command_calls": 3,
+      "edit_file_calls": 2,
+      "cost_usd": 0.289763,
+      "conversation_id": "f0f888ca-47c9-48af-994e-fc016d0cd209"
+    },
+    "pallets__flask-5014": {
+      "step_count": 11,
+      "wall_seconds": 110.0,
+      "billed_input_tokens": 103478,
+      "cache_read_tokens": 644969,
+      "total_context_tokens": 748447,
+      "net_task_context_tokens": 591015,
+      "output_tokens": 1566,
+      "read_file_calls": 9,
+      "run_command_calls": 7,
+      "edit_file_calls": 2,
+      "cost_usd": 0.354742,
+      "conversation_id": "93589a53-aea9-4acb-8916-350908a3b77b"
+    },
+    "mwaskom__seaborn-3069": {
+      "step_count": 118,
+      "wall_seconds": 1917.0,
+      "billed_input_tokens": 561155,
+      "cache_read_tokens": 15463980,
+      "total_context_tokens": 16025135,
+      "net_task_context_tokens": 14337853,
+      "output_tokens": 76617,
+      "read_file_calls": 81,
+      "run_command_calls": 63,
+      "edit_file_calls": 3,
+      "cost_usd": 5.13451,
+      "conversation_id": "7ce83b56-5c44-46e4-b044-888d0804dfb7"
+    },
+    "pylint-dev__pylint-6528": {
+      "step_count": 69,
+      "wall_seconds": 810.0,
+      "billed_input_tokens": 238510,
+      "cache_read_tokens": 6517141,
+      "total_context_tokens": 6755651,
+      "net_task_context_tokens": 5768330,
+      "output_tokens": 18973,
+      "read_file_calls": 36,
+      "run_command_calls": 33,
+      "edit_file_calls": 22,
+      "cost_usd": 2.008124,
+      "conversation_id": "991351de-7ab0-4929-a689-5dce07e64a1b"
+    },
+    "sphinx-doc__sphinx-10435": {
+      "step_count": 37,
+      "wall_seconds": 314.0,
+      "billed_input_tokens": 107516,
+      "cache_read_tokens": 1216629,
+      "total_context_tokens": 1324145,
+      "net_task_context_tokens": 794453,
+      "output_tokens": 5476,
+      "read_file_calls": 20,
+      "run_command_calls": 20,
+      "edit_file_calls": 2,
+      "cost_usd": 0.52407,
+      "conversation_id": "0ef5303f-b56c-437e-a91c-038c9db30d8f"
+    },
+    "django__django-17084": {
+      "step_count": 54,
+      "wall_seconds": 733.0,
+      "billed_input_tokens": 156119,
+      "cache_read_tokens": 2889532,
+      "total_context_tokens": 3045651,
+      "net_task_context_tokens": 2272533,
+      "output_tokens": 13662,
+      "read_file_calls": 37,
+      "run_command_calls": 17,
+      "edit_file_calls": 12,
+      "cost_usd": 1.054088,
+      "conversation_id": "92d7fff1-cad6-4e63-bfd7-16a342d0e64f"
+    },
+    "matplotlib__matplotlib-25960": {
+      "step_count": 119,
+      "wall_seconds": 1478.0,
+      "billed_input_tokens": 368886,
+      "cache_read_tokens": 14479841,
+      "total_context_tokens": 14848727,
+      "net_task_context_tokens": 13144766,
+      "output_tokens": 25974,
+      "read_file_calls": 45,
+      "run_command_calls": 36,
+      "edit_file_calls": 36,
+      "cost_usd": 3.945428,
+      "conversation_id": "3e97108b-6500-4495-a9ab-b46713cd799b"
+    }
+  }
+}

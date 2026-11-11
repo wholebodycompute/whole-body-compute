@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Sovereign Foveal Vision & Episodic Memory MCP Server (Organ 4 / Organ 2)
+# Zero-egress stdio MCP server for Goose CLI and VoiceFi autonomous agents.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
+
+exec python3 -m whole_body_compute.integrations.foveal_memory --mcp-stdio "$@"

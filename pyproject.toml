@@ -1,0 +1,121 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "whole-body-compute"
+version = "0.1.0"
+description = "Cut agent token burn with zero accuracy loss on SWE-bench Verified. Local <3ms AST shield, Apple Silicon vision & memory runtime for Claude Code, Cursor & Antigravity."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Jacob Trigg", email = "hello@wholebodycompute.com" }
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: MacOS X",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: System :: Monitoring",
+]
+keywords = [
+    "claude-code",
+    "cursor",
+    "antigravity",
+    "ai-agents",
+    "swebench",
+    "mcp",
+    "apple-silicon",
+    "mlx",
+    "finops",
+    "context-engineering",
+    "tree-sitter",
+    "macos",
+    "whole-body-compute",
+]
+
+dependencies = [
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+    "numpy>=1.24.0",
+    "requests>=2.31.0",
+    "httpx>=0.27.0",
+    "aiohttp>=3.9.0",
+    "psutil>=5.9.0",
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'",
+]
+
+[project.urls]
+Homepage = "https://wholebodycompute.org"
+Commercial = "https://wholebodycompute.com"
+Repository = "https://github.com/wholebodycompute/whole-body-compute"
+Issues = "https://github.com/wholebodycompute/whole-body-compute/issues"
+Patents = "https://wholebodycompute.com/patents"
+
+[project.optional-dependencies]
+polyglot = [
+    "tree-sitter>=0.23.0",
+    "tree-sitter-typescript>=0.23.0",
+    "tree-sitter-javascript>=0.23.0",
+    "tree-sitter-rust>=0.23.0",
+    "tree-sitter-go>=0.23.0",
+    "tree-sitter-java>=0.23.0",
+    "tree-sitter-kotlin>=1.0.0",
+]
+voice = [
+    "voicefi>=1.2.0",
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12.1",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-mock>=3.10.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+body = "whole_body_compute.cli:main"
+wbc = "whole_body_compute.cli:main"
+body-immune-hook = "whole_body_compute.organs.immune:cli_hook_main"
+foveal-vision-mcp = "whole_body_compute.integrations.foveal_memory:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/whole_body_compute"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/README.md",
+    "/LICENSE",
+    "/PATENTS.md",
+    "/pyproject.toml",
+    "/.github/workflows/release_open_core.yml",
+    "/assets/hero-architecture-banner.svg",
+    "/bin/body-immune-hook",
+    "/bin/foveal-vision-mcp",
+    "/docs/audit.py",
+    "/docs/hub",
+    "/docs/open_core.html",
+    "/docs/patents.html",
+    "/docs/schemas/pal_workflow_v1.json",
+    "/schemas/pal_workflow_v1.json",
+    "/scripts/begin.sh",
+    "/src/whole_body_compute",
+    "/tests/test_immune_bbb.py",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+addopts = "--ignore=tests/test_bootstrap_sovereign.py"

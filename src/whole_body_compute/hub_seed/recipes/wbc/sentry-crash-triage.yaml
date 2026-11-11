@@ -1,0 +1,111 @@
+schema_version: '1.0'
+namespace: wbc
+id: sentry-crash-triage
+name: Local Crash Log & Stacktrace AST Triage
+version: 1.0.0
+description: Runs on-device `body scout` over noisy crash/application logs to extract
+  the innermost failing stack frame and source slice with zero cloud log uploads.
+license: Apache-2.0
+author: Whole Body Compute Official Hub
+tags:
+- sentry
+- logs
+- debugging
+- crash
+- scout
+triggers:
+- sentry crash triage
+- triage crash log
+- scout traceback
+destructive: false
+timeout_total_ms: 30000
+app_compatibility:
+  platforms:
+  - macos
+  - linux
+  min_wbc_version: 0.1.0
+  target_apps: []
+  required_clis:
+  - body
+parameters:
+  log_path:
+    type: path
+    description: Target crash or server log path
+    default: ./app.err.log
+    required: true
+  output_path:
+    type: path
+    description: Extracted crash report JSON
+    default: ./crash_triage_slice.json
+    required: false
+preconditions:
+- getter_type: file_exists
+  target: ${log_path}
+  description: Target crash log file must exist
+steps:
+- name: Extract Crash Frame & AST Function Slice on Local Silicon
+  action: run_shell
+  timeout_ms: 15000
+  on_failure: abort
+  command: body scout ${log_path} -q 'Extract innermost failing traceback frame and
+    root cause' --json > ${output_path}
+  postconditions:
+  - getter_type: file_nonempty
+    target: ${output_path}
+    description: Crash slice JSON written
+postconditions:
+- getter_type: file_nonempty
+  target: ${output_path}
+  description: Verified local crash triage output
+success_summary: Completed Local Crash Log & Stacktrace AST Triage deterministically
+  at $0.00 cloud token cost
+error_summary: Local Crash Log & Stacktrace AST Triage halted safely at {step_name}
+tier_summary:
+  archetype: crash_log_triage
+  raw_step_count: 3
+  compiled_step_count: 1
+  dominant_tier: TIER_0_LOCAL
+  tier_breakdown:
+    TIER_0_LOCAL: 1
+  reliability_score: 0.99
+  contracts_attached:
+  - local_crash_triage_contract
+  fallback_ladder:
+  - 'ir_1_body_scout: TIER_0_LOCAL'
+contract_summary:
+  contracts:
+  - name: local_crash_triage_contract
+    preconditions:
+    - LOG_FILE_EXISTS
+    idempotency_strategy: ZERO_EGRESS_LOCAL_PARSE
+    natural_key_fields:
+    - log_path
+    postconditions:
+    - TRIAGE_JSON_NONEMPTY
+  ssa_edges: []
+procedural_dna:
+  archetype: crash_log_triage
+  dominant_tier: TIER_0_LOCAL
+  ir_signature_hash: d248e8107eb34b79
+  estimated_cloud_tokens_saved: 58000
+  estimated_usd_saved_per_run: 0.29
+  zero_pii_attestation:
+    sanitized: true
+    contains_credentials: false
+    contains_personal_paths: false
+    redaction_engine: whole_body_compute.procedural_telemetry
+    pii_patterns_checked:
+    - credentials
+    - personal_paths
+    - emails
+    - ssn
+    - public_ipv4
+    - vascular_egress
+signature:
+  algorithm: ed25519+sha256
+  key_id: wbc-hub-official-2026-ed25519
+  public_key: BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=
+  canonical_payload_sha256: e445526190f0444a39dc4c848f5862b20ce62347ec9c88a7c140ad7e5eb41388
+  hoare_contract_sha256: 0fef552aa194ac95d2d53fd170564335dd3cb24048b0bdda2eb3b5e7f5e12666
+  ed25519_signature: g5XYVehblcRGZIMse7RP19otF95ivGipcg37mIWgMX9oz14rqVxRbb6Hj0VqNoYApfcKfzoxJMw2MhY/bRJeAA==
+  signed_at: '2026-11-10T18:00:00Z'

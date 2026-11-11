@@ -1,0 +1,141 @@
+diff --git a/src/_pytest/python.py b/src/_pytest/python.py
+index 40116ab..c19d2ed 100644
+--- a/src/_pytest/python.py
++++ b/src/_pytest/python.py
+@@ -528,7 +528,7 @@ class Module(nodes.File, PyCollector):
+             autouse=True,
+             scope="module",
+             # Use a unique name to speed up lookup.
+-            name=f"xunit_setup_module_fixture_{self.obj.__name__}",
++            name=f"_xunit_setup_module_fixture_{self.obj.__name__}",
+         )
+         def xunit_setup_module_fixture(request) -> Generator[None, None, None]:
+             if setup_module is not None:
+@@ -557,7 +557,7 @@ class Module(nodes.File, PyCollector):
+             autouse=True,
+             scope="function",
+             # Use a unique name to speed up lookup.
+-            name=f"xunit_setup_function_fixture_{self.obj.__name__}",
++            name=f"_xunit_setup_function_fixture_{self.obj.__name__}",
+         )
+         def xunit_setup_function_fixture(request) -> Generator[None, None, None]:
+             if request.instance is not None:
+@@ -809,7 +809,7 @@ class Class(PyCollector):
+             autouse=True,
+             scope="class",
+             # Use a unique name to speed up lookup.
+-            name=f"xunit_setup_class_fixture_{self.obj.__qualname__}",
++            name=f"_xunit_setup_class_fixture_{self.obj.__qualname__}",
+         )
+         def xunit_setup_class_fixture(cls) -> Generator[None, None, None]:
+             if setup_class is not None:
+@@ -838,7 +838,7 @@ class Class(PyCollector):
+             autouse=True,
+             scope="function",
+             # Use a unique name to speed up lookup.
+-            name=f"xunit_setup_method_fixture_{self.obj.__qualname__}",
++            name=f"_xunit_setup_method_fixture_{self.obj.__qualname__}",
+         )
+         def xunit_setup_method_fixture(self, request) -> Generator[None, None, None]:
+             method = request.function
+diff --git a/src/_pytest/unittest.py b/src/_pytest/unittest.py
+index 719eb4e..3f88d7a 100644
+--- a/src/_pytest/unittest.py
++++ b/src/_pytest/unittest.py
+@@ -144,7 +144,7 @@ def _make_xunit_fixture(
+         scope=scope,
+         autouse=True,
+         # Use a unique name to speed up lookup.
+-        name=f"unittest_{setup_name}_fixture_{obj.__qualname__}",
++        name=f"_unittest_{setup_name}_fixture_{obj.__qualname__}",
+     )
+     def fixture(self, request: FixtureRequest) -> Generator[None, None, None]:
+         if _is_skipped(self):
+diff --git a/testing/python/fixtures.py b/testing/python/fixtures.py
+index 3d5099c..329712b 100644
+--- a/testing/python/fixtures.py
++++ b/testing/python/fixtures.py
+@@ -3610,6 +3610,43 @@ class TestShowFixtures:
+             def foo():
+                 raise NotImplementedError()
+ 
++    def test_show_fixtures_xunit_private(self, pytester: Pytester) -> None:
++        p = pytester.makepyfile(
++            """
++            def setup_module():
++                pass
++
++            def setup_function():
++                pass
++
++            class TestClass:
++                @classmethod
++                def setup_class(cls):
++                    pass
++
++                def setup_method(self):
++                    pass
++
++                def test_1(self):
++                    pass
++            """
++        )
++        result = pytester.runpytest("--fixtures", p)
++        assert result.ret == 0
++        result.stdout.no_fnmatch_line("*xunit_setup_*")
++        result.stdout.no_fnmatch_line("*no docstring available*")
++
++        result = pytester.runpytest("--fixtures", "-v", p)
++        assert result.ret == 0
++        result.stdout.fnmatch_lines_random(
++            [
++                "_xunit_setup_module_fixture_test_show_fixtures_xunit_private [[]module scope[]] -- *",
++                "_xunit_setup_function_fixture_test_show_fixtures_xunit_private -- *",
++                "_xunit_setup_class_fixture_TestClass [[]class scope[]] -- *",
++                "_xunit_setup_method_fixture_TestClass -- *",
++            ]
++        )
++
+ 
+ class TestContextManagerFixtureFuncs:
+     def test_simple(self, pytester: Pytester) -> None:
+diff --git a/testing/test_unittest.py b/testing/test_unittest.py
+index 69bafc2..79e3102 100644
+--- a/testing/test_unittest.py
++++ b/testing/test_unittest.py
+@@ -1438,3 +1438,35 @@ def test_do_cleanups_on_teardown_failure(pytester: Pytester) -> None:
+     passed, skipped, failed = reprec.countoutcomes()
+     assert failed == 2
+     assert passed == 1
++
++
++def test_setup_private_fixtures(pytester: Pytester) -> None:
++    pytester.makepyfile(
++        """
++        import unittest
++
++        class Tests(unittest.TestCase):
++            @classmethod
++            def setUpClass(cls):
++                pass
++
++            def setup_method(self, method):
++                pass
++
++            def test_1(self):
++                pass
++        """
++    )
++    result = pytester.runpytest("--fixtures")
++    assert result.ret == 0
++    result.stdout.no_fnmatch_line("*unittest_*_fixture_Tests*")
++    result.stdout.no_fnmatch_line("*no docstring available*")
++
++    result = pytester.runpytest("--fixtures", "-v")
++    assert result.ret == 0
++    result.stdout.fnmatch_lines_random(
++        [
++            "_unittest_setUpClass_fixture_Tests [[]class scope[]] -- *",
++            "_unittest_setup_method_fixture_Tests -- *",
++        ]
++    )

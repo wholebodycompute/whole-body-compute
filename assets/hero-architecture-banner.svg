@@ -1,0 +1,246 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" width="100%" fill="none" role="img" aria-labelledby="wbcHeroTitle wbcHeroDesc">
+  <title id="wbcHeroTitle">Whole Body Compute ($ body) - The 5-Organ Physiological Runtime Underneath Every Agent</title>
+  <desc id="wbcHeroDesc">Architectural split diagram contrasting a Brain-in-a-Jar default cloud agent burning $0.56/task across 2.1M unfiltered tokens against Whole Body Compute on Apple Silicon slicing AST symbols in 3ms and finishing 3.11x cheaper ($0.14/task) with 100% accuracy.</desc>
+
+  <defs>
+    <pattern id="gridWarm" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M 24 0 L 0 0 0 24" fill="none" stroke="#E4E0D7" stroke-width="0.9"/>
+    </pattern>
+    <pattern id="gridObsidian" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M 24 0 L 0 0 0 24" fill="none" stroke="#23221F" stroke-width="0.9"/>
+    </pattern>
+    <linearGradient id="redGlow" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#FF2A2A" stop-opacity="0"/>
+      <stop offset="50%" stop-color="#FF2A2A" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#FF2A2A" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="softShadow" x="-8%" y="-8%" width="116%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#111110" flood-opacity="0.14"/>
+    </filter>
+    <filter id="redBloom" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="0" stdDeviation="6" flood-color="#FF2A2A" flood-opacity="0.55"/>
+    </filter>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Helvetica, Arial, sans-serif; }
+      .serif { font-family: Georgia, "Instrument Serif", "Times New Roman", serif; }
+      .mono { font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace; }
+      @keyframes ecgBeat {
+        0%, 100% { stroke-opacity: 0.85; stroke-width: 15; }
+        45% { stroke-opacity: 1; stroke-width: 18; }
+      }
+      @keyframes gateLaser {
+        0%, 100% { transform: translateY(-22px); opacity: 0.65; }
+        50% { transform: translateY(22px); opacity: 1; }
+      }
+      @keyframes pulseDot {
+        0%, 100% { r: 4; opacity: 1; }
+        50% { r: 5.5; opacity: 0.55; }
+      }
+      .ecg-anim { animation: ecgBeat 1.4s infinite ease-in-out; }
+      .laser-anim { animation: gateLaser 2.4s infinite ease-in-out; }
+      .dot-anim { animation: pulseDot 1.6s infinite ease-in-out; }
+    </style>
+  </defs>
+
+  <!-- Outer Editorial Frame -->
+  <rect x="2" y="2" width="1196" height="416" rx="18" fill="#FAF8F5" stroke="#CECAC0" stroke-width="2"/>
+  <rect x="2" y="2" width="1196" height="416" rx="18" fill="url(#gridWarm)"/>
+
+  <!-- Blueprint Registration Corners -->
+  <path d="M 18 30 L 18 18 L 30 18" stroke="#111110" stroke-width="1.8" opacity="0.45"/>
+  <path d="M 1182 30 L 1182 18 L 1170 18" stroke="#111110" stroke-width="1.8" opacity="0.45"/>
+  <path d="M 18 390 L 18 402 L 30 402" stroke="#111110" stroke-width="1.8" opacity="0.45"/>
+  <path d="M 1182 390 L 1182 402 L 1170 402" stroke="#111110" stroke-width="1.8" opacity="0.45"/>
+
+  <!-- Top Telemetry Masthead Bar -->
+  <rect x="28" y="22" width="1144" height="42" rx="10" fill="#131312" stroke="#2C2B28" stroke-width="1.2"/>
+  <!-- Window Dots -->
+  <circle cx="48" cy="43" r="4.5" fill="#FF5F56"/>
+  <circle cx="62" cy="43" r="4.5" fill="#FFBD2E"/>
+  <circle cx="76" cy="43" r="4.5" fill="#27C93F"/>
+
+  <!-- Brand Pill inside Top Bar -->
+  <rect x="96" y="30" width="234" height="26" rx="13" fill="#1E1E1C" stroke="#FF2A2A" stroke-width="1" stroke-opacity="0.6"/>
+  <circle class="dot-anim" cx="111" cy="43" r="4" fill="#FF2A2A"/>
+  <text x="123" y="47" class="mono" font-size="11" font-weight="700" fill="#FAF8F5" letter-spacing="0.4">WHOLE BODY COMPUTE · $ body</text>
+
+  <text x="348" y="47" class="mono" font-size="11" font-weight="500" fill="#9A968E">5-Organ Physiological Runtime · Apple Silicon &amp; Linux</text>
+
+  <!-- Right Top Bar Verified Receipt Pill -->
+  <rect x="852" y="30" width="306" height="26" rx="6" fill="#1C1C1A" stroke="#2C2B28" stroke-width="1"/>
+  <text x="1005" y="47" class="mono" font-size="10.5" font-weight="700" fill="#FAF8F5" text-anchor="middle">
+    HAL PARETO: <tspan fill="#FF2A2A">3.11x CHEAPER</tspan> · <tspan fill="#27C93F">100% PASS@1</tspan>
+  </text>
+
+  <!-- ======================================================================= -->
+  <!-- LEFT PANEL: BRAIN IN A JAR (DEFAULT CLOUD AGENT - WITHOUT BODY)         -->
+  <!-- ======================================================================= -->
+  <g filter="url(#softShadow)">
+    <rect x="28" y="80" width="446" height="278" rx="14" fill="#FFFFFF" stroke="#CECAC0" stroke-width="1.5"/>
+  </g>
+
+  <!-- Left Header -->
+  <text x="48" y="108" class="sans" font-size="14" font-weight="700" fill="#484641">Brain in a Jar (Unshielded Agent)</text>
+  <rect x="336" y="93" width="118" height="22" rx="11" fill="#EAE6DF" stroke="#D5D1C8" stroke-width="1"/>
+  <text x="395" y="108" class="mono" font-size="9.5" font-weight="700" fill="#76736B" text-anchor="middle" letter-spacing="0.5">WITHOUT BODY</text>
+  <line x1="48" y1="124" x2="454" y2="124" stroke="#E4E0D7" stroke-width="1"/>
+
+  <!-- Noisy Payload Stack -->
+  <rect x="48" y="138" width="406" height="36" rx="7" fill="#FAF8F5" stroke="#E4E0D7" stroke-width="1.2"/>
+  <text x="62" y="160" class="mono" font-size="11" font-weight="700" fill="#DC2626">✕</text>
+  <text x="80" y="160" class="mono" font-size="11" font-weight="600" fill="#484641">read_file("router.py")</text>
+  <text x="440" y="160" class="mono" font-size="10.5" font-weight="700" fill="#8C8881" text-anchor="end">2,480 lines · 31,400 tok</text>
+
+  <rect x="48" y="182" width="406" height="36" rx="7" fill="#FAF8F5" stroke="#E4E0D7" stroke-width="1.2"/>
+  <text x="62" y="204" class="mono" font-size="11" font-weight="700" fill="#DC2626">✕</text>
+  <text x="80" y="204" class="mono" font-size="11" font-weight="600" fill="#484641">pytest verbose + PNG screenshot</text>
+  <text x="440" y="204" class="mono" font-size="10.5" font-weight="700" fill="#8C8881" text-anchor="end">33,600 tok</text>
+
+  <rect x="48" y="226" width="406" height="36" rx="7" fill="#FEF2F2" stroke="#FECACA" stroke-width="1.2"/>
+  <text x="62" y="248" class="mono" font-size="11" font-weight="700" fill="#DC2626">!</text>
+  <text x="80" y="248" class="mono" font-size="11" font-weight="600" fill="#991B1B">O(N²) Re-Read Tax × 32 Turns</text>
+  <text x="440" y="248" class="mono" font-size="10.5" font-weight="700" fill="#DC2626" text-anchor="end">.env exposed · 2.10M tok</text>
+
+  <!-- Left Bottom Metrics -->
+  <line x1="48" y1="276" x2="454" y2="276" stroke="#E4E0D7" stroke-width="1"/>
+  <rect x="48" y="288" width="128" height="54" rx="8" fill="#F3EFE8" stroke="#E4E0D7" stroke-width="1"/>
+  <text x="60" y="306" class="mono" font-size="9" font-weight="600" fill="#76736B">CONTEXT INGESTED</text>
+  <text x="60" y="329" class="mono" font-size="16" font-weight="700" fill="#484641">2.10M tok</text>
+
+  <rect x="187" y="288" width="128" height="54" rx="8" fill="#F3EFE8" stroke="#E4E0D7" stroke-width="1"/>
+  <text x="199" y="306" class="mono" font-size="9" font-weight="600" fill="#76736B">WALL TIME</text>
+  <text x="199" y="329" class="mono" font-size="16" font-weight="700" fill="#484641">143.2s</text>
+
+  <rect x="326" y="288" width="128" height="54" rx="8" fill="#F3EFE8" stroke="#D5D1C8" stroke-width="1"/>
+  <text x="338" y="306" class="mono" font-size="9" font-weight="600" fill="#76736B">CLOUD API BILL</text>
+  <text x="338" y="329" class="mono" font-size="16" font-weight="700" fill="#76736B">$0.5650</text>
+
+  <!-- ======================================================================= -->
+  <!-- CENTER CHOKE-POINT: ORGAN 05 BLOOD-BRAIN BARRIER & MASCOT               -->
+  <!-- ======================================================================= -->
+  <!-- Flow Connectors Left -> Center -> Right -->
+  <path d="M 474 198 L 514 198" stroke="#CECAC0" stroke-width="2.5" stroke-dasharray="4 4"/>
+  <polygon points="508,194 515,198 508,202" fill="#9A968E"/>
+  <path d="M 666 198 L 704 198" stroke="#FF2A2A" stroke-width="2.8" filter="url(#redBloom)"/>
+  <polygon points="699,193 707,198 699,203" fill="#FF2A2A"/>
+
+  <!-- Packet animation on clean right wire -->
+  <circle r="3.5" fill="#FFFFFF" stroke="#FF2A2A" stroke-width="2">
+    <animateMotion path="M 668 198 L 698 198" dur="1.2s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- Central Choke-Point Pillar -->
+  <g filter="url(#softShadow)">
+    <rect x="514" y="96" width="152" height="246" rx="16" fill="#0D0D0E" stroke="#FF2A2A" stroke-width="2"/>
+  </g>
+
+  <!-- Laser Scan Beam inside Gate -->
+  <line class="laser-anim" x1="522" y1="198" x2="658" y2="198" stroke="#FF2A2A" stroke-width="2" stroke-opacity="0.5"/>
+
+  <text x="590" y="119" class="mono" font-size="9.5" font-weight="700" fill="#FF2A2A" text-anchor="middle" letter-spacing="0.8">ORGAN 05 · BBB</text>
+  <text x="590" y="133" class="mono" font-size="9" font-weight="600" fill="#9A968E" text-anchor="middle">CHOKE-POINT GATE</text>
+
+  <!-- Scaled WBC Reactive Mascot Mark centered at (590, 205) -->
+  <g transform="translate(534, 142) scale(0.218)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 168 122 A 102 102 0 0 1 344 122" stroke="#FF2A2A" stroke-width="15"/>
+    <path d="M 195 152 A 68 68 0 0 1 317 152" stroke="#FF2A2A" stroke-width="14"/>
+    <path d="M 222 182 A 36 36 0 0 1 290 182" stroke="#FF2A2A" stroke-width="13"/>
+    <line x1="210" y1="218" x2="238" y2="218" stroke="#FFFFFF" stroke-width="7"/>
+    <line x1="274" y1="218" x2="302" y2="218" stroke="#FFFFFF" stroke-width="7"/>
+    <rect x="239" y="231" width="34" height="15" rx="7.5" fill="#0A0A0C" stroke="#FF2A2A" stroke-width="2.5"/>
+    <line x1="248" y1="238.5" x2="264" y2="238.5" stroke="#FFFFFF" stroke-width="2.2"/>
+    <path d="M 232 266 Q 256 286 280 266" stroke="#FF2A2A" stroke-width="5"/>
+    <path d="M 146 200 C 146 282, 188 304, 256 304 C 324 304, 366 282, 366 200" stroke="#FFFFFF" stroke-width="10.5"/>
+    <rect x="132" y="170" width="28" height="30" rx="6" fill="#0A0A0C" stroke="#FFFFFF" stroke-width="2.8"/>
+    <circle cx="146" cy="185" r="3.2" fill="#FF2A2A"/>
+    <rect x="352" y="170" width="28" height="30" rx="6" fill="#0A0A0C" stroke="#FFFFFF" stroke-width="2.8"/>
+    <circle cx="366" cy="185" r="3.2" fill="#FF2A2A"/>
+    <line x1="256" y1="304" x2="256" y2="326" stroke="#FFFFFF" stroke-width="11"/>
+    <path d="M 180 352 C 132 352, 119 378, 128 405" stroke="#FFFFFF" stroke-width="10"/>
+    <circle cx="130" cy="416" r="11" fill="#0A0A0C" stroke="#FFFFFF" stroke-width="2.8"/>
+    <circle cx="130" cy="416" r="3.2" fill="#FF2A2A"/>
+    <path d="M 332 352 C 380 352, 393 378, 384 405" stroke="#FFFFFF" stroke-width="10"/>
+    <circle cx="382" cy="416" r="11" fill="#0A0A0C" stroke="#FFFFFF" stroke-width="2.8"/>
+    <circle cx="382" cy="416" r="3.2" fill="#FF2A2A"/>
+    <rect x="180" y="326" width="152" height="104" rx="28" fill="#0A0A0C" stroke="#FFFFFF" stroke-width="10.5"/>
+    <path class="ecg-anim" d="M 204 378 L 232 378 L 245 346 L 258 410 L 271 360 L 282 378 L 308 378" stroke="#FF2A2A" stroke-width="9"/>
+    <line x1="222" y1="430" x2="222" y2="466" stroke="#FFFFFF" stroke-width="11"/>
+    <line x1="290" y1="430" x2="290" y2="466" stroke="#FFFFFF" stroke-width="11"/>
+    <line x1="184" y1="466" x2="244" y2="466" stroke="#FFFFFF" stroke-width="11"/>
+    <line x1="268" y1="466" x2="328" y2="466" stroke="#FFFFFF" stroke-width="11"/>
+  </g>
+
+  <!-- Gate Stats Badges -->
+  <rect x="528" y="256" width="124" height="24" rx="6" fill="#1A1A18" stroke="#FF2A2A" stroke-width="1" stroke-opacity="0.65"/>
+  <text x="590" y="272" class="mono" font-size="10" font-weight="700" fill="#FAF8F5" text-anchor="middle">2.8ms AST Slice</text>
+
+  <rect x="528" y="286" width="124" height="24" rx="6" fill="#1A1A18" stroke="#2C2B28" stroke-width="1"/>
+  <text x="590" y="302" class="mono" font-size="9.5" font-weight="700" fill="#FF2A2A" text-anchor="middle">-98.7% Noise Cut</text>
+
+  <text x="590" y="328" class="mono" font-size="9" font-weight="600" fill="#9A968E" text-anchor="middle">$0.00 Apple Silicon</text>
+
+  <!-- ======================================================================= -->
+  <!-- RIGHT PANEL: EMBODIED AGENT (FRONTIER BRAIN + 5-ORGAN BODY)             -->
+  <!-- ======================================================================= -->
+  <g filter="url(#softShadow)">
+    <rect x="706" y="80" width="466" height="278" rx="14" fill="#131312" stroke="#FF2A2A" stroke-width="2"/>
+    <rect x="708" y="82" width="462" height="274" rx="13" fill="url(#gridObsidian)" opacity="0.7"/>
+  </g>
+
+  <!-- Right Header -->
+  <text x="728" y="108" class="sans" font-size="14" font-weight="700" fill="#FAF8F5">Frontier Brain + 5-Organ Body</text>
+  <rect x="1032" y="93" width="120" height="22" rx="11" fill="#FF2A2A"/>
+  <text x="1092" y="108" class="mono" font-size="9.5" font-weight="700" fill="#FFFFFF" text-anchor="middle" letter-spacing="0.5">WITH $ body</text>
+  <line x1="728" y1="124" x2="1152" y2="124" stroke="#2C2B28" stroke-width="1"/>
+
+  <!-- Clean Surgical Slices -->
+  <rect x="728" y="138" width="424" height="36" rx="7" fill="#1C1C1A" stroke="#2C2B28" stroke-width="1.2"/>
+  <text x="742" y="160" class="mono" font-size="11" font-weight="700" fill="#FF2A2A">✓</text>
+  <text x="760" y="160" class="mono" font-size="11" font-weight="600" fill="#FAF8F5">AST Slice: def route_intent() L142-184</text>
+  <text x="1138" y="160" class="mono" font-size="10.5" font-weight="700" fill="#FF2A2A" text-anchor="end">410 tok</text>
+
+  <rect x="728" y="182" width="424" height="36" rx="7" fill="#1C1C1A" stroke="#2C2B28" stroke-width="1.2"/>
+  <text x="742" y="204" class="mono" font-size="11" font-weight="700" fill="#FF2A2A">✓</text>
+  <text x="760" y="204" class="mono" font-size="11" font-weight="600" fill="#FAF8F5">body eyes AXUIElement DOM + Crash Frame</text>
+  <text x="1138" y="204" class="mono" font-size="10.5" font-weight="700" fill="#FF2A2A" text-anchor="end">4ms · 38 tok</text>
+
+  <rect x="728" y="226" width="424" height="36" rx="7" fill="#1C1C1A" stroke="#FF2A2A" stroke-width="1" stroke-opacity="0.45"/>
+  <text x="742" y="248" class="mono" font-size="11" font-weight="700" fill="#27C93F">●</text>
+  <text x="760" y="248" class="mono" font-size="11" font-weight="600" fill="#FAF8F5">Secrets Redacted · APFS CoW Sandbox</text>
+  <text x="1138" y="248" class="mono" font-size="10.5" font-weight="700" fill="#27C93F" text-anchor="end">0 Leaks · $0 Replay</text>
+
+  <!-- Right Bottom Metrics -->
+  <line x1="728" y1="276" x2="1152" y2="276" stroke="#2C2B28" stroke-width="1"/>
+  <rect x="728" y="288" width="134" height="54" rx="8" fill="#1C1C1A" stroke="#2C2B28" stroke-width="1"/>
+  <text x="740" y="306" class="mono" font-size="9" font-weight="600" fill="#9A968E">CONTEXT INGESTED</text>
+  <text x="740" y="329" class="mono" font-size="16" font-weight="700" fill="#FAF8F5">456k <tspan font-size="11" fill="#FF2A2A">(-78%)</tspan></text>
+
+  <rect x="873" y="288" width="134" height="54" rx="8" fill="#1C1C1A" stroke="#2C2B28" stroke-width="1"/>
+  <text x="885" y="306" class="mono" font-size="9" font-weight="600" fill="#9A968E">WALL TIME</text>
+  <text x="885" y="329" class="mono" font-size="16" font-weight="700" fill="#FAF8F5">48.5s <tspan font-size="11" fill="#27C93F">(2.9x)</tspan></text>
+
+  <rect x="1018" y="288" width="134" height="54" rx="8" fill="#1F1212" stroke="#FF2A2A" stroke-width="1.2"/>
+  <text x="1030" y="306" class="mono" font-size="9" font-weight="700" fill="#FF2A2A">CLOUD API BILL</text>
+  <text x="1030" y="329" class="mono" font-size="16" font-weight="700" fill="#FF2A2A">$0.1472</text>
+
+  <!-- ======================================================================= -->
+  <!-- BOTTOM 5-ORGAN TELEMETRY DOCK                                           -->
+  <!-- ======================================================================= -->
+  <rect x="28" y="368" width="1144" height="34" rx="8" fill="#F3EFE8" stroke="#CECAC0" stroke-width="1"/>
+
+  <text x="46" y="389" class="mono" font-size="10.5" font-weight="700" fill="#111110">
+    <tspan fill="#FF2A2A">01</tspan> HEART <tspan font-weight="500" fill="#76736B">Thermal/RAM</tspan>
+  </text>
+  <text x="256" y="389" class="mono" font-size="10.5" font-weight="700" fill="#111110">
+    <tspan fill="#FF2A2A">02</tspan> BRAINSTEM <tspan font-weight="500" fill="#76736B">Local Metal $0</tspan>
+  </text>
+  <text x="498" y="389" class="mono" font-size="10.5" font-weight="700" fill="#111110">
+    <tspan fill="#FF2A2A">03</tspan> EYES &amp; HANDS <tspan font-weight="500" fill="#76736B">4ms AX DOM</tspan>
+  </text>
+  <text x="748" y="389" class="mono" font-size="10.5" font-weight="700" fill="#111110">
+    <tspan fill="#FF2A2A">04</tspan> HIPPOCAMPUS <tspan font-weight="500" fill="#76736B">$0 Recipes</tspan>
+  </text>
+  <text x="984" y="389" class="mono" font-size="10.5" font-weight="700" fill="#111110">
+    <tspan fill="#FF2A2A">05</tspan> BBB SHIELD <tspan font-weight="500" fill="#76736B">&lt;3ms AST Gate</tspan>
+  </text>
+</svg>

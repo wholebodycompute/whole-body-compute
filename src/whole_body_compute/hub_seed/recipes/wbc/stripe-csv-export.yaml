@@ -1,0 +1,114 @@
+schema_version: '1.0'
+namespace: wbc
+id: stripe-csv-export
+name: Stripe Balance & Payout Reconciliation Export
+version: 1.0.0
+description: Exports parameterized Stripe balance transactions via official `stripe`
+  CLI into a deterministic local audit artifact with zero dashboard screenshots.
+license: Apache-2.0
+author: Whole Body Compute Official Hub
+tags:
+- stripe
+- finops
+- csv
+- accounting
+- billing
+triggers:
+- stripe csv export
+- export stripe payouts
+- stripe reconciliation
+destructive: false
+timeout_total_ms: 30000
+app_compatibility:
+  platforms:
+  - macos
+  - linux
+  min_wbc_version: 0.1.0
+  target_apps:
+  - app_name: Google Chrome
+    bundle_id: com.google.Chrome
+    required: false
+  required_clis:
+  - stripe
+parameters:
+  limit:
+    type: int
+    description: Max transactions to export
+    default: 100
+    required: false
+  output_path:
+    type: path
+    description: Destination ledger export file
+    default: ./stripe_balance_export.json
+    required: false
+preconditions:
+- getter_type: cli_installed
+  target: stripe
+  description: Stripe CLI must be installed
+steps:
+- name: Export Parameterized Balance Transactions via Stripe CLI
+  action: run_shell
+  timeout_ms: 20000
+  on_failure: abort
+  max_retries: 1
+  command: stripe balance_transactions list --limit ${limit} > ${output_path}
+  postconditions:
+  - getter_type: file_nonempty
+    target: ${output_path}
+    description: Exported ledger must be non-empty
+postconditions:
+- getter_type: file_nonempty
+  target: ${output_path}
+  description: Verified non-empty Stripe export
+success_summary: Completed Stripe Balance & Payout Reconciliation Export deterministically
+  at $0.00 cloud token cost
+error_summary: Stripe Balance & Payout Reconciliation Export halted safely at {step_name}
+tier_summary:
+  archetype: finops_ledger_export
+  raw_step_count: 3
+  compiled_step_count: 1
+  dominant_tier: TIER_1_HEADLESS_API
+  tier_breakdown:
+    TIER_1_HEADLESS_API: 1
+  reliability_score: 0.99
+  contracts_attached:
+  - stripe_reconciliation_export_contract
+  fallback_ladder:
+  - 'ir_1_stripe_export: TIER_1_HEADLESS_API -> TIER_2_SEMANTIC_UI'
+contract_summary:
+  contracts:
+  - name: stripe_reconciliation_export_contract
+    preconditions:
+    - STRIPE_CLI_INSTALLED
+    idempotency_strategy: KEYED_TRANSACTION_ID_SNAPSHOT
+    natural_key_fields:
+    - id
+    postconditions:
+    - EXPORT_FILE_EXISTS_AND_NONEMPTY
+  ssa_edges: []
+procedural_dna:
+  archetype: finops_ledger_export
+  dominant_tier: TIER_1_HEADLESS_API
+  ir_signature_hash: 4cbb1d4fc3c768b8
+  estimated_cloud_tokens_saved: 62000
+  estimated_usd_saved_per_run: 0.31
+  zero_pii_attestation:
+    sanitized: true
+    contains_credentials: false
+    contains_personal_paths: false
+    redaction_engine: whole_body_compute.procedural_telemetry
+    pii_patterns_checked:
+    - credentials
+    - personal_paths
+    - emails
+    - ssn
+    - public_ipv4
+    - vascular_egress
+signature:
+  algorithm: ed25519+sha256
+  key_id: wbc-hub-official-2026-ed25519
+  public_key: BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=
+  canonical_payload_sha256: 92cb31883ec4280df4d4c502fc057607b65444c960f1a52731589c1c28d601a2
+  hoare_contract_sha256: 90ba3eff289c63099190038580158d18edab6656440ed222d125119324816ed5
+  ed25519_signature: BImwS30Rp+iwbfiZMl441FvWLYy/1DQxRGMz5l5/Q4lhOPQIVAb+S9bVWSaFGlAR0hPxHrh1siUsBCUSWNnNAQ==
+  signed_at: '2026-11-10T18:00:00Z'

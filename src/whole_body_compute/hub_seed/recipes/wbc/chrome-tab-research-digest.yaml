@@ -1,0 +1,133 @@
+schema_version: '1.0'
+namespace: wbc
+id: chrome-tab-research-digest
+name: Chromium & Arc Active Tab Foveal DOM Capture
+version: 1.0.0
+description: Extracts structured headings, links, and article text from the active
+  browser tab via AXWebArea Foveal DOM in <15ms, avoiding 1.8 MB Retina screenshots.
+license: Apache-2.0
+author: Whole Body Compute Official Hub
+tags:
+- chrome
+- arc
+- browser
+- research
+- foveal
+triggers:
+- chrome tab research digest
+- capture browser tab
+- foveal read tab
+destructive: false
+timeout_total_ms: 30000
+app_compatibility:
+  platforms:
+  - macos
+  min_wbc_version: 0.1.0
+  target_apps:
+  - app_name: Google Chrome
+    bundle_id: com.google.Chrome
+    required: false
+  - app_name: Arc
+    bundle_id: company.thebrowser.Browser
+    required: false
+  required_clis:
+  - body
+parameters:
+  browser_app:
+    type: string
+    description: Target Chromium/WebKit browser app name
+    default: Google Chrome
+    required: false
+  output_path:
+    type: path
+    description: Extracted DOM JSON path
+    default: ./browser_tab_foveal.json
+    required: false
+preconditions:
+- getter_type: cli_installed
+  target: body
+  description: Whole Body Compute CLI installed
+steps:
+- name: Activate Target Browser Window
+  action: activate_app
+  app_name: ${browser_app}
+  bundle_id: com.google.Chrome
+  timeout_ms: 4000
+  on_failure: ignore
+- name: Focus Semantic AXWebArea Document Root
+  action: click
+  app_name: ${browser_app}
+  bundle_id: com.google.Chrome
+  timeout_ms: 4000
+  on_failure: ignore
+  click_target:
+    target_type: ui_element
+    role: AXWebArea
+    title: Document
+    relative_to: window
+- name: Dump Structured AXWebArea Text Blocks via OrganEyes
+  action: run_shell
+  timeout_ms: 8000
+  on_failure: abort
+  command: body eyes --app '${browser_app}' --read-last --json > ${output_path}
+  postconditions:
+  - getter_type: file_nonempty
+    target: ${output_path}
+    description: Browser Foveal capture written
+postconditions:
+- getter_type: file_nonempty
+  target: ${output_path}
+  description: Verified browser tab Foveal capture
+success_summary: Completed Chromium & Arc Active Tab Foveal DOM Capture deterministically
+  at $0.00 cloud token cost
+error_summary: Chromium & Arc Active Tab Foveal DOM Capture halted safely at {step_name}
+tier_summary:
+  archetype: web_collection_extract
+  raw_step_count: 5
+  compiled_step_count: 3
+  dominant_tier: TIER_2_SEMANTIC_UI
+  tier_breakdown:
+    TIER_2_SEMANTIC_UI: 3
+  reliability_score: 0.94
+  contracts_attached:
+  - browser_foveal_capture_contract
+  fallback_ladder:
+  - 'ir_1_browser_ax: TIER_2_SEMANTIC_UI -> TIER_1_5_BROWSER_DOM_JS'
+contract_summary:
+  contracts:
+  - name: browser_foveal_capture_contract
+    preconditions:
+    - BROWSER_RUNNING
+    - AX_TRUSTED
+    idempotency_strategy: READ_ONLY_AX_EXTRACTION
+    natural_key_fields:
+    - window_title
+    postconditions:
+    - TAB_DOM_JSON_NONEMPTY
+  ssa_edges: []
+procedural_dna:
+  archetype: web_collection_extract
+  dominant_tier: TIER_2_SEMANTIC_UI
+  ir_signature_hash: 5e6dced10060c199
+  estimated_cloud_tokens_saved: 46000
+  estimated_usd_saved_per_run: 0.23
+  zero_pii_attestation:
+    sanitized: true
+    contains_credentials: false
+    contains_personal_paths: false
+    redaction_engine: whole_body_compute.procedural_telemetry
+    pii_patterns_checked:
+    - credentials
+    - personal_paths
+    - emails
+    - ssn
+    - public_ipv4
+    - vascular_egress
+signature:
+  algorithm: ed25519+sha256
+  key_id: wbc-hub-official-2026-ed25519
+  public_key: BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=
+  canonical_payload_sha256: 75d95a6985ea0d13c7b34205eb358651004c30f9d72d97a116c1398c1dad9f56
+  hoare_contract_sha256: 70dce390265e880ca26db84bdf4d381c6defa6ddab78e13d108fc558d14870e2
+  ed25519_signature: 1Pm1t2zPM0azcpobJkg0P/MSuYNEO3l1kxuLhBZpBH0rD0AvMUwW5alEUVRX8OxVV6MvlIxj/WY+4tIjanQ6Cw==
+  signed_at: '2026-11-10T18:00:00Z'

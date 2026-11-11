@@ -1,0 +1,236 @@
+name: Open-Core Verification & PyPI Trusted Publisher Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      publish_to_testpypi:
+        description: "Publish built artifacts to TestPyPI"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
+jobs:
+  verify-open-core:
+    name: "Clean-Room Leak Audit & Matrix Smoke (${{ matrix.os }}, py${{ matrix.python-version }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv & Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: false
+
+      - name: Clean-Room Content & Extension Leak Gate
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, sys
+
+          root = pathlib.Path(".").resolve()
+          forbidden_dirs = {"marketing", "legal", ".agents", ".claude", "mocks", "site"}
+          forbidden_exts = {".jpg", ".jpeg", ".png", ".pdf", ".pem", ".key", ".env"}
+          docket_prefix = "VIFI" + "-PAT-"
+          patent_re = re.compile(r"\b64/\d{3},\d{3}\b|" + re.escape(docket_prefix))
+          violations = []
+
+          for dirpath, dirnames, filenames in os.walk(root):
+              rel_dir = pathlib.Path(dirpath).relative_to(root)
+              if rel_dir.parts and rel_dir.parts[0] in {".git", ".venv", ".pytest_cache", "dist", "build"}:
+                  dirnames[:] = []
+                  continue
+              for d in list(dirnames):
+                  if d in {".git", ".venv", "__pycache__", ".pytest_cache", "dist", "build"}:
+                      dirnames.remove(d)
+                      continue
+                  if d in forbidden_dirs:
+                      violations.append(f"Forbidden directory present: {(rel_dir / d).as_posix()}")
+
+              for fname in filenames:
+                  fpath = pathlib.Path(dirpath) / fname
+                  rel_f = (rel_dir / fname).as_posix()
+                  if fpath.suffix.lower() in forbidden_exts:
+                      violations.append(f"Forbidden extension {fpath.suffix}: {rel_f}")
+                  if fname in {"license.json", ".env"}:
+                      violations.append(f"Sensitive file present: {rel_f}")
+                  try:
+                      txt = fpath.read_text(encoding="utf-8")
+                  except Exception:
+                      txt = ""
+                  m = patent_re.search(txt)
+                  if m:
+                      violations.append(f"Confidential identifier '{m.group(0)}' in {rel_f}")
+
+          pyproj = (root / "pyproject.toml").read_text(encoding="utf-8")
+          if "[tool.uv.sources]" in pyproj:
+              violations.append("pyproject.toml must not contain private [tool.uv.sources] overrides")
+
+          for req in ("LICENSE", "PATENTS.md", "README.md", "docs/audit.py", "packaging/homebrew/whole-body-compute.rb"):
+              if not (root / req).is_file():
+                  violations.append(f"Missing required public file: {req}")
+
+          if violations:
+              print("Clean-Room Leak Gate FAILED:", file=sys.stderr)
+              for v in violations:
+                  print(f"  - {v}", file=sys.stderr)
+              sys.exit(1)
+          print("Clean-Room Leak Gate PASSED (0 violations).")
+          PY
+
+      - name: Install Open-Core + Dev Dependencies
+        run: uv pip install -e ".[dev]"
+
+      - name: Ruff Syntax & Runtime Safety Gate
+        run: ruff check --isolated --select E9,F63,F7,F82 src/whole_body_compute tests/test_immune_bbb.py
+
+      - name: Run Blood-Brain Barrier Unit Suite
+        env:
+          VOICEFI_IMMUNE_AUDIT_PATH: /tmp/ci_immune_audit.jsonl
+        run: pytest -q --tb=short tests/test_immune_bbb.py
+
+      - name: Community CLI End-to-End Smoke Verification
+        env:
+          VOICEFI_LICENSE_PATH: /tmp/ci_nonexistent_license.json
+          WBC_SKIP_LAUNCHCTL: "1"
+          WBC_LAUNCH_AGENTS_DIR: /tmp/ci_launch_agents
+          WBC_DAEMON_LOG_DIR: /tmp/ci_daemon_logs
+          VOICEFI_MOCK_VAGUS: "1"
+          VOICEFI_MOCK_AX: "1"
+          VOICEFI_MOCK_SILICON: "1"
+          VOICEFI_MOCK_PROPRIOCEPTION: "1"
+        run: |
+          PY=".venv/bin/python"
+          .venv/bin/body --version
+          "$PY" -c "from whole_body_compute.license import LicenseManager; assert LicenseManager().get_status()['tier'] == 'community'"
+          mkdir -p /tmp/ci_ws && (cd /tmp/ci_ws && "$OLDPWD/.venv/bin/body" begin --json > /tmp/begin.json || true)
+          "$PY" -c "import json; d = json.load(open('/tmp/begin.json')); assert 'finops_summary' in d"
+          .venv/bin/body audit-spend --json > /dev/null
+          (.venv/bin/body doctor --json > /tmp/doc.json || true) && "$PY" -c "import json; json.load(open('/tmp/doc.json'))"
+          (.venv/bin/body doctor --exercise --json > /tmp/ex.json || true) && "$PY" -c "import json; json.load(open('/tmp/ex.json'))"
+          .venv/bin/body report --no-write --json > /dev/null
+          .venv/bin/body daemon status --json > /dev/null
+          "$PY" docs/audit.py --json > /dev/null
+          set +e
+          .venv/bin/body flush --json > /tmp/flush_gate.json
+          FLUSH_RC=$?
+          set -e
+          test "$FLUSH_RC" -eq 2
+          "$PY" -c "import json; d = json.load(open('/tmp/flush_gate.json')); assert d['status'] == 'upgrade_required'"
+
+  build-dist:
+    name: Build Wheel, Source Tarball & Twine Check
+    needs: verify-open-core
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv & Build Tools
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel
+        run: |
+          uv build --out-dir dist
+          ls -lh dist/
+
+      - name: Validate Package Metadata (`twine check --strict`)
+        run: uvx twine check --strict dist/*
+
+      - name: Isolated Wheel Install Smoke Test
+        run: |
+          uv venv /tmp/wheel-smoke --python 3.12
+          uv pip install --python /tmp/wheel-smoke/bin/python dist/*.whl
+          /tmp/wheel-smoke/bin/body --version
+          /tmp/wheel-smoke/bin/wbc --version
+          echo '{}' | /tmp/wheel-smoke/bin/body-immune-hook
+
+      - name: Record Release SHA-256 Checksums
+        run: |
+          (cd dist && sha256sum *.whl *.tar.gz > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - name: Upload Built Python Distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+
+  publish-testpypi:
+    name: Publish to TestPyPI (OIDC Trusted Publisher)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_to_testpypi == true }}
+    needs: build-dist
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/whole-body-compute
+    permissions:
+      id-token: write
+    steps:
+      - name: Download Built Distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Remove SHA256SUMS before PyPI upload
+        run: rm -f dist/SHA256SUMS.txt
+
+      - name: Publish to TestPyPI via Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  publish-pypi:
+    name: Publish to PyPI (OIDC Trusted Publisher)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-dist
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/whole-body-compute
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - name: Download Built Distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Create GitHub Release with Checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "${GITHUB_REF_NAME}" -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
+            gh release create "${GITHUB_REF_NAME}" -R "${GITHUB_REPOSITORY}" dist/* --generate-notes --title "Whole Body Compute ${GITHUB_REF_NAME}"
+
+      - name: Remove SHA256SUMS before PyPI upload
+        run: rm -f dist/SHA256SUMS.txt
+
+      - name: Publish to PyPI via Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1

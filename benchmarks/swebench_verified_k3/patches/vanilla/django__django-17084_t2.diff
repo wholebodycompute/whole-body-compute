@@ -1,0 +1,156 @@
+diff --git a/django/db/models/aggregates.py b/django/db/models/aggregates.py
+index a778cd4..c7bca5f 100644
+--- a/django/db/models/aggregates.py
++++ b/django/db/models/aggregates.py
+@@ -88,6 +88,17 @@ class Aggregate(Func):
+                         "Cannot compute %s('%s'): '%s' is an aggregate"
+                         % (c.name, name, name)
+                     )
++                if expr.contains_over_clause:
++                    before_resolved = self.get_source_expressions()[index]
++                    name = (
++                        before_resolved.name
++                        if hasattr(before_resolved, "name")
++                        else repr(before_resolved)
++                    )
++                    raise FieldError(
++                        "Cannot compute %s('%s'): '%s' is a window expression"
++                        % (c.name, name, name)
++                    )
+         if (default := c.default) is None:
+             return c
+         if hasattr(default, "resolve_expression"):
+diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py
+index 280cb96..8960698 100644
+--- a/django/db/models/expressions.py
++++ b/django/db/models/expressions.py
+@@ -409,6 +409,8 @@ class BaseExpression:
+     def get_refs(self):
+         refs = set()
+         for expr in self.get_source_expressions():
++            if expr is None:
++                continue
+             refs |= expr.get_refs()
+         return refs
+ 
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 13a6809..1fa9acb 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -403,6 +403,7 @@ class Query(BaseExpression):
+         # Store annotation mask prior to temporarily adding aggregations for
+         # resolving purpose to facilitate their subsequent removal.
+         refs_subquery = False
++        refs_window = False
+         replacements = {}
+         annotation_select_mask = self.annotation_select_mask
+         for alias, aggregate_expr in aggregate_exprs.items():
+@@ -415,9 +416,14 @@ class Query(BaseExpression):
+             # Temporarily add aggregate to annotations to allow remaining
+             # members of `aggregates` to resolve against each others.
+             self.append_annotation_mask([alias])
++            aggregate_refs = aggregate.get_refs()
+             refs_subquery |= any(
+                 getattr(self.annotations[ref], "subquery", False)
+-                for ref in aggregate.get_refs()
++                for ref in aggregate_refs
++            )
++            refs_window |= any(
++                getattr(self.annotations[ref], "contains_over_clause", True)
++                for ref in aggregate_refs
+             )
+             aggregate = aggregate.replace_expressions(replacements)
+             self.annotations[alias] = aggregate
+@@ -451,6 +457,7 @@ class Query(BaseExpression):
+             or self.is_sliced
+             or has_existing_aggregation
+             or refs_subquery
++            or refs_window
+             or qualify
+             or self.distinct
+             or self.combinator
+diff --git a/tests/aggregation/tests.py b/tests/aggregation/tests.py
+index 366b843..3fea7bb 100644
+--- a/tests/aggregation/tests.py
++++ b/tests/aggregation/tests.py
+@@ -28,6 +28,7 @@ from django.db.models import (
+     Value,
+     Variance,
+     When,
++    Window,
+ )
+ from django.db.models.expressions import Func, RawSQL
+ from django.db.models.functions import (
+@@ -1283,6 +1284,14 @@ class AggregateTestCase(TestCase):
+         ):
+             Book.objects.annotate(Max("id")).annotate(my_max=MyMax("id__max", "price"))
+ 
++    @skipUnlessDBFeature("supports_over_clause")
++    def test_annotated_aggregate_over_annotated_window(self):
++        msg = "Cannot compute Sum('avg_pages'): 'avg_pages' is a window expression"
++        with self.assertRaisesMessage(FieldError, msg):
++            Book.objects.annotate(avg_pages=Window(Avg("pages"))).annotate(
++                Sum("avg_pages")
++            )
++
+     def test_multi_arg_aggregate(self):
+         class MyMax(Max):
+             output_field = DecimalField()
+@@ -2207,3 +2216,23 @@ class AggregateAnnotationPruningTests(TestCase):
+         sql = ctx.captured_queries[0]["sql"].lower()
+         self.assertEqual(sql.count("select"), 3, "Subquery wrapping required")
+         self.assertEqual(aggregate, {"sum_total_books": 3})
++
++    @skipUnlessDBFeature("supports_over_clause")
++    def test_referenced_window_requires_wrapping(self):
++        total_books_qs = Book.objects.annotate(
++            avg_publisher_pages=Coalesce(
++                Window(Avg("pages"), partition_by=F("publisher")),
++                0.0,
++            )
++        )
++        with self.assertNumQueries(1) as ctx:
++            aggregate = total_books_qs.aggregate(
++                sum_avg_publisher_pages=Sum("avg_publisher_pages"),
++                books_count=Count("id"),
++            )
++        sql = ctx.captured_queries[0]["sql"].lower()
++        self.assertEqual(sql.count("select"), 2, "Subquery wrapping required")
++        self.assertEqual(
++            aggregate,
++            {"sum_avg_publisher_pages": 1100.0, "books_count": 2},
++        )
+diff --git a/tests/expressions_window/tests.py b/tests/expressions_window/tests.py
+index 3a02a36..66f28e4 100644
+--- a/tests/expressions_window/tests.py
++++ b/tests/expressions_window/tests.py
+@@ -26,6 +26,7 @@ from django.db.models import (
+ from django.db.models.fields.json import KeyTextTransform, KeyTransform
+ from django.db.models.functions import (
+     Cast,
++    Coalesce,
+     CumeDist,
+     DenseRank,
+     ExtractYear,
+@@ -912,6 +913,21 @@ class WindowFunctionTests(TestCase):
+         )
+         self.assertEqual(qs.count(), 12)
+ 
++    def test_aggregate_over_window_functions(self):
++        qs = Employee.objects.annotate(
++            cumul_salary=Coalesce(
++                Window(Sum("salary"), order_by=F("hire_date").asc()),
++                0,
++            )
++        )
++        self.assertEqual(
++            qs.aggregate(
++                salary_total=Sum("salary"),
++                cumul_salary_total=Sum("cumul_salary"),
++            ),
++            {"salary_total": 637000, "cumul_salary_total": 4646000},
++        )
++
+     def test_filter(self):
+         qs = Employee.objects.annotate(
+             department_salary_rank=Window(

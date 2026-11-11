@@ -1,0 +1,100 @@
+diff --git a/seaborn/_core/plot.py b/seaborn/_core/plot.py
+index 4f0290a..de8d21d 100644
+--- a/seaborn/_core/plot.py
++++ b/seaborn/_core/plot.py
+@@ -25,7 +25,7 @@ from seaborn._marks.base import Mark
+ from seaborn._stats.base import Stat
+ from seaborn._core.data import PlotData
+ from seaborn._core.moves import Move
+-from seaborn._core.scales import Scale
++from seaborn._core.scales import Scale, Nominal
+ from seaborn._core.subplots import Subplots
+ from seaborn._core.groupby import GroupBy
+ from seaborn._core.properties import PROPERTIES, Property
+@@ -1238,7 +1238,6 @@ class Plotter:
+             # This only affects us when sharing *paired* axes. This is a novel/niche
+             # behavior, so we will raise rather than hack together a workaround.
+             if axis is not None and Version(mpl.__version__) < Version("3.4.0"):
+-                from seaborn._core.scales import Nominal
+                 paired_axis = axis in p._pair_spec.get("structure", {})
+                 cat_scale = isinstance(scale, Nominal)
+                 ok_dim = {"x": "col", "y": "row"}[axis]
+@@ -1632,9 +1631,24 @@ class Plotter:
+             for axis in "xy":
+                 axis_key = sub[axis]
+ 
++                axis_obj = getattr(ax, f"{axis}axis")
++                is_nominal = any(
++                    isinstance(v, Nominal)
++                    for k, v in self._scales.items()
++                    if re.match(rf"^{axis_key}(\D|$)", str(k))
++                )
++                if is_nominal:
++                    axis_obj.grid(False)
++                    n = len(axis_obj.get_major_locator()())
++                    if n:
++                        lo, hi = -.5, n - .5
++                        if axis == "y":
++                            lo, hi = hi, lo
++                        ax.set(**{f"{axis}lim": (lo, hi)})
++
+                 # Axis limits
+                 if axis_key in p._limits:
+-                    convert_units = getattr(ax, f"{axis}axis").convert_units
++                    convert_units = axis_obj.convert_units
+                     a, b = p._limits[axis_key]
+                     lo = a if a is None else convert_units(a)
+                     hi = b if b is None else convert_units(b)
+diff --git a/tests/_core/test_plot.py b/tests/_core/test_plot.py
+index 03a6491..ef9f89f 100644
+--- a/tests/_core/test_plot.py
++++ b/tests/_core/test_plot.py
+@@ -645,6 +645,48 @@ class TestScaling:
+         with pytest.raises(RuntimeError, match=err):
+             p.plot()
+ 
++    def test_nominal_x_axis_tweaks(self):
++
++        ax1 = Plot(x=["a", "b", "c"], y=[1, 2, 3]).plot()._figure.axes[0]
++        assert ax1.get_xlim() == (-.5, 2.5)
++        assert not any(x.get_visible() for x in ax1.xaxis.get_gridlines())
++
++        lim = (-1, 2.1)
++        ax2 = Plot(x=["a", "b", "c"], y=[1, 2, 3]).limit(x=lim).plot()._figure.axes[0]
++        assert ax2.get_xlim() == lim
++
++        ax3 = (
++            Plot(x=[1, 2, 3], y=[1, 2, 3])
++            .scale(x=Nominal())
++            .theme({"axes.grid": True})
++            .plot()
++            ._figure.axes[0]
++        )
++        assert ax3.get_xlim() == (-.5, 2.5)
++        assert not any(x.get_visible() for x in ax3.xaxis.get_gridlines())
++        assert all(y.get_visible() for y in ax3.yaxis.get_gridlines())
++
++    def test_nominal_y_axis_tweaks(self):
++
++        ax1 = Plot(x=[1, 2, 3], y=["a", "b", "c"]).plot()._figure.axes[0]
++        assert ax1.get_ylim() == (2.5, -.5)
++        assert not any(y.get_visible() for y in ax1.yaxis.get_gridlines())
++
++        lim = (-1, 2.1)
++        ax2 = Plot(x=[1, 2, 3], y=["a", "b", "c"]).limit(y=lim).plot()._figure.axes[0]
++        assert ax2.get_ylim() == lim
++
++        ax3 = (
++            Plot(x=[1, 2, 3], y=[1, 2, 3])
++            .scale(y=Nominal())
++            .theme({"axes.grid": True})
++            .plot()
++            ._figure.axes[0]
++        )
++        assert ax3.get_ylim() == (2.5, -.5)
++        assert not any(y.get_visible() for y in ax3.yaxis.get_gridlines())
++        assert all(x.get_visible() for x in ax3.xaxis.get_gridlines())
++
+ 
+ class TestPlotting:
+ 

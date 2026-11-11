@@ -1,0 +1,128 @@
+schema_version: '1.0'
+namespace: wbc
+id: slack-daily-digest
+name: Slack Unread Channel Foveal Daily Digest
+version: 1.0.0
+description: Reads unread Slack channel messages (`com.tinyspeck.slackmacgap`) using
+  <15ms Foveal AXOutline/AXStaticText inspection without requiring admin Slack OAuth
+  bots.
+license: Apache-2.0
+author: Whole Body Compute Official Hub
+tags:
+- slack
+- digest
+- messaging
+- foveal
+- morning
+triggers:
+- slack daily digest
+- summarize unread slack
+- morning slack check
+destructive: false
+timeout_total_ms: 30000
+app_compatibility:
+  platforms:
+  - macos
+  min_wbc_version: 0.1.0
+  target_apps:
+  - app_name: Slack
+    bundle_id: com.tinyspeck.slackmacgap
+    min_app_version: 4.35.0
+    required: true
+  required_clis:
+  - body
+parameters:
+  output_path:
+    type: path
+    description: Unread Slack digest JSON path
+    default: ./slack_daily_digest.json
+    required: false
+preconditions:
+- getter_type: cli_installed
+  target: body
+  description: Whole Body Compute CLI installed
+steps:
+- name: Activate Slack Desktop Window
+  action: activate_app
+  app_name: Slack
+  bundle_id: com.tinyspeck.slackmacgap
+  timeout_ms: 4000
+  on_failure: abort
+- name: Focus Unreads Sidebar AXOutline
+  action: click
+  app_name: Slack
+  bundle_id: com.tinyspeck.slackmacgap
+  timeout_ms: 4000
+  on_failure: ignore
+  click_target:
+    target_type: ui_element
+    role: AXOutline
+    title: Unreads
+    relative_to: window
+- name: Extract Latest Unread Text Blocks via OrganEyes
+  action: run_shell
+  timeout_ms: 8000
+  on_failure: abort
+  command: body eyes --app Slack --read-last --json > ${output_path}
+  postconditions:
+  - getter_type: file_nonempty
+    target: ${output_path}
+    description: Unread Slack digest captured
+postconditions:
+- getter_type: file_nonempty
+  target: ${output_path}
+  description: Slack digest verified non-empty
+success_summary: Completed Slack Unread Channel Foveal Daily Digest deterministically
+  at $0.00 cloud token cost
+error_summary: Slack Unread Channel Foveal Daily Digest halted safely at {step_name}
+tier_summary:
+  archetype: communication_digest
+  raw_step_count: 5
+  compiled_step_count: 3
+  dominant_tier: TIER_2_SEMANTIC_UI
+  tier_breakdown:
+    TIER_2_SEMANTIC_UI: 3
+  reliability_score: 0.94
+  contracts_attached:
+  - slack_foveal_digest_contract
+  fallback_ladder:
+  - 'ir_1_slack_foveal: TIER_2_SEMANTIC_UI -> TIER_1_HEADLESS_API'
+contract_summary:
+  contracts:
+  - name: slack_foveal_digest_contract
+    preconditions:
+    - SLACK_DESKTOP_RUNNING
+    - AX_PERMISSION_GRANTED
+    idempotency_strategy: READ_ONLY_DOM_EXTRACTION
+    natural_key_fields:
+    - channel
+    - timestamp
+    postconditions:
+    - DIGEST_JSON_NONEMPTY
+  ssa_edges: []
+procedural_dna:
+  archetype: communication_digest
+  dominant_tier: TIER_2_SEMANTIC_UI
+  ir_signature_hash: 0aa0185b1dee1dfd
+  estimated_cloud_tokens_saved: 64000
+  estimated_usd_saved_per_run: 0.32
+  zero_pii_attestation:
+    sanitized: true
+    contains_credentials: false
+    contains_personal_paths: false
+    redaction_engine: whole_body_compute.procedural_telemetry
+    pii_patterns_checked:
+    - credentials
+    - personal_paths
+    - emails
+    - ssn
+    - public_ipv4
+    - vascular_egress
+signature:
+  algorithm: ed25519+sha256
+  key_id: wbc-hub-official-2026-ed25519
+  public_key: BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=
+  canonical_payload_sha256: 1778f2dca395b86fba4e3d402d66498fb405385614c98da01ae61caa70256b27
+  hoare_contract_sha256: b6e2e0d935160c5f75d32d7ededeebd7f19fbd8f878f05bd1ed0f057a4c12df9
+  ed25519_signature: 2nL5mJmpz42llHqkhKjyLPnsfeV1PQnrO6F9SC+pOTb+PYqlD4hKvjh2vdk1Fzj6tc45sNuwfLrJYTw7+MJkCw==
+  signed_at: '2026-11-10T18:00:00Z'

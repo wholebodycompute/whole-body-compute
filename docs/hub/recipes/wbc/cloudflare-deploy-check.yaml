@@ -1,0 +1,113 @@
+schema_version: '1.0'
+namespace: wbc
+id: cloudflare-deploy-check
+name: Cloudflare Workers & Pages Deployment Audit
+version: 1.0.0
+description: Audits recent Cloudflare Workers deployments via `wrangler` CLI and records
+  active deployment metadata for release verification.
+license: Apache-2.0
+author: Whole Body Compute Official Hub
+tags:
+- cloudflare
+- workers
+- pages
+- deploy
+- devops
+triggers:
+- cloudflare deploy check
+- verify cloudflare worker
+- wrangler deploy status
+destructive: false
+timeout_total_ms: 30000
+app_compatibility:
+  platforms:
+  - macos
+  - linux
+  min_wbc_version: 0.1.0
+  target_apps:
+  - app_name: Safari
+    bundle_id: com.apple.Safari
+    required: false
+  required_clis:
+  - wrangler
+parameters:
+  project_name:
+    type: string
+    description: Worker or Pages service name
+    default: whole-body-compute
+    required: false
+  output_path:
+    type: path
+    description: Deployment status output file
+    default: ./cloudflare_deployments.json
+    required: false
+preconditions:
+- getter_type: cli_installed
+  target: wrangler
+  description: Cloudflare Wrangler CLI required
+steps:
+- name: Query Active Cloudflare Deployments via Wrangler
+  action: run_shell
+  timeout_ms: 15000
+  on_failure: abort
+  command: wrangler deployments list --name ${project_name} --json > ${output_path}
+  postconditions:
+  - getter_type: file_nonempty
+    target: ${output_path}
+    description: Deployment JSON recorded
+postconditions:
+- getter_type: file_nonempty
+  target: ${output_path}
+  description: Cloudflare deployment audit verified
+success_summary: Completed Cloudflare Workers & Pages Deployment Audit deterministically
+  at $0.00 cloud token cost
+error_summary: Cloudflare Workers & Pages Deployment Audit halted safely at {step_name}
+tier_summary:
+  archetype: edge_deployment_verification
+  raw_step_count: 3
+  compiled_step_count: 1
+  dominant_tier: TIER_1_HEADLESS_API
+  tier_breakdown:
+    TIER_1_HEADLESS_API: 1
+  reliability_score: 0.99
+  contracts_attached:
+  - cf_edge_deploy_audit_contract
+  fallback_ladder:
+  - 'ir_1_wrangler_audit: TIER_1_HEADLESS_API -> TIER_2_SEMANTIC_UI'
+contract_summary:
+  contracts:
+  - name: cf_edge_deploy_audit_contract
+    preconditions:
+    - WRANGLER_CLI_INSTALLED
+    idempotency_strategy: READ_ONLY_AUDIT
+    natural_key_fields:
+    - deployment_id
+    postconditions:
+    - DEPLOYMENT_LIST_NONEMPTY
+  ssa_edges: []
+procedural_dna:
+  archetype: edge_deployment_verification
+  dominant_tier: TIER_1_HEADLESS_API
+  ir_signature_hash: 4fa485f9452305a6
+  estimated_cloud_tokens_saved: 39000
+  estimated_usd_saved_per_run: 0.195
+  zero_pii_attestation:
+    sanitized: true
+    contains_credentials: false
+    contains_personal_paths: false
+    redaction_engine: whole_body_compute.procedural_telemetry
+    pii_patterns_checked:
+    - credentials
+    - personal_paths
+    - emails
+    - ssn
+    - public_ipv4
+    - vascular_egress
+signature:
+  algorithm: ed25519+sha256
+  key_id: wbc-hub-official-2026-ed25519
+  public_key: BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=
+  canonical_payload_sha256: 887ad91818f614e78b7706789a6389ad27189b15869f319edcf29dccf26ae83e
+  hoare_contract_sha256: f806690603d180f14b6446884218b15e6d0b228908556d65ff38865ad771d6a7
+  ed25519_signature: wIe9jhzxQAXUI3o9pbbo/2TYbLWOSk/hfCBusNXIl6DhWbdP83aMN/3lm2zA2A4ypOVwb/19PAnYm/EoNJWiDQ==
+  signed_at: '2026-11-10T18:00:00Z'

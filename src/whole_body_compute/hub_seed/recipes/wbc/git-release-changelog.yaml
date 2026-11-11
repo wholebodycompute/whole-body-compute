@@ -1,0 +1,110 @@
+schema_version: '1.0'
+namespace: wbc
+id: git-release-changelog
+name: Deterministic Git Conventional Changelog Builder
+version: 1.0.0
+description: Synthesizes a clean Markdown release changelog from recent git commit
+  history in <50ms at 100% Tier 0 Local execution.
+license: Apache-2.0
+author: Whole Body Compute Official Hub
+tags:
+- git
+- release
+- changelog
+- markdown
+- local
+triggers:
+- git release changelog
+- build changelog
+- draft release notes
+destructive: false
+timeout_total_ms: 30000
+app_compatibility:
+  platforms:
+  - macos
+  - linux
+  min_wbc_version: 0.1.0
+  target_apps: []
+  required_clis:
+  - git
+parameters:
+  max_commits:
+    type: int
+    description: Number of commits to summarize
+    default: 30
+    required: false
+  output_path:
+    type: path
+    description: Markdown changelog file
+    default: ./RELEASE_NOTES_DRAFT.md
+    required: false
+preconditions:
+- getter_type: cli_installed
+  target: git
+  description: git binary required
+steps:
+- name: Format Conventional Commits into Markdown Changelog
+  action: run_shell
+  timeout_ms: 5000
+  on_failure: abort
+  command: git log -n ${max_commits} --pretty=format:'- `%h` %s (%cs)' > ${output_path}
+  postconditions:
+  - getter_type: file_nonempty
+    target: ${output_path}
+    description: Changelog file non-empty
+postconditions:
+- getter_type: file_nonempty
+  target: ${output_path}
+  description: Verified Markdown release notes
+success_summary: Completed Deterministic Git Conventional Changelog Builder deterministically
+  at $0.00 cloud token cost
+error_summary: Deterministic Git Conventional Changelog Builder halted safely at {step_name}
+tier_summary:
+  archetype: git_release
+  raw_step_count: 3
+  compiled_step_count: 1
+  dominant_tier: TIER_0_LOCAL
+  tier_breakdown:
+    TIER_0_LOCAL: 1
+  reliability_score: 0.99
+  contracts_attached:
+  - git_changelog_contract
+  fallback_ladder:
+  - 'ir_1_git_log: TIER_0_LOCAL'
+contract_summary:
+  contracts:
+  - name: git_changelog_contract
+    preconditions:
+    - GIT_WORKTREE_VALID
+    idempotency_strategy: PURE_DETERMINISTIC_PROJECTION
+    natural_key_fields:
+    - commit_sha
+    postconditions:
+    - MARKDOWN_FILE_NONEMPTY
+  ssa_edges: []
+procedural_dna:
+  archetype: git_release
+  dominant_tier: TIER_0_LOCAL
+  ir_signature_hash: 4b14e7321a43e29d
+  estimated_cloud_tokens_saved: 26000
+  estimated_usd_saved_per_run: 0.13
+  zero_pii_attestation:
+    sanitized: true
+    contains_credentials: false
+    contains_personal_paths: false
+    redaction_engine: whole_body_compute.procedural_telemetry
+    pii_patterns_checked:
+    - credentials
+    - personal_paths
+    - emails
+    - ssn
+    - public_ipv4
+    - vascular_egress
+signature:
+  algorithm: ed25519+sha256
+  key_id: wbc-hub-official-2026-ed25519
+  public_key: BjQUeE3tG5i4omCmTBzjPeFfAFTRwbHxOgveAy1QWxA=
+  canonical_payload_sha256: 54a559820199cf15624c92e80fb5780630a4d87f2e27952042101a6f4ff99467
+  hoare_contract_sha256: 6daaed4aa88e269f2cd993872aff7ebfce22ea9c03eb1a545bd6f900343ee03f
+  ed25519_signature: XJx76hcu2eO06CGo1pkVb94zCkdk1bs9o/QIhqw/NiipcLDZcjZqPXhlgEmJdDxohqLV757PX9+CBU0DciJJBw==
+  signed_at: '2026-11-10T18:00:00Z'

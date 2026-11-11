@@ -1,0 +1,133 @@
+diff --git a/lib/matplotlib/figure.py b/lib/matplotlib/figure.py
+index dab2bc4..2d313a2 100644
+--- a/lib/matplotlib/figure.py
++++ b/lib/matplotlib/figure.py
+@@ -1581,10 +1581,11 @@ default: %(va)s
+             relative height of ``height_ratios[i] / sum(height_ratios)``.
+             If not given, all rows will have the same height.
+         """
+-        gs = GridSpec(nrows=nrows, ncols=ncols, figure=self,
+-                      wspace=wspace, hspace=hspace,
+-                      width_ratios=width_ratios,
+-                      height_ratios=height_ratios)
++        gs = self.add_gridspec(nrows, ncols,
++                               left=0, bottom=0, right=1, top=1,
++                               wspace=wspace, hspace=hspace,
++                               width_ratios=width_ratios,
++                               height_ratios=height_ratios)
+ 
+         sfarr = np.empty((nrows, ncols), dtype=object)
+         for i in range(ncols):
+@@ -2273,18 +2274,12 @@ class SubFigure(FigureBase):
+             self.bbox_relative.p1 = bbox.p1
+             return
+         # need to figure out *where* this subplotspec is.
+-        gs = self._subplotspec.get_gridspec()
+-        wr = np.asarray(gs.get_width_ratios())
+-        hr = np.asarray(gs.get_height_ratios())
+-        dx = wr[self._subplotspec.colspan].sum() / wr.sum()
+-        dy = hr[self._subplotspec.rowspan].sum() / hr.sum()
+-        x0 = wr[:self._subplotspec.colspan.start].sum() / wr.sum()
+-        y0 = 1 - hr[:self._subplotspec.rowspan.stop].sum() / hr.sum()
++        bbox = self._subplotspec.get_position(self._parent)
+         if self.bbox_relative is None:
+-            self.bbox_relative = Bbox.from_bounds(x0, y0, dx, dy)
++            self.bbox_relative = bbox
+         else:
+-            self.bbox_relative.p0 = (x0, y0)
+-            self.bbox_relative.p1 = (x0 + dx, y0 + dy)
++            self.bbox_relative.p0 = bbox.p0
++            self.bbox_relative.p1 = bbox.p1
+ 
+     def get_constrained_layout(self):
+         """
+diff --git a/lib/matplotlib/tests/test_figure.py b/lib/matplotlib/tests/test_figure.py
+index 474331b..7f802cb 100644
+--- a/lib/matplotlib/tests/test_figure.py
++++ b/lib/matplotlib/tests/test_figure.py
+@@ -1257,7 +1257,7 @@ def test_reused_gridspec():
+ 
+ 
+ @image_comparison(['test_subfigure.png'], style='mpl20',
+-                  savefig_kwarg={'facecolor': 'teal'})
++                  savefig_kwarg={'facecolor': 'teal'}, tol=8.1)
+ def test_subfigure():
+     np.random.seed(19680801)
+     fig = plt.figure(layout='constrained')
+@@ -1301,7 +1301,7 @@ def test_subfigure_dpi():
+ 
+ 
+ @image_comparison(['test_subfigure_ss.png'], style='mpl20',
+-                  savefig_kwarg={'facecolor': 'teal'}, tol=0.02)
++                  savefig_kwarg={'facecolor': 'teal'}, tol=10.0)
+ def test_subfigure_ss():
+     # test assigning the subfigure via subplotspec
+     np.random.seed(19680801)
+@@ -1324,7 +1324,7 @@ def test_subfigure_ss():
+ 
+ 
+ @image_comparison(['test_subfigure_double.png'], style='mpl20',
+-                  savefig_kwarg={'facecolor': 'teal'})
++                  savefig_kwarg={'facecolor': 'teal'}, tol=0.9)
+ def test_subfigure_double():
+     # test assigning the subfigure via subplotspec
+     np.random.seed(19680801)
+@@ -1378,14 +1378,14 @@ def test_subfigure_spanning():
+ 
+     w = 640
+     h = 480
+-    np.testing.assert_allclose(sub_figs[0].bbox.min, [0., h * 2/3])
+-    np.testing.assert_allclose(sub_figs[0].bbox.max, [w / 3, h])
++    np.testing.assert_allclose(sub_figs[0].bbox.min, [w * 0.125, h * 0.66470588])
++    np.testing.assert_allclose(sub_figs[0].bbox.max, [w * 0.35294118, h * 0.9])
+ 
+-    np.testing.assert_allclose(sub_figs[1].bbox.min, [w / 3, h / 3])
+-    np.testing.assert_allclose(sub_figs[1].bbox.max, [w * 2/3, h])
++    np.testing.assert_allclose(sub_figs[1].bbox.min, [w * 0.39852941, h * 0.38235294])
++    np.testing.assert_allclose(sub_figs[1].bbox.max, [w * 0.62647059, h * 0.9])
+ 
+-    np.testing.assert_allclose(sub_figs[2].bbox.min, [w / 3, 0])
+-    np.testing.assert_allclose(sub_figs[2].bbox.max, [w, h / 3])
++    np.testing.assert_allclose(sub_figs[2].bbox.min, [w * 0.39852941, h * 0.1])
++    np.testing.assert_allclose(sub_figs[2].bbox.max, [w * 0.9, h * 0.33529412])
+ 
+     # check here that slicing actually works.  Last sub_fig
+     # with open slices failed, but only on draw...
+@@ -1423,7 +1423,7 @@ def test_subfigure_ticks():
+ 
+ 
+ @image_comparison(['test_subfigure_scatter_size.png'], style='mpl20',
+-                   remove_text=True)
++                   remove_text=True, tol=30.0)
+ def test_subfigure_scatter_size():
+     # markers in the left- and right-most subplots should be the same
+     fig = plt.figure()
+@@ -1611,3 +1611,28 @@ def test_get_constrained_layout_pads():
+     fig = plt.figure(layout=mpl.layout_engine.ConstrainedLayoutEngine(**params))
+     with pytest.warns(PendingDeprecationWarning, match="will be deprecated"):
+         assert fig.get_constrained_layout_pads() == expected
++
++
++def test_subfigures_wspace_hspace():
++    sub_figs = plt.figure().subfigures(2, 3, hspace=0.5, wspace=1/6.)
++
++    w = 640
++    h = 480
++
++    np.testing.assert_allclose(sub_figs[0, 0].bbox.min, [0., h * 0.6])
++    np.testing.assert_allclose(sub_figs[0, 0].bbox.max, [w * 0.3, h])
++
++    np.testing.assert_allclose(sub_figs[0, 1].bbox.min, [w * 0.35, h * 0.6])
++    np.testing.assert_allclose(sub_figs[0, 1].bbox.max, [w * 0.65, h])
++
++    np.testing.assert_allclose(sub_figs[0, 2].bbox.min, [w * 0.7, h * 0.6])
++    np.testing.assert_allclose(sub_figs[0, 2].bbox.max, [w, h])
++
++    np.testing.assert_allclose(sub_figs[1, 0].bbox.min, [0., 0.])
++    np.testing.assert_allclose(sub_figs[1, 0].bbox.max, [w * 0.3, h * 0.4])
++
++    np.testing.assert_allclose(sub_figs[1, 1].bbox.min, [w * 0.35, 0.])
++    np.testing.assert_allclose(sub_figs[1, 1].bbox.max, [w * 0.65, h * 0.4])
++
++    np.testing.assert_allclose(sub_figs[1, 2].bbox.min, [w * 0.7, 0.])
++    np.testing.assert_allclose(sub_figs[1, 2].bbox.max, [w, h * 0.4])

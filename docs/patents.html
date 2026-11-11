@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" type="image/svg+xml" href="assets/logo-wbc-mark.svg" />
+  <title>Whole Body Compute — Virtual Patent Marking &amp; Open-Core Notice</title>
+  <meta name="description" content="Virtual patent marking notice (35 U.S.C. § 287(a)) and conditional Open-Core patent grant for Whole Body Compute." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg-paper: #FAFAFC;
+      --bg-surface: #FFFFFF;
+      --bg-subtle: #F1F5F9;
+      --ink-primary: #0F172A;
+      --ink-secondary: #334155;
+      --ink-muted: #64748B;
+      --hairline: #E2E8F0;
+      --accent: #FF2A2A;
+      --cta-red: #E0002A;
+      --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    ::selection { background: #FF2A2A; color: #FFFFFF; }
+    body {
+      background: var(--bg-paper);
+      color: var(--ink-primary);
+      font-family: var(--font-sans);
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: rgba(250, 250, 252, 0.88);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--hairline);
+    }
+    .nav-inner {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 0 24px;
+      height: 64px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 800;
+      font-size: 18px;
+      letter-spacing: -0.035em;
+      text-decoration: none;
+      color: var(--ink-primary);
+    }
+    .brand .r { color: var(--accent); }
+    nav {
+      display: flex;
+      gap: 18px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    nav a {
+      color: var(--ink-secondary);
+      text-decoration: none;
+    }
+    nav a:hover { color: var(--accent); }
+    .shell {
+      max-width: 880px;
+      margin: 0 auto;
+      padding: 48px 24px 80px;
+    }
+    .eyebrow {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--accent);
+      margin-bottom: 12px;
+    }
+    h1 {
+      font-family: var(--font-sans);
+      font-size: clamp(30px, 4.4vw, 44px);
+      font-weight: 900;
+      line-height: 1.1;
+      letter-spacing: -0.03em;
+      margin-bottom: 18px;
+      color: #000000;
+    }
+    .lead {
+      font-size: 16.5px;
+      color: var(--ink-secondary);
+      margin-bottom: 32px;
+    }
+    .notice-box {
+      background: var(--bg-surface);
+      border: 1px solid var(--hairline);
+      border-left: 4px solid var(--accent);
+      border-radius: 12px;
+      padding: 22px 26px;
+      margin-bottom: 40px;
+      box-shadow: 0 4px 16px -6px rgba(15, 23, 42, 0.05);
+    }
+    .notice-box p {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.65;
+      color: var(--ink-primary);
+    }
+    section {
+      margin-bottom: 36px;
+      padding-top: 24px;
+      border-top: 1px solid var(--hairline);
+    }
+    h2 {
+      font-family: var(--font-sans);
+      font-size: 21px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin-bottom: 12px;
+    }
+    p, li {
+      font-size: 15px;
+      color: var(--ink-secondary);
+    }
+    p + p { margin-top: 12px; }
+    ul {
+      margin: 12px 0 0 22px;
+      display: grid;
+      gap: 8px;
+    }
+    code {
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      background: var(--bg-subtle);
+      border: 1px solid var(--hairline);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: var(--ink-primary);
+    }
+    a { color: var(--cta-red); font-weight: 600; }
+    footer {
+      margin-top: 56px;
+      padding-top: 20px;
+      border-top: 1px solid var(--hairline);
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      color: var(--ink-muted);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="nav-inner">
+      <a href="/" class="brand">
+        <img src="assets/logo-wbc-character-light.svg" alt="Whole Body Compute" width="28" height="28" />
+        <span><span class="r">W</span>hole <span class="r">B</span>ody <span class="r">C</span>ompute</span>
+      </a>
+      <nav>
+        <a href="https://wholebodycompute.com">wholebodycompute.com</a>
+        <a href="https://wholebodycompute.org">wholebodycompute.org</a>
+        <a href="https://voicefi.org">voicefi.org</a>
+        <a href="https://github.com/wholebodycompute/whole-body-compute">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="shell">
+    <div class="eyebrow">35 U.S.C. &sect; 287(a) &bull; VIRTUAL PATENT MARKING NOTICE</div>
+    <h1>Patent Notice &amp; Conditional Open-Core Grant</h1>
+    <p class="lead">
+      This page provides virtual patent marking notice pursuant to <strong>35 U.S.C. &sect; 287(a)</strong> and corresponding international patent marking provisions for software, developer tools, and cloud/on-device runtimes distributed by Jacob Trigg d/b/a Whole Body Compute.
+    </p>
+
+    <div class="notice-box">
+      <p>
+        <strong>PATENT PENDING:</strong> Whole Body Compute (Open-Core Community Edition, Pro, Team, and Enterprise Editions) is <strong>covered by four (4) pending U.S. &amp; international patent applications</strong>. Additional U.S. and international patent applications may be pending. This page is updated dynamically as patent applications publish or issue into granted patents.
+      </p>
+    </div>
+
+    <section>
+      <h2>1. Conditional Open-Core Patent License Grant</h2>
+      <p>
+        Subject to the terms and conditions of the <a href="https://github.com/wholebodycompute/whole-body-compute/blob/main/LICENSE">Open-Core Community License (<code>LICENSE</code>)</a> and <a href="https://github.com/wholebodycompute/whole-body-compute/blob/main/PATENTS.md"><code>PATENTS.md</code></a>, Jacob Trigg d/b/a Whole Body Compute (&ldquo;Licensor&rdquo;) grants users of the allowlisted Open-Core Community Edition distributed at <a href="https://github.com/wholebodycompute/whole-body-compute">github.com/wholebodycompute/whole-body-compute</a> a royalty-free, non-exclusive, worldwide, non-sublicensable, revocable patent license under patent claims necessarily infringed by the unmodified Open-Core Community Edition as distributed, solely for personal, academic, evaluation, and internal developer workflows.
+      </p>
+    </section>
+
+    <section>
+      <h2>2. Commercial Exclusions</h2>
+      <p>No patent license, express or implied, is granted under any pending or issued patent for:</p>
+      <ul>
+        <li><strong>Competing Managed or Hosted Services:</strong> Offering Whole Body Compute (or any derivative work) as a hosted, managed, multi-tenant, SaaS, cloud, or API service to third parties.</li>
+        <li><strong>Commercial Resale &amp; Competing Products:</strong> Selling, licensing, or redistributing the software or its patented local context-shielding, desktop vision/motor, or hardware-supervisory mechanisms as part of a commercial agent runtime, IDE, FinOps shield, or developer platform.</li>
+        <li><strong>License-Gate Circumvention:</strong> Modifying, bypassing, spoofing, or removing license-tier verification checks in <code>src/whole_body_compute/license.py</code> or Pro feature stubs.</li>
+        <li><strong>Proprietary Pro, Team &amp; Enterprise Modules:</strong> Any closed-source capability distributed outside the Open-Core Community allowlist requires a valid commercial license from <a href="https://wholebodycompute.com">wholebodycompute.com</a>.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>3. Defensive Termination</h2>
+      <p>
+        If you or any affiliated entity initiate any patent litigation, administrative proceeding, or claim (including a cross-claim or counterclaim in a lawsuit) alleging that Whole Body Compute, Jacob Trigg, VoiceFi, or any contributor or licensee infringes any patent, then all patent and copyright licenses granted to you under <code>LICENSE</code> and <code>PATENTS.md</code> shall terminate automatically as of the date such litigation or claim is filed.
+      </p>
+    </section>
+
+    <section>
+      <h2>4. Commercial &amp; Enterprise Licensing Inquiries</h2>
+      <p>
+        For Pro (<code>$29/mo</code>), Team (<code>$79/seat/mo</code>), Enterprise Fleet (<code>$199/seat/mo</code>), or OEM patent licensing inquiries, visit <a href="https://wholebodycompute.com/pricing">wholebodycompute.com/pricing</a> or contact <a href="mailto:hello@wholebodycompute.com">hello@wholebodycompute.com</a>.
+      </p>
+    </section>
+
+    <footer>
+      <span>&copy; 2026 Whole Body Compute / Jacob Trigg. All rights reserved.</span>
+      <span><a href="https://github.com/wholebodycompute/whole-body-compute/blob/main/PATENTS.md">PATENTS.md</a> &bull; <a href="https://github.com/wholebodycompute/whole-body-compute/blob/main/LICENSE">LICENSE</a></span>
+    </footer>
+  </div>
+</body>
+</html>

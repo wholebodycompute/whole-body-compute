@@ -1,0 +1,54 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Pytest / Ruff caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# macOS
+.DS_Store
+
+# Local runtime state & databases
+*.db
+*.db-shm
+*.db-wal
+*.jsonl
+.env
+.voicefi/
+.agents/
+
+# Ignore raw demo video recordings & caches
+assets/*.mov
+assets/*.mp4
+.DS_Store
+__pycache__/
+*.pyc
+
+.claude/
+
+# Legal & patent provisional specifications (confidential during 12-month pendency)
+legal/
+legal/*.md
+
+# Private credentials & runtime telemetry
+.voicefi/license.json
+.agents/session_telemetry.jsonl
+
+# Cloudflare Wrangler local caches
+.wrangler/
+workers/**/.wrangler/
+
+

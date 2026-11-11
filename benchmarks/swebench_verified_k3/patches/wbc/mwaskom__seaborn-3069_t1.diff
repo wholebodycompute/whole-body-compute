@@ -1,0 +1,132 @@
+diff --git a/seaborn/_core/plot.py b/seaborn/_core/plot.py
+index 4f0290a..d5c1389 100644
+--- a/seaborn/_core/plot.py
++++ b/seaborn/_core/plot.py
+@@ -25,7 +25,7 @@ from seaborn._marks.base import Mark
+ from seaborn._stats.base import Stat
+ from seaborn._core.data import PlotData
+ from seaborn._core.moves import Move
+-from seaborn._core.scales import Scale
++from seaborn._core.scales import Scale, Nominal
+ from seaborn._core.subplots import Subplots
+ from seaborn._core.groupby import GroupBy
+ from seaborn._core.properties import PROPERTIES, Property
+@@ -1631,10 +1631,22 @@ class Plotter:
+             ax = sub["ax"]
+             for axis in "xy":
+                 axis_key = sub[axis]
++                axis_obj = getattr(ax, f"{axis}axis")
++
++                # Nominal axis adjustments
++                if any(
++                    isinstance(self._scales[k], Nominal)
++                    for k in self._scales if re.match(rf"^{axis_key}(\D|$)", str(k))
++                ):
++                    axis_obj.grid(False)
++                    n = len(axis_obj.get_major_locator()())
++                    if n:
++                        limits = (-.5, n - .5) if axis == "x" else (n - .5, -.5)
++                        getattr(ax, f"set_{axis}lim")(*limits, auto=None)
+ 
+                 # Axis limits
+                 if axis_key in p._limits:
+-                    convert_units = getattr(ax, f"{axis}axis").convert_units
++                    convert_units = axis_obj.convert_units
+                     a, b = p._limits[axis_key]
+                     lo = a if a is None else convert_units(a)
+                     hi = b if b is None else convert_units(b)
+diff --git a/tests/_core/test_plot.py b/tests/_core/test_plot.py
+index 03a6491..b476b79 100644
+--- a/tests/_core/test_plot.py
++++ b/tests/_core/test_plot.py
+@@ -645,6 +645,90 @@ class TestScaling:
+         with pytest.raises(RuntimeError, match=err):
+             p.plot()
+ 
++    def test_nominal_x_axis_tweaks(self):
++
++        p1 = Plot(x=["a", "b", "c"], y=[1, 2, 3]).add(MockMark()).plot()
++        ax1 = p1._figure.axes[0]
++        assert ax1.get_xlim() == (-.5, 2.5)
++        assert not ax1.xaxis_inverted()
++        assert not ax1.yaxis_inverted()
++        assert not any(line.get_visible() for line in ax1.xaxis.get_gridlines())
++        assert all(line.get_visible() for line in ax1.yaxis.get_gridlines())
++
++        p2 = (
++            Plot(x=[1, 2], y=[3, 4])
++            .scale(x=Nominal(order=[1, 2, 3, 4]))
++            .add(MockMark())
++            .plot()
++        )
++        ax2 = p2._figure.axes[0]
++        assert ax2.get_xlim() == (-.5, 3.5)
++        assert not any(line.get_visible() for line in ax2.xaxis.get_gridlines())
++
++    def test_nominal_y_axis_tweaks(self):
++
++        p1 = Plot(x=[1, 2, 3], y=["a", "b", "c"]).add(MockMark()).plot()
++        ax1 = p1._figure.axes[0]
++        assert ax1.get_ylim() == (2.5, -.5)
++        assert ax1.yaxis_inverted()
++        assert not any(line.get_visible() for line in ax1.yaxis.get_gridlines())
++        assert all(line.get_visible() for line in ax1.xaxis.get_gridlines())
++
++        p2 = Plot(x=[1, 2, 3], y=[10, 20, 30]).scale(y=Nominal()).add(MockMark()).plot()
++        ax2 = p2._figure.axes[0]
++        assert ax2.get_ylim() == (2.5, -.5)
++        assert ax2.yaxis_inverted()
++        assert not any(line.get_visible() for line in ax2.yaxis.get_gridlines())
++
++    def test_nominal_both_axes_tweaks(self):
++
++        p = Plot(x=["a", "b"], y=["x", "y", "z"][:2]).scale(
++            y=Nominal(order=["x", "y", "z"])
++        ).plot()
++        ax = p._figure.axes[0]
++        assert ax.get_xlim() == (-.5, 1.5)
++        assert ax.get_ylim() == (2.5, -.5)
++        assert not any(line.get_visible() for line in ax.xaxis.get_gridlines())
++        assert not any(line.get_visible() for line in ax.yaxis.get_gridlines())
++
++    def test_nominal_faceted_and_paired_tweaks(self, long_df):
++
++        p1 = (
++            Plot(x=[1, 2, 3, 4], y=["a", "b", "a", "c"])
++            .facet(col=["u", "u", "v", "v"])
++            .add(MockMark())
++            .plot()
++        )
++        for ax in p1._figure.axes:
++            assert ax.get_ylim() == (2.5, -.5)
++            assert ax.yaxis_inverted()
++            assert not any(line.get_visible() for line in ax.yaxis.get_gridlines())
++
++        p2 = (
++            Plot(x=["a", "b", "c"], y=[1, 2, 3])
++            .facet(col=["u", "u", "v"])
++            .share(x=False)
++            .add(MockMark())
++            .plot()
++        )
++        ax_u, ax_v = p2._figure.axes
++        assert ax_u.get_xlim() == (-.5, 1.5)
++        assert ax_v.get_xlim() == (-.5, .5)
++
++        p3 = Plot(long_df, y="y").pair(x=["a", "x"]).add(MockMark()).plot()
++        ax_cat, ax_num = p3._figure.axes
++        n_cat = long_df["a"].nunique()
++        assert ax_cat.get_xlim() == (-.5, n_cat - .5)
++        assert not any(line.get_visible() for line in ax_cat.xaxis.get_gridlines())
++        assert all(line.get_visible() for line in ax_num.xaxis.get_gridlines())
++
++    def test_nominal_limits_interaction(self):
++
++        p = Plot(x=["a", "b", "c", "d"], y=[1, 2, 3, 4]).limit(x=("b", None)).plot()
++        ax = p._figure.axes[0]
++        assert ax.get_xlim() == (.5, 3.5)
++        assert not any(line.get_visible() for line in ax.xaxis.get_gridlines())
++
+ 
+ class TestPlotting:
+ 
