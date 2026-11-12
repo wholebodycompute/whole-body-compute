@@ -10,11 +10,14 @@ Whole Body Compute makes AI computing simpler, faster, and local: giving Claude 
 ## Quickstart
 
 ```bash
-# Option 1: 1-line installer (macOS & Linux)
+# Option 1a: 1-line installer (macOS, Linux & Windows WSL2 Ubuntu)
 curl -fsSL https://wholebodycompute.com/begin | sh
 
-# Option 2: uv / pipx directly from GitHub
-uv tool install git+https://github.com/wholebodycompute/whole-body-compute.git && body begin
+# Option 1b: 1-line installer (Windows PowerShell)
+irm https://wholebodycompute.com/begin.ps1 | iex
+
+# Option 2: uv / pipx directly from PyPI or GitHub
+uv tool install whole-body-compute && body begin
 
 # Option 3: Source checkout
 git clone https://github.com/wholebodycompute/whole-body-compute.git

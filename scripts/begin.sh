@@ -51,6 +51,13 @@ else
   fi
 
   if ! command -v body >/dev/null 2>&1; then
+    if [ -x "$HOME/.local/bin/uv" ]; then
+      PATH="$HOME/.local/bin:$PATH"
+      export PATH
+    elif [ -x "$HOME/.cargo/bin/uv" ]; then
+      PATH="$HOME/.cargo/bin:$PATH"
+      export PATH
+    fi
     if command -v uv >/dev/null 2>&1; then
       if [ -n "$LOCAL_SRC" ]; then
         uv tool install "$LOCAL_SRC" >>"$INSTALL_LOG" 2>&1 || uv tool install --force "$LOCAL_SRC" >>"$INSTALL_LOG" 2>&1 || true
@@ -78,7 +85,7 @@ else
         python3 -m pip install --user whole-body-compute >>"$INSTALL_LOG" 2>&1 || python3 -m pip install --user "$GIT_REPO_URL" >>"$INSTALL_LOG" 2>&1 || true
       fi
       # PEP 668 externally-managed-environment fallback: create isolated user venv at ~/.whole_body_compute/venv
-      if ! command -v body >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/body" ] && grep -qi "externally-managed-environment" "$INSTALL_LOG" 2>/dev/null; then
+      if ! command -v body >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/body" ]; then
         WBC_VENV="$HOME/.whole_body_compute/venv"
         if python3 -m venv "$WBC_VENV" >>"$INSTALL_LOG" 2>&1; then
           if [ -n "$LOCAL_SRC" ]; then
@@ -94,6 +101,26 @@ else
           fi
         fi
       fi
+    fi
+  fi
+
+  # Stock Ubuntu / WSL / minimal Linux fallback (where python3-pip and python3-venv are missing by default):
+  # automatically bootstrap standalone `uv` into ~/.local/bin (no sudo required) and install whole-body-compute.
+  if ! command -v body >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/body" ] && [ -z "$LOCAL_SRC" ]; then
+    printf "  • Bootstrapping uv package manager (no root/apt required)...\n"
+    if command -v curl >/dev/null 2>&1; then
+      curl -LsSf https://astral.sh/uv/install.sh 2>>"$INSTALL_LOG" | env UV_PRINT_QUIET=1 sh >>"$INSTALL_LOG" 2>&1 || true
+    elif command -v wget >/dev/null 2>&1; then
+      wget -qO- https://astral.sh/uv/install.sh 2>>"$INSTALL_LOG" | env UV_PRINT_QUIET=1 sh >>"$INSTALL_LOG" 2>&1 || true
+    fi
+    for uv_cand_dir in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+      if [ -x "$uv_cand_dir/uv" ]; then
+        PATH="$uv_cand_dir:$PATH"
+        export PATH
+      fi
+    done
+    if command -v uv >/dev/null 2>&1; then
+      uv tool install whole-body-compute >>"$INSTALL_LOG" 2>&1 || uv tool install "$GIT_REPO_URL" >>"$INSTALL_LOG" 2>&1 || true
     fi
   fi
 

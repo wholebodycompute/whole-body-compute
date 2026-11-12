@@ -159,12 +159,21 @@ def _is_ephemeral_uvx_path(p: str) -> bool:
 
 
 def _find_persistent_binary(names: Sequence[str]) -> Optional[str]:
-    """Locate a persistent (non-ephemeral `uvx`) binary across standard user/Homebrew paths."""
+    """Locate a persistent (non-ephemeral `uvx`) binary across standard user/Homebrew/Windows paths."""
+    home = Path.home()
     search_dirs = [
-        str(Path.home() / ".local" / "bin"),
+        str(home / ".local" / "bin"),
         "/opt/homebrew/bin",
         "/usr/local/bin",
     ]
+    if os.name == "nt":
+        for win_dir in (
+            home / "AppData" / "Local" / "Programs" / "Python",
+            home / "AppData" / "Roaming" / "Python",
+            home / ".cargo" / "bin",
+        ):
+            if win_dir.exists():
+                search_dirs.append(str(win_dir))
     path_env = os.environ.get("PATH", "")
     for d in path_env.split(os.pathsep):
         if d and not _is_ephemeral_uvx_path(d) and d not in search_dirs:
@@ -177,8 +186,28 @@ def _find_persistent_binary(names: Sequence[str]) -> Optional[str]:
     return None
 
 
+def _quote_hook_path(path_str: str) -> str:
+    """Quote a binary path safely for the active OS shell (`"..."` on Windows, `'...'` on POSIX)."""
+    if os.name == "nt":
+        return f'"{path_str}"' if " " in path_str else path_str
+    return f"'{path_str}'"
+
+
 def resolve_hook_command() -> str:
     """Resolve the fastest persistent executable command for the Organ 05 PreToolUse hook."""
+    # Native Windows (`os.name == "nt"`): POSIX `/bin/sh` scripts cannot execute directly without sh;
+    # prefer the native `body-immune-hook` or `body` console_scripts `.exe` entrypoint.
+    if os.name == "nt":
+        hook_bin = _find_persistent_binary(("body-immune-hook", "body-immune-hook.exe"))
+        if hook_bin:
+            return _quote_hook_path(hook_bin)
+        body_bin = _find_persistent_binary(("body", "body.exe"))
+        if body_bin:
+            return f"{_quote_hook_path(body_bin)} immune-hook"
+        if sys.executable and not _is_ephemeral_uvx_path(sys.executable):
+            return f"{_quote_hook_path(sys.executable)} -m whole_body_compute.organs.immune"
+        return "body-immune-hook"
+
     # 1. Source checkout fast-path POSIX sh hook
     if DEFAULT_HOOK_SCRIPT.is_file() and not _is_ephemeral_uvx_path(str(DEFAULT_HOOK_SCRIPT)):
         return f"'{DEFAULT_HOOK_SCRIPT}'"
@@ -421,11 +450,25 @@ def wire_workspace_hooks(
             copilot_path, rule_body, dry_run=dry_run, force_rules=force_rules
         )
 
-    # Optional Codex / Universal AGENTS.md wiring
+    # Optional Codex / Universal AGENTS.md wiring (.codex/hooks.json + AGENTS.md)
+    codex_dir = workspace / ".codex"
+    codex_hooks_status = "skipped"
+    has_codex_harness = codex_dir.exists() or (
+        "PYTEST_CURRENT_TEST" not in os.environ
+        and ((Path.home() / ".codex").exists() or shutil.which("codex") is not None)
+    )
+    if has_codex_harness:
+        wired_harnesses.append("codex")
+        codex_res = install_codex_hooks(
+            workspace, hook_bin=hook_cmd, dry_run=dry_run, force_rules=force_rules
+        )
+        codex_hooks_status = codex_res["status"]
+
     agents_md_path = workspace / "AGENTS.md"
     agents_md_status = "skipped"
-    if agents_md_path.exists():
-        wired_harnesses.append("agents.md")
+    if agents_md_path.exists() or has_codex_harness:
+        if "agents.md" not in wired_harnesses:
+            wired_harnesses.append("agents.md")
         agents_md_status = _upsert_marked_rule_file(
             agents_md_path, rule_body, dry_run=dry_run, force_rules=force_rules
         )
@@ -458,6 +501,7 @@ def wire_workspace_hooks(
         "rule_status": rule_status,
         "claude_hooks_status": claude_hooks_status,
         "claude_md_status": claude_md_status,
+        "codex_hooks_status": codex_hooks_status,
         "cursor_status": cursor_status,
         "cursorrules_status": cursorrules_status,
         "windsurf_status": windsurf_status,
@@ -794,6 +838,56 @@ def install_goose_hooks(
     }
 
 
+def install_codex_hooks(
+    workspace: Path,
+    hook_bin: str = "",
+    dry_run: bool = False,
+    force_rules: bool = False,
+) -> Dict[str, Any]:
+    """Safely wire `.codex/hooks.json` for OpenAI Codex CLI PreToolUse & PostToolUse protection."""
+    codex_dir = workspace / ".codex"
+    hooks_path = codex_dir / "hooks.json"
+    resolved_cmd = hook_bin.strip() if hook_bin else resolve_hook_command()
+    gate_cfg = build_immune_gate_config(resolved_cmd)
+
+    existing_hooks: Dict[str, Any] = {}
+    if hooks_path.exists():
+        try:
+            loaded = json.loads(hooks_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing_hooks = loaded
+        except Exception:
+            existing_hooks = {}
+
+    merged = dict(existing_hooks)
+    merged["whole-body-immune-gate"] = gate_cfg
+    hooks_map = merged.setdefault("hooks", {})
+    if isinstance(hooks_map, dict):
+        hooks_map["PreToolUse"] = gate_cfg["PreToolUse"]
+        hooks_map["PostToolUse"] = gate_cfg["PostToolUse"]
+    merged["PreToolUse"] = gate_cfg["PreToolUse"]
+    merged["PostToolUse"] = gate_cfg["PostToolUse"]
+
+    if not hooks_path.exists():
+        status = "created"
+    elif "whole-body-immune-gate" in existing_hooks and not force_rules:
+        status = "verified"
+    else:
+        status = "updated"
+
+    if not dry_run:
+        codex_dir.mkdir(parents=True, exist_ok=True)
+        hooks_path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+
+    return {
+        "status": status,
+        "path": str(hooks_path),
+        "hooks_path": str(hooks_path),
+        "hook_command": resolved_cmd,
+        "dry_run": dry_run,
+    }
+
+
 def install_git_precommit_secgate(
     workspace: Path,
     dry_run: bool = False,
@@ -1028,6 +1122,10 @@ def install_multi_harness_hooks(
         results["goose"] = install_goose_hooks(
             workspace, hook_bin=hook_bin, dry_run=dry_run, force_rules=force_rules
         )
+    if "codex" in harness_set:
+        results["codex"] = install_codex_hooks(
+            workspace, hook_bin=hook_bin, dry_run=dry_run, force_rules=force_rules
+        )
     if "pre_commit" in harness_set or "git" in harness_set:
         results["pre_commit"] = install_git_precommit_secgate(workspace, dry_run=dry_run)
     return results
@@ -1161,6 +1259,9 @@ def run_body_begin(
             ".agents/",
             ".claude/settings.local.json",
             "CLAUDE.md",
+            "AGENTS.md",
+            ".codex/",
+            ".codex/hooks.json",
             ".cursor/",
             ".cursor/hooks.json",
             ".cursor/rules/agent_efficiency.mdc",
@@ -1294,11 +1395,16 @@ def run_body_begin(
         ".agents/",
         ".claude/settings.local.json",
         "CLAUDE.md",
+        "AGENTS.md",
         ".cursorrules",
         ".opencode/",
         ".windsurfrules",
         ".goosehints",
     ]
+    if ".codex/" not in preexisting_paths:
+        candidate_excludes.append(".codex/")
+    else:
+        candidate_excludes.append(".codex/hooks.json")
     if ".cursor/" not in preexisting_paths:
         candidate_excludes.append(".cursor/")
     else:
@@ -1689,6 +1795,8 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
         lines.append(f"  • 📈 {day0_comp['summary']}")
     if wiring.get("claude_hooks_status") and wiring.get("claude_hooks_status") != "skipped":
         lines.append(f"  • Claude Code Hook:  {wiring.get('claude_hooks_status').upper()} (.claude/settings.local.json)")
+    if wiring.get("codex_hooks_status") and wiring.get("codex_hooks_status") != "skipped":
+        lines.append(f"  • OpenAI Codex Hook: {wiring.get('codex_hooks_status').upper()} (.codex/hooks.json)")
     if cursor_h := result.get("cursor_hook"):
         if cursor_h.get("status") not in (None, "skipped"):
             lines.append(f"  • Cursor Hook:       {cursor_h.get('status').upper()} -> {cursor_h.get('path')}")

@@ -111,6 +111,7 @@ include = [
     "/docs/schemas/pal_workflow_v1.json",
     "/schemas/pal_workflow_v1.json",
     "/scripts/begin.sh",
+    "/scripts/begin.ps1",
     "/src/whole_body_compute",
     "/tests/test_immune_bbb.py",
 ]

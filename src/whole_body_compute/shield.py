@@ -1659,6 +1659,17 @@ def resolve_shield_hook_command() -> str:
     """Resolve the zero-schema executable command for Organ 05 PreToolUse/PostToolUse hooks. # [direct-edit]"""
     import sys
 
+    if os.name == "nt":
+        hook_bin = shutil.which("body-immune-hook") or shutil.which("body-immune-hook.exe")
+        if hook_bin:
+            return f'"{hook_bin}"' if " " in hook_bin else hook_bin
+        body_bin = shutil.which("body") or shutil.which("body.exe")
+        if body_bin:
+            q_body = f'"{body_bin}"' if " " in body_bin else body_bin
+            return f"{q_body} immune-hook"
+        q_py = f'"{sys.executable}"' if " " in sys.executable else sys.executable
+        return f"{q_py} -m whole_body_compute.organs.immune"
+
     if DEFAULT_HOOK_SCRIPT.exists():
         return f"'{DEFAULT_HOOK_SCRIPT}'"
     hook_bin = shutil.which("body-immune-hook")

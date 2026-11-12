@@ -14,7 +14,10 @@ Ensures bidirectional crumbs exist in:
 from __future__ import annotations
 
 import datetime
-import fcntl
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows native fallback
+    fcntl = None  # type: ignore[assignment]
 import json
 import os
 import re

@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import ast
 import contextlib
-import fcntl
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows native fallback
+    fcntl = None  # type: ignore[assignment]
 import hashlib
 import json
 import os
@@ -143,7 +146,8 @@ def record_file_touch(
     now = time.time()
 
     with open(lock_path, "w", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        if fcntl is not None:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
             data: dict[str, Any] = {"touches": {}}
             if touches_path.exists():
@@ -187,7 +191,8 @@ def record_file_touch(
             data["touches"] = active_touches
             touches_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def remove_touches(repo_root: Path, rel_paths: list[str]) -> None:
@@ -202,7 +207,8 @@ def remove_touches(repo_root: Path, rel_paths: list[str]) -> None:
         contextlib.suppress(OSError, json.JSONDecodeError),
         open(lock_path, "w", encoding="utf-8") as lock_file,
     ):
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        if fcntl is not None:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
             loaded = json.loads(touches_path.read_text(encoding="utf-8"))
             touches = loaded.get("touches", {})
@@ -211,7 +217,8 @@ def remove_touches(repo_root: Path, rel_paths: list[str]) -> None:
             loaded["touches"] = touches
             touches_path.write_text(json.dumps(loaded, indent=2), encoding="utf-8")
         finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def resolve_smart_scope(
@@ -240,7 +247,8 @@ def resolve_smart_scope(
             contextlib.suppress(OSError, json.JSONDecodeError),
             open(lock_path, "w", encoding="utf-8") as lock_file,
         ):
-            fcntl.flock(lock_file, fcntl.LOCK_SH)
+            if fcntl is not None:
+                fcntl.flock(lock_file, fcntl.LOCK_SH)
             try:
                 loaded = json.loads(touches_path.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict) and "touches" in loaded:
@@ -248,7 +256,8 @@ def resolve_smart_scope(
                         if isinstance(entry, dict) and (now - float(entry.get("ts", 0))) < 120.0:
                             active_touches[p] = entry
             finally:
-                fcntl.flock(lock_file, fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
 
     if explicit_paths:
         normalized = [normalize_repo_path(p, root) for p in explicit_paths]
@@ -578,6 +587,9 @@ def sync_main_index(repo_root: Path, scoped_rel_paths: list[str]) -> bool:
         fd = os.open(str(sync_lock_path), os.O_CREAT | os.O_RDWR)
         acquired = False
         while time.time() < deadline:
+            if fcntl is None:
+                acquired = True
+                break
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 acquired = True
@@ -602,8 +614,9 @@ def sync_main_index(repo_root: Path, scoped_rel_paths: list[str]) -> bool:
         return False
     finally:
         if fd is not None:
-            with contextlib.suppress(OSError):
-                fcntl.flock(fd, fcntl.LOCK_UN)
+            if fcntl is not None:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
             with contextlib.suppress(OSError):
                 os.close(fd)
 

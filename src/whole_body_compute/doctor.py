@@ -9,7 +9,10 @@ Runs a concurrent 4-point check:
 
 from concurrent.futures import ThreadPoolExecutor
 import ctypes
-import fcntl
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows native fallback
+    fcntl = None  # type: ignore[assignment]
 import importlib.metadata
 import json
 import os
@@ -177,7 +180,7 @@ def check_speech_pipe_locks() -> Dict[str, Any]:
 
     # 1. Non-blocking probe on SPEECH_LOCK_FILE
     speech_lock_path = Path(os.environ.get("VOICEFI_SPEECH_LOCK", "/tmp/voicefi_speech.lock"))
-    if speech_lock_path.exists():
+    if speech_lock_path.exists() and fcntl is not None:
         try:
             with open(speech_lock_path, "a+") as f:
                 try:
@@ -190,7 +193,7 @@ def check_speech_pipe_locks() -> Dict[str, Any]:
 
     # 2. Non-blocking probe on AUDIO_LOCK_FILE
     audio_lock_path = Path(os.environ.get("VOICEFI_AUDIO_LOCK", "/tmp/voicefi_audio_output.lock"))
-    if audio_lock_path.exists():
+    if audio_lock_path.exists() and fcntl is not None:
         try:
             with open(audio_lock_path, "a+") as f:
                 try:
