@@ -21,7 +21,6 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from whole_body_compute.bundled import (
     get_bundled_immune_hook_path,
-    get_bundled_rule_path,
 )
 from whole_body_compute.doctor import (
     check_organ_brainstem,
@@ -34,8 +33,6 @@ from whole_body_compute.redaction import redact_secrets
 
 WBC_REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HOOK_SCRIPT = WBC_REPO_ROOT / "bin" / "body-immune-hook"
-TEMPLATE_RULE_PATH = WBC_REPO_ROOT / ".agents" / "rules" / "agent_efficiency.md"
-BUNDLED_RULE_PATH = get_bundled_rule_path()
 BUNDLED_HOOK_SCRIPT = get_bundled_immune_hook_path()
 
 MULTI_HARNESS_TOOL_MATCHER = (
@@ -94,17 +91,8 @@ def _is_wbc_source_repo(workspace: Optional[Path]) -> bool:
 
 
 def _load_bbb_rule_body(workspace: Optional[Path] = None) -> str:
-    """Return the BBB Context Shield rule content tailored for internal vs external workspaces."""
-    if _is_wbc_source_repo(workspace) and TEMPLATE_RULE_PATH.exists():
-        try:
-            return TEMPLATE_RULE_PATH.read_text(encoding="utf-8").strip()
-        except Exception:
-            pass
-    if BUNDLED_RULE_PATH.is_file():
-        try:
-            return BUNDLED_RULE_PATH.read_text(encoding="utf-8").strip()
-        except Exception:
-            pass
+    """Return the BBB Context Shield rule content for harnesses that rely on markdown hints."""
+    _ = workspace
     return FALLBACK_AGENT_EFFICIENCY_RULE.strip()
 
 
@@ -279,15 +267,14 @@ def wire_workspace_hooks(
     force_rules: bool = False,
 ) -> Dict[str, Any]:
     """
-    Safely wire `.agents/hooks.json`, `.agents/rules/agent_efficiency.md`, and
-    detected multi-harness configs (Claude Code, Cursor, Windsurf, Cline/Roo,
-    GitHub Copilot, and AGENTS.md) inside `workspace` without overwriting user
-    customizations.
+    Safely wire `.agents/hooks.json` and detected multi-harness configs
+    (Claude Code, Cursor, Windsurf, Cline/Roo, GitHub Copilot, and AGENTS.md)
+    inside `workspace` without overwriting user customizations or injecting
+    redundant `.agents/rules/agent_efficiency.md` bloat.
     """
     agents_dir = workspace / ".agents"
     hooks_path = agents_dir / "hooks.json"
-    rules_dir = agents_dir / "rules"
-    rule_path = rules_dir / "agent_efficiency.md"
+    stale_rule_path = agents_dir / "rules" / "agent_efficiency.md"
 
     hook_cmd = resolve_hook_command()
     gate_cfg = build_immune_gate_config(hook_cmd)
@@ -313,16 +300,13 @@ def wire_workspace_hooks(
         agents_dir.mkdir(parents=True, exist_ok=True)
         hooks_path.write_text(json.dumps(merged_hooks, indent=2) + "\n", encoding="utf-8")
 
-    # Wire Bicameral Compute rule (.agents/rules/agent_efficiency.md)
-    rule_status = "verified"
-    if not rule_path.exists() or force_rules:
-        rule_status = "created" if not rule_path.exists() else "updated"
-        if not dry_run:
-            rules_dir.mkdir(parents=True, exist_ok=True)
-            if _is_wbc_source_repo(workspace) and TEMPLATE_RULE_PATH.exists() and TEMPLATE_RULE_PATH.resolve() != rule_path.resolve():
-                shutil.copy2(TEMPLATE_RULE_PATH, rule_path)
-            else:
-                rule_path.write_text(rule_body + "\n", encoding="utf-8")
+    # Clean up deprecated .agents/rules/agent_efficiency.md bloat if present
+    rule_status = "removed" if stale_rule_path.exists() else "skipped"
+    if stale_rule_path.exists() and not dry_run:
+        try:
+            stale_rule_path.unlink()
+        except OSError:
+            pass
 
     wired_harnesses: List[str] = ["antigravity"]
 
@@ -361,21 +345,13 @@ def wire_workspace_hooks(
         else:
             claude_hooks_status = "verified"
 
-    # Optional Cursor (.cursor/) wiring: .cursor/rules/agent_efficiency.mdc & .cursor/hooks.json
+    # Optional Cursor (.cursor/) wiring: .cursor/hooks.json (removes stale agent_efficiency.mdc bloat)
     cursor_dir = workspace / ".cursor"
     cursor_status = "skipped"
     if cursor_dir.exists():
         wired_harnesses.append("cursor")
-        cursor_rule_path = cursor_dir / "rules" / "agent_efficiency.mdc"
+        stale_cursor_rule = cursor_dir / "rules" / "agent_efficiency.mdc"
         cursor_hooks_path = cursor_dir / "hooks.json"
-        cursor_mdc = (
-            "---\n"
-            "description: Whole Body Compute - Blood Brain Barrier (BBB) 3-Layer Context Shield\n"
-            "globs: *\n"
-            "alwaysApply: true\n"
-            "---\n\n"
-            f"{rule_body}\n"
-        )
         cursor_existing_hooks: Dict[str, Any] = {}
         if cursor_hooks_path.exists():
             try:
@@ -390,13 +366,15 @@ def wire_workspace_hooks(
         cursor_merged.setdefault("PostToolUse", gate_cfg["PostToolUse"])
         cursor_status = (
             "created"
-            if (not cursor_rule_path.exists() and not cursor_hooks_path.exists())
+            if not cursor_hooks_path.exists()
             else ("updated" if ("whole-body-immune-gate" not in cursor_existing_hooks or force_rules) else "verified")
         )
         if not dry_run:
-            cursor_rule_path.parent.mkdir(parents=True, exist_ok=True)
-            if not cursor_rule_path.exists() or force_rules:
-                cursor_rule_path.write_text(cursor_mdc, encoding="utf-8")
+            if stale_cursor_rule.exists():
+                try:
+                    stale_cursor_rule.unlink()
+                except OSError:
+                    pass
             cursor_hooks_path.write_text(json.dumps(cursor_merged, indent=2) + "\n", encoding="utf-8")
 
     # Optional Windsurf (.windsurf/ or .windsurfrules) wiring
@@ -431,11 +409,16 @@ def wire_workspace_hooks(
     cline_status = "skipped"
     if clinerules_path.exists() or roo_dir.exists():
         wired_harnesses.append("cline")
-        target_cline_file = (
-            clinerules_path / "agent_efficiency.md"
-            if clinerules_path.exists() and clinerules_path.is_dir()
-            else clinerules_path
-        )
+        if clinerules_path.exists() and clinerules_path.is_dir():
+            stale_cline_rule = clinerules_path / "agent_efficiency.md"
+            if stale_cline_rule.exists() and not dry_run:
+                try:
+                    stale_cline_rule.unlink()
+                except OSError:
+                    pass
+            target_cline_file = clinerules_path / "wbc_shield.md"
+        else:
+            target_cline_file = clinerules_path
         cline_status = _upsert_marked_rule_file(
             target_cline_file, rule_body, dry_run=dry_run, force_rules=force_rules
         )
@@ -497,7 +480,7 @@ def wire_workspace_hooks(
         "hooks_path": str(hooks_path),
         "hooks_status": hooks_status,
         " preserved_hook_keys": [k for k in existing_hooks.keys() if k != "whole-body-immune-gate"],
-        "rule_path": str(rule_path),
+        "rule_path": None,
         "rule_status": rule_status,
         "claude_hooks_status": claude_hooks_status,
         "claude_md_status": claude_md_status,
@@ -520,19 +503,17 @@ def install_cursor_hooks(
     force_rules: bool = False,
 ) -> Dict[str, Any]:
     """
-    Safely wire .cursor/hooks.json and .cursor/rules/agent_efficiency.mdc.
+    Safely wire .cursor/hooks.json (and clean up stale .cursor/rules/agent_efficiency.mdc).
     Configures `beforeReadFile`, `beforeShellExecution`, and `PreToolUse`/`PostToolUse`
     pointing to `body-immune-hook` so Cursor Background & Composer Agents get
     sub-3ms AST Slicing and Shell Anti-Bloat protection while preserving existing hooks.
     """
     cursor_dir = workspace / ".cursor"
     cursor_hooks_path = cursor_dir / "hooks.json"
-    cursor_rules_dir = cursor_dir / "rules"
-    cursor_mdc_path = cursor_rules_dir / "agent_efficiency.mdc"
+    stale_cursor_mdc = cursor_dir / "rules" / "agent_efficiency.mdc"
 
     resolved_cmd = hook_bin.strip() if hook_bin else resolve_hook_command()
     gate_cfg = build_immune_gate_config(resolved_cmd)
-    rule_body = _load_bbb_rule_body(workspace)
 
     existing_hooks: Dict[str, Any] = {}
     if cursor_hooks_path.exists():
@@ -569,15 +550,6 @@ def install_cursor_hooks(
         nested_hooks["PreToolUse"] = gate_cfg["PreToolUse"]
         nested_hooks["PostToolUse"] = gate_cfg["PostToolUse"]
 
-    cursor_mdc = (
-        "---\n"
-        "description: Whole Body Compute - Blood Brain Barrier (BBB) 3-Layer Context Shield\n"
-        "globs: *\n"
-        "alwaysApply: true\n"
-        "---\n\n"
-        f"{rule_body}\n"
-    )
-
     if not cursor_hooks_path.exists():
         status = "created"
     elif "whole-body-immune-gate" in existing_hooks and not force_rules:
@@ -587,9 +559,11 @@ def install_cursor_hooks(
 
     if not dry_run:
         cursor_dir.mkdir(parents=True, exist_ok=True)
-        cursor_rules_dir.mkdir(parents=True, exist_ok=True)
-        if not cursor_mdc_path.exists() or force_rules:
-            cursor_mdc_path.write_text(cursor_mdc, encoding="utf-8")
+        if stale_cursor_mdc.exists():
+            try:
+                stale_cursor_mdc.unlink()
+            except OSError:
+                pass
         cursor_hooks_path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
 
     return {
@@ -1076,7 +1050,7 @@ def run_git_precommit_cli(workspace: Optional[Path] = None) -> int:
 
         eval_res = evaluate_staged_files_secgate(files_content, parent_contents)
         if not eval_res["passed"]:
-            sys.stderr.write("🛑 [Whole Body Compute AST SecGate Pre-Commit Denied]\n")
+            sys.stderr.write("[Whole Body Compute AST SecGate Pre-Commit Denied]\n")
             for viol in eval_res.get("violations", []):
                 sys.stderr.write(f"  • {viol['file']} (Stage {viol['stage']}): {viol['reason']}\n")
             return 1
@@ -1264,7 +1238,6 @@ def run_body_begin(
             ".codex/hooks.json",
             ".cursor/",
             ".cursor/hooks.json",
-            ".cursor/rules/agent_efficiency.mdc",
             ".cursorrules",
             ".opencode/",
             ".windsurf/hooks.json",
@@ -1408,7 +1381,7 @@ def run_body_begin(
     if ".cursor/" not in preexisting_paths:
         candidate_excludes.append(".cursor/")
     else:
-        candidate_excludes.extend([".cursor/hooks.json", ".cursor/rules/agent_efficiency.mdc"])
+        candidate_excludes.append(".cursor/hooks.json")
     if ".goose/" not in preexisting_paths:
         candidate_excludes.append(".goose/")
     else:
@@ -1807,16 +1780,17 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
 
     lines = [
         "",
-        f"🧬 WHOLE BODY COMPUTE - WORKSPACE AWAKENING (`body begin`){dry_tag}",
+        f"WHOLE BODY COMPUTE - WORKSPACE AWAKENING (`body begin`){dry_tag}",
         "═" * 84,
         f"  • Workspace:         {wiring.get('workspace')}",
         f"  • Whole Body Hook:   {wiring.get('hooks_status', 'wired').upper()} -> {wiring.get('hooks_path')}",
-        f"  • Context Rule:      {wiring.get('rule_status', 'wired').upper()} -> {wiring.get('rule_path')}",
         f"  • Wired Harnesses:   {', '.join(wired_list)}",
         f"  • Team Hive-Mind:    SYNCED -> {team_sync.get('sync_path', '.agents/team_exemplars.jsonl')} ({team_sync.get('total_team_exemplars', 0)} exemplars)",
     ]
+    if wiring.get("rule_status") == "removed":
+        lines.append("  • Stale Rule Pruned: REMOVED (.agents/rules/agent_efficiency.md)")
     if day0_comp.get("summary"):
-        lines.append(f"  • 📈 {day0_comp['summary']}")
+        lines.append(f"  • {day0_comp['summary']}")
     if wiring.get("claude_hooks_status") and wiring.get("claude_hooks_status") != "skipped":
         lines.append(f"  • Claude Code Hook:  {wiring.get('claude_hooks_status').upper()} (.claude/settings.local.json)")
     if wiring.get("codex_hooks_status") and wiring.get("codex_hooks_status") != "skipped":
@@ -1840,13 +1814,13 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
             )
     if wiring.get("uvx_ephemeral_warning"):
         lines.append(
-            "  • ⚠️ Ephemeral uvx:   Run `uv tool install whole-body-compute && body begin` so hooks persist"
+            "  • [WARN] Ephemeral uvx: Run `uv tool install whole-body-compute && body begin` so hooks persist"
         )
 
     lines.extend(
         [
             "",
-            "🫀 CORE PHYSIOLOGICAL VITALS",
+            "CORE PHYSIOLOGICAL VITALS",
             "─" * 84,
             f"  • The Heart:         {organs.get('heart', {}).get('status', 'pass').upper():<5} | {organs.get('heart', {}).get('summary', '')}",
             f"  • The Brainstem:     {organs.get('brainstem', {}).get('status', 'pass').upper():<5} | {organs.get('brainstem', {}).get('summary', '')}",
@@ -1858,7 +1832,7 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
         lines.extend(
             [
                 "",
-                "⚡ LIVE REFLEX SELF-TEST (MEASURED ON THIS MAC)",
+                "LIVE REFLEX SELF-TEST (MEASURED ON THIS HOST)",
                 "─" * 84,
                 (
                     f"  • AST Monster Slicer:  {reflex.get('ast_source_lines', 1200):,}-line module -> "
@@ -1889,7 +1863,7 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "🔒 SOVEREIGN TELEMETRY & PROCEDURAL DNA",
+            "SOVEREIGN TELEMETRY & PROCEDURAL DNA",
             "─" * 84,
             f"  • Active Tier:       {tier_str}",
             f"  • Storage Footprint: {storage_mb:.2f} MB / {budget_mb:.1f} MB ring-buffer cap ({cards_count} learning cards)",
@@ -1912,7 +1886,7 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
         lines.extend(
             [
                 "",
-                f"💸 INSTANT {window_days}-DAY RETROACTIVE FINOPS RECEIPT",
+                f"INSTANT {window_days}-DAY RETROACTIVE FINOPS RECEIPT",
                 "─" * 84,
                 f"  • Scanned History:   {threads} local agent conversations ({raw_tokens:,} cumulative tokens)",
                 f"  • Preventable Tax:   ${raw_usd:,.2f} spent -> ${saved_usd:,.2f} preventable ({savings_pct:.1f}% Context-Tax reduction)",
@@ -1924,7 +1898,7 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
         lines.extend(
             [
                 "",
-                f"💸 INSTANT {window_days}-DAY RETROACTIVE FINOPS RECEIPT",
+                f"INSTANT {window_days}-DAY RETROACTIVE FINOPS RECEIPT",
                 "─" * 84,
                 "  • Scanned History:   0 prior local agent sessions found in current $HOME (Day-0 clean baseline recorded)",
                 "  • SWE-bench k=3:     1.48x context (-32.4%, 203.08M->137.23M) · 1.52x net (-34.3%) · 1.34x billed runway (-25.6%) · -18.8% turns @ 100% Pass^3",
@@ -1935,7 +1909,7 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "⚡ READY - NEXT COMMANDS",
+            "READY - NEXT COMMANDS",
             "─" * 84,
             "  • Full 5-Organ Audit:        body doctor --exercise",
             "  • Retroactive Spend Audit:   body audit-spend",

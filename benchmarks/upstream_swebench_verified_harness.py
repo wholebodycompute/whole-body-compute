@@ -361,6 +361,21 @@ def parse_worker_transcript(conv_id: str, brain_dir: Path | None = None) -> dict
     cache_read = sum(int(s.get("cache_read_tokens", 0)) for s in planner_steps)
     output_tokens = sum(int(s.get("output_tokens", 0)) for s in planner_steps)
     total_context = billed_input + cache_read
+
+    cache_miss_turns = 0
+    cache_eviction_rebilled_tokens = 0
+    for i in range(1, len(planner_steps)):
+        prev_ctx = int(planner_steps[i - 1].get("input_tokens", 0)) + int(
+            planner_steps[i - 1].get("cache_read_tokens", 0)
+        )
+        curr_cache = int(planner_steps[i].get("cache_read_tokens", 0))
+        drop = prev_ctx - curr_cache
+        # Ignore minor KV block-alignment jitter; only flag real replica misses (>10% & >4k drop, or full 0 reset).
+        if curr_cache == 0 or (drop > 4096 and drop > int(prev_ctx * 0.10)):
+            cache_miss_turns += 1
+            cache_eviction_rebilled_tokens += max(0, drop)
+    cache_normalized_billed_input = max(0, billed_input - cache_eviction_rebilled_tokens)
+
     first_step_context = int(planner_steps[0].get("input_tokens", 0)) + int(
         planner_steps[0].get("cache_read_tokens", 0)
     )
@@ -393,6 +408,9 @@ def parse_worker_transcript(conv_id: str, brain_dir: Path | None = None) -> dict
         "turns": turns,
         "wall_seconds": wall_seconds,
         "billed_input_tokens": billed_input,
+        "cache_miss_turns": cache_miss_turns,
+        "cache_eviction_rebilled_tokens": cache_eviction_rebilled_tokens,
+        "cache_normalized_billed_input_tokens": cache_normalized_billed_input,
         "cache_read_tokens": cache_read,
         "total_context_tokens": total_context,
         "turn1_base_prompt_tokens": first_step_context,

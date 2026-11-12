@@ -211,10 +211,13 @@ case "$WBC_AIRLOCK_MODE" in
                         if [ -f "$SH_FPATH" ]; then
                           AWK_PACK="$(awk '
                             /^[[:space:]]*(async[[:space:]]+def|def|class)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/ {
-                              if (cnt < 40) {
+                              if (cnt < 180) {
                                 line = $0
                                 sub(/^[[:space:]]+/, "  ", line)
                                 sub(/:[[:space:]]*(#.*)?$/, "", line)
+                                if (length(line) > 80) {
+                                  sub(/\(.*/, "(...)", line)
+                                }
                                 gsub(/\\/, "\\\\", line)
                                 gsub(/"/, "\\\"", line)
                                 gsub(/\r/, "", line)

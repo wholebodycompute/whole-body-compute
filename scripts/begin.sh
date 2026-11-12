@@ -13,7 +13,7 @@ GREEN="\033[32m"
 YELLOW="\033[33m"
 RESET="\033[0m"
 
-printf "\n${BOLD}${CYAN}🧬 Whole Body Compute - Sovereign Agent OS Awakening${RESET}\n"
+printf "\n${BOLD}${CYAN}Whole Body Compute - Sovereign Agent OS Awakening${RESET}\n"
 printf "════════════════════════════════════════════════════════════════════\n"
 
 OS_NAME="$(uname -s)"
@@ -26,24 +26,30 @@ fi
 
 # 1. Locate or install Whole Body Compute CLI (`body`)
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || true)"
+GIT_REPO_URL="git+https://github.com/wholebodycompute/whole-body-compute.git"
+LOCAL_SRC=""
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/pyproject.toml" ]; then
+  LOCAL_SRC="$SCRIPT_DIR"
+fi
 
 if command -v body >/dev/null 2>&1; then
   printf "${GREEN}  ✓ Found existing 'body' CLI: $(command -v body)${RESET}\n"
+  if [ -z "$LOCAL_SRC" ] && [ "${WBC_SKIP_UPGRADE:-0}" != "1" ] && command -v uv >/dev/null 2>&1; then
+    uv tool upgrade whole-body-compute >/dev/null 2>&1 || uv tool install --force "$GIT_REPO_URL" >/dev/null 2>&1 || true
+  fi
 elif [ -x "$HOME/.local/bin/body" ]; then
   printf "${GREEN}  ✓ Found user '~/.local/bin/body' CLI${RESET}\n"
   PATH="$HOME/.local/bin:$PATH"
   export PATH
+  if [ -z "$LOCAL_SRC" ] && [ "${WBC_SKIP_UPGRADE:-0}" != "1" ] && command -v uv >/dev/null 2>&1; then
+    uv tool upgrade whole-body-compute >/dev/null 2>&1 || uv tool install --force "$GIT_REPO_URL" >/dev/null 2>&1 || true
+  fi
 elif [ -x "./.venv/bin/body" ]; then
   printf "${GREEN}  ✓ Found workspace '.venv/bin/body' CLI${RESET}\n"
   PATH="$(pwd)/.venv/bin:$PATH"
   export PATH
 else
   printf "  • Installing whole-body-compute CLI...\n"
-  GIT_REPO_URL="git+https://github.com/wholebodycompute/whole-body-compute.git"
-  LOCAL_SRC=""
-  if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/pyproject.toml" ]; then
-    LOCAL_SRC="$SCRIPT_DIR"
-  fi
 
   INSTALL_LOG="$(mktemp /tmp/wbc_install.XXXXXX 2>/dev/null || printf '/tmp/wbc_install.log')"
   if command -v brew >/dev/null 2>&1 && [ "$OS_NAME" = "Darwin" ] && [ -z "$LOCAL_SRC" ] && [ "${WBC_PREFER_BREW:-0}" = "1" ]; then

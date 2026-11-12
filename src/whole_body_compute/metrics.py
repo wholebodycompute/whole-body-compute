@@ -1394,7 +1394,6 @@ class CanonicalMetricsEngine:
     ) -> Dict[str, Any]:
         # 1. Workspace Awakenings (`body begin` / `body shield` status + sibling projects)
         hooks_path = self.workspace_root / ".agents" / "hooks.json"
-        rule_path = self.workspace_root / ".agents" / "rules" / "agent_efficiency.md"
         day0_path = self.workspace_root / ".agents" / "day0_finops_baseline.json"
         exemplars_path = self.workspace_root / ".agents" / "team_exemplars.jsonl"
 
@@ -1421,7 +1420,6 @@ class CanonicalMetricsEngine:
         )
         cursor_wired = _json_has_wbc_hook(self.workspace_root / ".cursor" / "hooks.json")
         hooks_installed = bool(agy_wired or claude_wired or cursor_wired)
-        rules_installed = rule_path.is_file()
         wired_harnesses: List[str] = []
         if agy_wired:
             wired_harnesses.append("antigravity")
@@ -1445,7 +1443,7 @@ class CanonicalMetricsEngine:
             )
 
         awakened_workspaces: List[str] = []
-        if _has_active_bbb_hook(self.workspace_root) or hooks_installed or rules_installed:
+        if _has_active_bbb_hook(self.workspace_root) or hooks_installed:
             awakened_workspaces.append(self.workspace_root.name)
         try:
             projects_dir = self.workspace_root.parent
@@ -1576,7 +1574,7 @@ class CanonicalMetricsEngine:
             "workspace_awakenings": {
                 "current_workspace_wired": bool(hooks_installed),
                 "hooks_installed": hooks_installed,
-                "rules_installed": rules_installed,
+                "rules_installed": False,
                 "day0_baseline_recorded": day0_path.is_file(),
                 "wired_harnesses": wired_harnesses or ["antigravity"],
                 "local_protected_repos_count": max(1, len(awakened_workspaces)),

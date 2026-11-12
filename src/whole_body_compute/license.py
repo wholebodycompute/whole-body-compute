@@ -399,6 +399,19 @@ class LicenseManager:
                 and bool(sanitized.get("license_key") or sanitized.get("receipt_hash"))
             )
             if not has_polar_proof:
+                try:
+                    from whole_body_compute.procedural_telemetry import track_wbc_event
+
+                    track_wbc_event(
+                        "wbc_quota_bypass_detected",
+                        {
+                            "bypass_type": "unverified_license_json",
+                            "claimed_tier": claimed_tier,
+                            "provider": str(sanitized.get("provider") or "none"),
+                        },
+                    )
+                except Exception:
+                    pass
                 sanitized["tier"] = "community"
                 sanitized["mode"] = "community_default"
         return sanitized
@@ -406,6 +419,21 @@ class LicenseManager:
     def get_active_tier(self) -> str:
         """Fast `<0.05ms` active tier resolution without scanning `.dist-info` plugin metadata."""
         founder_mode = os.environ.get("WBC_FOUNDER_MODE") == "1"
+        if founder_mode and "PYTEST_CURRENT_TEST" not in os.environ:
+            try:
+                from whole_body_compute.pro_loader import is_open_core_stubbed
+
+                if is_open_core_stubbed(package_root=Path(__file__).resolve().parent):
+                    from whole_body_compute.procedural_telemetry import track_wbc_event
+
+                    track_wbc_event(
+                        "wbc_quota_bypass_detected",
+                        {
+                            "bypass_type": "founder_mode_env_in_open_core",
+                        },
+                    )
+            except Exception:
+                pass
         is_comm_default = (not founder_mode) and (_is_open_core_enforced() or _is_isolated_home_env())
         default_tier = "community" if is_comm_default else "enterprise"
         if self.license_path.is_file():
@@ -918,9 +946,37 @@ class LicenseManager:
         if not allowed and not nudge:
             req_cat = TIER_CATALOG[req_tier]
             nudge = (
-                f"🔒 Feature `{feature_name}` requires {req_cat['name']} ({req_cat['price_display']}). "
+                f"Feature `{feature_name}` requires {req_cat['name']} ({req_cat['price_display']}). "
                 "Activate with `body license --activate <POLAR_KEY>`."
             )
+
+        # Track quota milestones and limit hits in PostHog
+        if curr_tier == "community" and (
+            pass_through_on_limit
+            or not allowed
+            or daily_interceptions in (10, 25, 40, 50)
+            or daily_silicon_offloads in (10, 20, 25)
+            or daily_anti_cheat_blocks in (1, 2, 3)
+        ):
+            try:
+                from whole_body_compute.procedural_telemetry import track_wbc_event
+
+                track_wbc_event(
+                    "wbc_quota_event",
+                    {
+                        "feature": feature_name,
+                        "allowed": bool(allowed),
+                        "limit_reached": bool(pass_through_on_limit or not allowed),
+                        "current_tier": curr_tier,
+                        "required_tier": req_tier,
+                        "daily_interceptions": int(daily_interceptions),
+                        "daily_silicon_offloads": int(daily_silicon_offloads),
+                        "daily_anti_cheat_blocks": int(daily_anti_cheat_blocks),
+                        "skill_exports_used": int(skill_exports_used),
+                    },
+                )
+            except Exception:
+                pass
 
         return {
             "feature": feature_name,

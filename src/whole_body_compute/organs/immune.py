@@ -462,8 +462,17 @@ def _get_bbb_streak_file(audit_log_path: Optional[Path | str] = None) -> Path:
     return _get_wbc_data_dir() / "bbb_streak_state.json"
 
 
+def _compute_daily_sig(daily: Dict[str, Any]) -> str:
+    """Compute integrity signature for daily quota counters to detect manual tampering."""
+    raw = (
+        f"wbc-daily:{daily.get('date', '')}:{int(daily.get('daily_interceptions', 0))}:"
+        f"{int(daily.get('daily_silicon_offloads', 0))}:{int(daily.get('daily_anti_cheat_blocks', 0))}"
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
 def _get_daily_immune_state(audit_log_path: Optional[Path | str] = None) -> Dict[str, Any]:
-    """Retrieve daily immune and silicon offload state. [direct-edit]"""
+    """Retrieve daily immune and silicon offload state with tamper/reset detection. [direct-edit]"""
     streak_file = _get_bbb_streak_file(audit_log_path)
     state: Dict[str, Any] = {}
     if streak_file.is_file():
@@ -473,7 +482,13 @@ def _get_daily_immune_state(audit_log_path: Optional[Path | str] = None) -> Dict
             state = {}
     today_str = datetime.date.today().isoformat()
     daily = state.get("__daily__")
-    if not isinstance(daily, dict) or daily.get("date") != today_str:
+    tampered_sig = False
+    if isinstance(daily, dict) and daily.get("date") == today_str:
+        expected_sig = _compute_daily_sig(daily)
+        stored_sig = daily.get("sig")
+        if stored_sig and stored_sig != expected_sig:
+            tampered_sig = True
+    else:
         daily = {
             "date": today_str,
             "daily_interceptions": 0,
@@ -482,9 +497,57 @@ def _get_daily_immune_state(audit_log_path: Optional[Path | str] = None) -> Dict
             "daily_anti_cheat_blocks": 0,
             "em_dashes_healed_today": 0,
         }
+        daily["sig"] = _compute_daily_sig(daily)
         state["__daily__"] = daily
         try:
             streak_file.write_text(json.dumps(state), encoding="utf-8")
+        except Exception:
+            pass
+
+    # Cross-check against SQLite shield_savings_ledger when outside pytest to detect file deletion/reset bypass
+    if (
+        not os.environ.get("PYTEST_CURRENT_TEST")
+        and os.environ.get("VOICEFI_STRICT_TEST_HOOK") != "1"
+        and audit_log_path is None
+    ):
+        try:
+            from whole_body_compute.shield import get_default_shield_db_path
+
+            db_p = get_default_shield_db_path()
+            if db_p.is_file():
+                midnight_ts = datetime.datetime.combine(
+                    datetime.date.today(), datetime.time.min
+                ).timestamp()
+                with sqlite3.connect(str(db_p), timeout=0.5) as conn:
+                    row = conn.execute(
+                        "SELECT COUNT(*) FROM shield_savings_ledger WHERE timestamp >= ?",
+                        (midnight_ts,),
+                    ).fetchone()
+                    sqlite_today = int(row[0] or 0) if row else 0
+                cur_inter = int(daily.get("daily_interceptions", 0))
+                if tampered_sig or (sqlite_today >= 3 and cur_inter + 2 < sqlite_today):
+                    daily["daily_interceptions"] = max(cur_inter, sqlite_today)
+                    daily["sig"] = _compute_daily_sig(daily)
+                    state["__daily__"] = daily
+                    try:
+                        streak_file.write_text(json.dumps(state), encoding="utf-8")
+                    except Exception:
+                        pass
+                    try:
+                        from whole_body_compute.procedural_telemetry import track_wbc_event
+
+                        track_wbc_event(
+                            "wbc_quota_bypass_detected",
+                            {
+                                "bypass_type": "daily_counter_sig_tamper"
+                                if tampered_sig
+                                else "daily_counter_reset_vs_sqlite",
+                                "claimed_interceptions": cur_inter,
+                                "restored_sqlite_interceptions": sqlite_today,
+                            },
+                        )
+                    except Exception:
+                        pass
         except Exception:
             pass
     return daily
@@ -522,6 +585,7 @@ def _record_daily_immune_metric(
     daily["offloaded_tokens_today"] = max(0, int(daily.get("offloaded_tokens_today", 0)) + offloaded_tokens_delta)
     daily["daily_anti_cheat_blocks"] = max(0, int(daily.get("daily_anti_cheat_blocks", 0)) + anti_cheat_blocks_delta)
     daily["em_dashes_healed_today"] = max(0, int(daily.get("em_dashes_healed_today", 0)) + em_dashes_healed_delta)
+    daily["sig"] = _compute_daily_sig(daily)
     state["__daily__"] = daily
     try:
         streak_file.write_text(json.dumps(state), encoding="utf-8")
@@ -3345,8 +3409,50 @@ def run_ide_pre_tool_hook(
         target_path_str=target_path_str,
         audit_log_path=audit_log_path,
     )  # [direct-edit]
-    if context_gate_triggered or decision in ("ask", "deny", "force_ask"):
-        _record_daily_immune_metric(interceptions_delta=1, audit_log_path=audit_log_path)
+    if context_gate_triggered or decision in ("ask", "deny", "force_ask") or read_auto_sliced:
+        updated_daily = _record_daily_immune_metric(interceptions_delta=1, audit_log_path=audit_log_path)
+        new_inter_cnt = int(updated_daily.get("daily_interceptions", 0))
+        try:
+            from whole_body_compute.license import LicenseManager
+
+            LicenseManager().check_feature_gate(
+                "bbb_interception",
+                daily_interceptions=new_inter_cnt,
+            )
+        except Exception:
+            pass
+        # Emit debounced wbc_shield_pulse every 10 interceptions (or on first interception of the day)
+        if (
+            not os.environ.get("PYTEST_CURRENT_TEST")
+            and os.environ.get("VOICEFI_STRICT_TEST_HOOK") != "1"
+            and (new_inter_cnt == 1 or new_inter_cnt % 10 == 0)
+        ):
+            try:
+                from whole_body_compute.procedural_telemetry import track_wbc_event
+                from whole_body_compute.shield import get_savings_summary
+
+                sav = get_savings_summary(window="24h")
+                track_wbc_event(
+                    "wbc_shield_pulse",
+                    {
+                        "trigger": "hook_milestone",
+                        "harness": str(sensory_vector.proprioception.harness_name or "unknown"),
+                        "daily_interceptions": new_inter_cnt,
+                        "daily_silicon_offloads": int(updated_daily.get("daily_silicon_offloads", 0)),
+                        "daily_anti_cheat_blocks": int(updated_daily.get("daily_anti_cheat_blocks", 0)),
+                        "events_24h": int(sav.get("total_events", 0)),
+                        "direct_tokens_saved_24h": int(sav.get("direct_tokens_saved", 0)),
+                        "cumulative_tokens_saved_24h": int(sav.get("cumulative_tokens_saved", 0)),
+                        "estimated_usd_saved_24h": float(sav.get("estimated_usd_saved", 0.0)),
+                        "secrets_scrubbed_24h": int(sav.get("secrets_scrubbed", 0)),
+                        "last_tool_name": str(tool_name),
+                        "last_decision": str(decision),
+                        "read_auto_sliced": bool(read_auto_sliced),
+                        "retry_churn_active": bool(retry_churn_active),
+                    },
+                )
+            except Exception:
+                pass
 
     additional_notes: List[str] = []
     if ephemeral_message:
@@ -4027,6 +4133,85 @@ def _detect_and_record_deterministic_gate(
         return None
 
 
+def _detect_local_venv_hint(
+    args: Dict[str, Any],
+    raw_resp_text: str,
+    payload: Dict[str, Any],
+) -> Optional[str]:
+    """
+    Detect when a shell command fails due to a missing tool/module while an unused
+    local `.venv` or `venv` exists in the target directory, and return a 1-line hint.
+    """
+    cmd_str = str(args.get("CommandLine") or args.get("command") or args.get("cmd") or "").strip()
+    if not cmd_str or not raw_resp_text:
+        return None
+
+    cmd_lower = cmd_str.lower()
+    if ".venv/bin/" in cmd_lower or "venv/bin/" in cmd_lower or "bin/activate" in cmd_lower:
+        return None
+
+    resp_lower = raw_resp_text.lower()
+    python_tools = ("pytest", "python3", "python", "ruff", "mypy", "pip", "flake8", "black", "isort")
+    has_missing_signal = any(
+        sig in resp_lower
+        for sig in (
+            "command not found",
+            "no module named",
+            "modulenotfounderror",
+            "executable file not found",
+            "is not recognized",
+        )
+    )
+    if not has_missing_signal:
+        if "not found" in resp_lower and any(re.search(rf"\b{t}\b", cmd_lower) for t in python_tools):
+            has_missing_signal = True
+        elif any(probe in cmd_lower for probe in ("which pytest", "which python", "command -v pytest", "command -v python")):
+            if "exited with code 1" in resp_lower or not raw_resp_text.strip():
+                has_missing_signal = True
+    if not has_missing_signal:
+        return None
+
+    candidate_dirs: List[Path] = []
+    for m_cd in re.finditer(r"""(?:^|&&|;|\|\|)\s*cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))""", cmd_str):
+        cd_raw = m_cd.group(1) or m_cd.group(2) or m_cd.group(3)
+        if cd_raw:
+            candidate_dirs.append(Path(cd_raw))
+
+    for key in ("Cwd", "cwd"):
+        if args.get(key):
+            candidate_dirs.append(Path(str(args[key])))
+
+    for ws in payload.get("workspacePaths") or []:
+        if ws:
+            candidate_dirs.append(Path(str(ws)))
+
+    seen: set[str] = set()
+    for cand in candidate_dirs:
+        try:
+            cand_resolved = cand.resolve()
+        except Exception:
+            cand_resolved = cand
+        cand_key = str(cand_resolved)
+        if cand_key in seen or not cand_resolved.is_dir():
+            continue
+        seen.add(cand_key)
+
+        for venv_name in (".venv", "venv"):
+            bin_dir = cand_resolved / venv_name / "bin"
+            if not bin_dir.is_dir():
+                continue
+            avail = [t for t in python_tools if os.access(bin_dir / t, os.X_OK)]
+            if not avail:
+                continue
+            preferred = next((t for t in avail if re.search(rf"\b{t}\b", cmd_lower)), avail[0])
+            tools_preview = ", ".join(f"{venv_name}/bin/{t}" for t in avail[:3])
+            return (
+                f"[⚡ Blood-Brain Barrier Local Venv Hint]: Found `{venv_name}/bin` in `{cand_resolved}` "
+                f"({tools_preview}). Run `{venv_name}/bin/{preferred}` directly instead of probing system Python."
+            )
+    return None
+
+
 def run_ide_post_tool_hook(
     payload: Dict[str, Any],
     audit_log_path: Optional[Path | str] = None,
@@ -4465,6 +4650,15 @@ def run_ide_post_tool_hook(
             prev_eph = out_dict.get("ephemeralMessage")
             out_dict["ephemeralMessage"] = f"{prev_eph}\n{handoff_cue}" if prev_eph else handoff_cue
             out_dict["injectSteps"].append({"ephemeralMessage": handoff_cue})
+
+    if is_shell_post_tool and raw_resp_text:
+        venv_hint = _detect_local_venv_hint(args, raw_resp_text, payload)
+        if venv_hint:
+            out_dict["localVenvHint"] = venv_hint
+            out_dict["local_venv_hint"] = venv_hint
+            prev_eph = out_dict.get("ephemeralMessage")
+            out_dict["ephemeralMessage"] = f"{prev_eph}\n{venv_hint}" if prev_eph else venv_hint
+            out_dict["injectSteps"].append({"ephemeralMessage": venv_hint})
 
     return out_dict
 

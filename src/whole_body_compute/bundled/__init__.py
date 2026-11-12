@@ -10,11 +10,6 @@ from pathlib import Path
 BUNDLED_DIR = Path(__file__).resolve().parent
 
 
-def get_bundled_rule_path() -> Path:
-    """Return the bundled Bicameral Compute / Blood-Brain Barrier rule markdown path."""
-    return BUNDLED_DIR / "agent_efficiency.md"
-
-
 def get_bundled_audit_script_path() -> Path:
     """Return the bundled stdlib-only 10-harness FinOps audit script path."""
     return BUNDLED_DIR / "standalone_audit.py"

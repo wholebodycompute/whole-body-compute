@@ -99,10 +99,11 @@ Without a local shield, downgrading from `Vanilla Sonnet` (`$0.4874`, `50.71s`) 
 ## 7. Saved Raw Receipts & Reproducibility
 
 - **Official `princeton-nlp/SWE-bench_Verified` (`k=3`, `60` Trials) Report:** [`LIVE_UPSTREAM_SWEBENCH_K3_REPORT_2026_11_10.md`](LIVE_UPSTREAM_SWEBENCH_K3_REPORT_2026_11_10.md)
+- **Official `princeton-nlp/SWE-bench_Verified` Orchestrator Head-to-Head (`N=10, k=1`, `20` Trials) Report:** [`LIVE_ORCHESTRATOR_AB_SWEBENCH_N10_REPORT.md`](LIVE_ORCHESTRATOR_AB_SWEBENCH_N10_REPORT.md) (`9/10` vs. `9/10` `Pass@1`, `-13.9%` context, `-15.5%` net context, `-8.7%` turns, `-5.7%` Frontier-equiv USD)
 - **Official `princeton-nlp/SWE-bench_Verified` Claude Code `2x2` (`40` Runs) Report:** [`LIVE_CLAUDE_2X2_PARETO_SWEBENCH_REPORT_2026_11_10.md`](LIVE_CLAUDE_2X2_PARETO_SWEBENCH_REPORT_2026_11_10.md)
 - **Claude Code Sonnet & Haiku Upstream Reports:** [`LIVE_CLAUDE_UPSTREAM_SWEBENCH_REPORT_2026_11_10.md`](LIVE_CLAUDE_UPSTREAM_SWEBENCH_REPORT_2026_11_10.md) · [`LIVE_CLAUDE_HAIKU_UPSTREAM_SWEBENCH_REPORT_2026_11_10.md`](LIVE_CLAUDE_HAIKU_UPSTREAM_SWEBENCH_REPORT_2026_11_10.md)
 - **Princeton HAL `SWE-bench_Verified` (`k=3`) Submission Bundle:** [`hal_swebench_verified_k3_submission.json`](hal_swebench_verified_k3_submission.json)
-- **Raw `SWE-bench_Verified` Telemetry JSONs:** [`live_upstream_swebench_k3_results.json`](live_upstream_swebench_k3_results.json) · [`live_claude_2x2_pareto_swebench_results.json`](live_claude_2x2_pareto_swebench_results.json)
+- **Raw `SWE-bench_Verified` Telemetry JSONs:** [`live_upstream_swebench_k3_results.json`](live_upstream_swebench_k3_results.json) · [`live_orchestrator_ab_swebench_n10_results.json`](live_orchestrator_ab_swebench_n10_results.json) · [`live_claude_2x2_pareto_swebench_results.json`](live_claude_2x2_pareto_swebench_results.json)
 - **Evaluation Harnesses:** [`upstream_swebench_verified_harness.py`](upstream_swebench_verified_harness.py) · [`run_claude_upstream_swebench_ab.py`](run_claude_upstream_swebench_ab.py) · [`swebench_verified_k3/`](swebench_verified_k3/)
 
 ```bash

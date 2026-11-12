@@ -1511,6 +1511,7 @@ def track_wbc_event(
     2. Emits an anonymous PostHog event to Project 730830 (`DEFAULT_POSTHOG_API_KEY`) unless
        disabled by `DO_NOT_TRACK=1`, `BODY_TELEMETRY=0|off|false|airgapped`, `CI=true`, or `PYTEST_CURRENT_TEST`.
     """
+    import sys
     import threading
 
     clean_props = sanitize_telemetry_payload(dict(properties or {}))
@@ -1615,6 +1616,8 @@ def track_wbc_event(
     clean_props["os"] = sys.platform.lower()
     clean_props["arch"] = (os.uname().machine.lower() if hasattr(os, "uname") else "unknown")
     clean_props["$is_server"] = True
+    if os.environ.get("WBC_INTERNAL_DEV") == "1" or Path.cwd().name == "Whole Body Compute":
+        clean_props["is_internal_dev"] = True
 
     payload_bytes = json.dumps(
         {

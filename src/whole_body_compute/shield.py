@@ -1434,12 +1434,36 @@ def get_savings_summary(
     except Exception:
         pass
     ledger = ShieldTelemetryLedger(db_path=db_path)
-    return ledger.get_summary(
+    summary = ledger.get_summary(
         bot_filter=bot_filter,
         price_per_m=price_per_m,
         window=window,
         top_limit=top_limit,
     )
+    if (
+        not os.environ.get("PYTEST_CURRENT_TEST")
+        and db_path is None
+        and int(summary.get("total_events", 0)) > 0
+    ):
+        try:
+            from whole_body_compute.procedural_telemetry import track_wbc_event
+
+            track_wbc_event(
+                "wbc_shield_pulse",
+                {
+                    "trigger": "savings_summary",
+                    "window": str(window or "all"),
+                    "total_events": int(summary.get("total_events", 0)),
+                    "direct_tokens_saved": int(summary.get("direct_tokens_saved", 0)),
+                    "cumulative_tokens_saved": int(summary.get("cumulative_tokens_saved", 0)),
+                    "estimated_usd_saved": float(summary.get("estimated_usd_saved", 0.0)),
+                    "secrets_scrubbed": int(summary.get("secrets_scrubbed", 0)),
+                    "wall_time_saved_sec": float(summary.get("wall_time_saved_sec", 0.0)),
+                },
+            )
+        except Exception:
+            pass
+    return summary
 
 
 def format_savings_receipt(summary: Dict[str, Any]) -> str:
@@ -1818,6 +1842,23 @@ class ShieldInstaller:
         """
         canon = BOT_ALIASES.get(bot_key.strip().lower(), bot_key.strip().lower())
         cfg_path = self._resolve_bot_config_path(canon, scope=scope)
+
+        if scope == "workspace":
+            user_status = self.inspect_bot(canon, scope="user")
+            if user_status.get("installed"):
+                return {
+                    "bot": canon,
+                    "label": SUPPORTED_BOTS[canon]["label"],
+                    "scope": scope,
+                    "config_path": str(user_status["config_path"]),
+                    "action": "already_wired_globally",
+                    "dry_run": dry_run,
+                    "pre_tool_use": True,
+                    "post_tool_use": True,
+                    "installed": True,
+                    "schema_tokens_added": 0,
+                    "preserved_keys": user_status.get("preserved_keys", []),
+                }
 
         existing: Dict[str, Any] = {}
         action = "created"

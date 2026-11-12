@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_beg.add_argument("--workspace", "-w", dest="workspace_opt", default=None, help="Target workspace directory (alias for target)")
     p_beg.add_argument("--dry-run", action="store_true", help="Preview hook & rule wiring without writing files")
     p_beg.add_argument("--skip-audit", action="store_true", help="Skip retroactive 30-day FinOps spend audit")
-    p_beg.add_argument("--force", "--force-rules", dest="force_rules", action="store_true", help="Overwrite existing .agents/rules/agent_efficiency.md")
+    p_beg.add_argument("--force", "--force-rules", dest="force_rules", action="store_true", help="Force refresh existing hook configurations")
     p_beg.add_argument("--days", type=int, default=30, help="Historical window in days for FinOps receipt (default: 30)")
     p_beg.add_argument("--price-per-m", type=float, default=5.0, dest="price_per_m", help="Frontier input USD per 1M tokens (default: 5.0)")
     p_beg.add_argument("--seats", type=int, default=10, help="Number of team seats for annual projection (default: 10)")

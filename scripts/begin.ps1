@@ -7,7 +7,7 @@
 $ErrorActionPreference = "Stop"
 
 Write-Host ""
-Write-Host "🧬 Whole Body Compute - Sovereign Agent OS Awakening (Windows)" -ForegroundColor Cyan
+Write-Host "Whole Body Compute - Sovereign Agent OS Awakening (Windows)" -ForegroundColor Cyan
 Write-Host "════════════════════════════════════════════════════════════════════"
 Write-Host "  • Platform: Windows ($([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture))"
 Write-Host "  ! Note: Apple Silicon Metal organs degrade gracefully on Windows; Blood-Brain Barrier AST Slicer, Secret Guard, Memory & FinOps run natively." -ForegroundColor Yellow
@@ -25,6 +25,10 @@ Add-UserBinToPath
 $bodyCmd = Get-Command body -ErrorAction SilentlyContinue
 if ($bodyCmd) {
     Write-Host "  ✓ Found existing 'body' CLI: $($bodyCmd.Source)" -ForegroundColor Green
+    $uvCmd = Get-Command uv -ErrorAction SilentlyContinue
+    if ($uvCmd -and ($env:WBC_SKIP_UPGRADE -ne "1")) {
+        try { & $uvCmd.Source tool upgrade whole-body-compute 2>&1 | Out-Null } catch {}
+    }
 } else {
     Write-Host "  • Installing whole-body-compute CLI..."
     $uvCmd = Get-Command uv -ErrorAction SilentlyContinue
