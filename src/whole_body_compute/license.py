@@ -974,6 +974,7 @@ class LicenseManager:
                         "daily_anti_cheat_blocks": int(daily_anti_cheat_blocks),
                         "skill_exports_used": int(skill_exports_used),
                     },
+                    detached_hook=True,
                 )
             except Exception:
                 pass

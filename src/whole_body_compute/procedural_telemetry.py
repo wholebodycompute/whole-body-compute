@@ -1504,6 +1504,7 @@ def track_wbc_event(
     async_send: bool = True,
     force_anonymous_ping: bool = True,
     timeout: float = 1.5,
+    detached_hook: bool = False,
 ) -> dict[str, Any]:
     """
     Record a zero-PII Whole Body Compute usage event:
@@ -1651,7 +1652,42 @@ def track_wbc_event(
         res["local_recorded"] = can_persist_local
         return res
 
-    threading.Thread(target=_send, daemon=False).start()
+    if detached_hook:
+        try:
+            import shutil
+            import subprocess
+
+            curl_bin = shutil.which("curl")
+            if curl_bin:
+                subprocess.Popen(
+                    [
+                        curl_bin,
+                        "-sS",
+                        "-m",
+                        "2",
+                        "-X",
+                        "POST",
+                        "-H",
+                        "Content-Type: application/json",
+                        "-d",
+                        payload_bytes.decode("utf-8"),
+                        target_url,
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                return {
+                    "status": "dispatched_detached",
+                    "event": event_name,
+                    "cohort_id": cohort_id,
+                    "local_recorded": can_persist_local,
+                }
+        except Exception:
+            pass
+
+    threading.Thread(target=_send, daemon=bool(detached_hook)).start()
     return {"status": "dispatched_async", "event": event_name, "cohort_id": cohort_id, "local_recorded": can_persist_local}
 
 

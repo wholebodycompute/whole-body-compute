@@ -504,9 +504,10 @@ def _get_daily_immune_state(audit_log_path: Optional[Path | str] = None) -> Dict
         except Exception:
             pass
 
-    # Cross-check against SQLite shield_savings_ledger when outside pytest to detect file deletion/reset bypass
+    # Cross-check against SQLite shield_savings_ledger ONLY if signature was tampered or counter was reset to 0
     if (
-        not os.environ.get("PYTEST_CURRENT_TEST")
+        (tampered_sig or int(daily.get("daily_interceptions", 0)) == 0)
+        and not os.environ.get("PYTEST_CURRENT_TEST")
         and os.environ.get("VOICEFI_STRICT_TEST_HOOK") != "1"
         and audit_log_path is None
     ):
@@ -3412,15 +3413,16 @@ def run_ide_pre_tool_hook(
     if context_gate_triggered or decision in ("ask", "deny", "force_ask") or read_auto_sliced:
         updated_daily = _record_daily_immune_metric(interceptions_delta=1, audit_log_path=audit_log_path)
         new_inter_cnt = int(updated_daily.get("daily_interceptions", 0))
-        try:
-            from whole_body_compute.license import LicenseManager
+        if new_inter_cnt in (10, 25, 40, 50):
+            try:
+                from whole_body_compute.license import LicenseManager
 
-            LicenseManager().check_feature_gate(
-                "bbb_interception",
-                daily_interceptions=new_inter_cnt,
-            )
-        except Exception:
-            pass
+                LicenseManager().check_feature_gate(
+                    "bbb_interception",
+                    daily_interceptions=new_inter_cnt,
+                )
+            except Exception:
+                pass
         # Emit debounced wbc_shield_pulse every 10 interceptions (or on first interception of the day)
         if (
             not os.environ.get("PYTEST_CURRENT_TEST")
@@ -3450,6 +3452,7 @@ def run_ide_pre_tool_hook(
                         "read_auto_sliced": bool(read_auto_sliced),
                         "retry_churn_active": bool(retry_churn_active),
                     },
+                    detached_hook=True,
                 )
             except Exception:
                 pass
