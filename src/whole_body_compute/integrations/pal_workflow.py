@@ -463,6 +463,20 @@ class PalWorkflowRunner:
             path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except Exception:
             pass
+        try:
+            from whole_body_compute.procedural_telemetry import track_wbc_event
+
+            track_wbc_event(
+                "wbc_workflow_executed",
+                {
+                    "recipe_id": str(recipe_id),
+                    "tokens_saved": int(tokens_saved),
+                    "screen_mb_saved": float(screen_mb_saved),
+                    "elapsed_s": float(elapsed_s),
+                },
+            )
+        except Exception:
+            pass
         return data
 
     @classmethod

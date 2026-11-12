@@ -1684,6 +1684,20 @@ def promote_staged_candidate(
     }
     if learning_card is not None:
         result["learning_card"] = learning_card
+    try:
+        from whole_body_compute.procedural_telemetry import track_wbc_event
+
+        track_wbc_event(
+            "wbc_candidate_promoted",
+            {
+                "recipe_id": str(recipe.id),
+                "steps_count": len(recipe.steps),
+                "postconditions_count": len(recipe.postconditions),
+                "shared_learnings": bool(share_learnings),
+            },
+        )
+    except Exception:
+        pass
     return result
 
 
@@ -1772,6 +1786,19 @@ def discover_now_from_ambient_sources(
                     staged_ids.append(recipe.id)
         except Exception as exc:
             logger.debug("On-demand Screenpipe discovery notice: %s", exc)
+
+    try:
+        from whole_body_compute.procedural_telemetry import track_wbc_event
+
+        track_wbc_event(
+            "wbc_ambient_discovery",
+            {
+                "discovered_count": len(staged_ids),
+                "journal_events_scanned": len(discovery.observer.events),
+            },
+        )
+    except Exception:
+        pass
 
     return {
         "discovered_count": len(staged_ids),

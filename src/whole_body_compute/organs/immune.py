@@ -1736,8 +1736,22 @@ def run_ide_pre_tool_hook(
         if raw_path and os.environ.get("VOICEFI_CONTEXT_GATE_DISABLED") != "1":
             fpath = Path(raw_path)
             norm_raw_path = raw_path.replace("\\", "/")
+            if "/mcp/chrome-devtools-mcp/" in norm_raw_path:
+                foveal_guidance = (
+                    "👁️✋ [Foveal Eyes & Hands Shortcut]: For inspecting or clicking live logged-in Chrome windows "
+                    "without `--remote-debugging-port` or ~15,000-token screenshots, use:\n"
+                    '  • Inspect DOM (<350ms, ~995 tok): `uv run body eyes --app "Google Chrome" --max-elements 120`\n'
+                    '  • Click element/button:           `uv run body hands --click-title "<label>" --app "Google Chrome"` (or `--act <e_id>`)\n'
+                    "  (Keep `chrome-devtools-mcp` for network waterfall, console, and Lighthouse audits.)"
+                )
+                ephemeral_message = (
+                    f"{ephemeral_message}\n{foveal_guidance}" if ephemeral_message else foveal_guidance
+                )
+                if sensory_vector.proprioception.harness_name in ("antigravity", "windsurf"):
+                    _stash_preinv_context(conv_id, foveal_guidance)
             is_unconditionally_exempt = (
                 "/brain/" in norm_raw_path
+                or "/mcp/chrome-devtools-mcp/" in norm_raw_path
                 or fpath.name in ("ACTIVE_PIPELINES.md", "HYBRID_TELEMETRY.md", "pyproject.toml")
             )
             is_skill_or_rule = (
@@ -2718,6 +2732,20 @@ def run_ide_pre_tool_hook(
                     f'   `uv run python -m whole_body_compute.local.scout <path> -q "<query>"`'
                 )
 
+        if decision == "allow" and "chrome-devtools-mcp" in cmd_line:
+            foveal_guidance = (
+                "👁️✋ [Foveal Eyes & Hands Shortcut]: For inspecting or clicking live logged-in Chrome windows "
+                "without `--remote-debugging-port` or ~15,000-token screenshots, use:\n"
+                '  • Inspect DOM (<350ms, ~995 tok): `uv run body eyes --app "Google Chrome" --max-elements 120`\n'
+                '  • Click element/button:           `uv run body hands --click-title "<label>" --app "Google Chrome"` (or `--act <e_id>`)\n'
+                "  (Keep `chrome-devtools-mcp` for network waterfall, console, and Lighthouse audits.)"
+            )
+            ephemeral_message = (
+                f"{ephemeral_message}\n{foveal_guidance}" if ephemeral_message else foveal_guidance
+            )
+            if sensory_vector.proprioception.harness_name in ("antigravity", "windsurf"):
+                _stash_preinv_context(conv_id, foveal_guidance)
+
     # 2b. Unbounded Search & Directory Tools (`grep_search`, `Grep`, `find_by_name`, `Glob`, `list_dir`, `LS`)
     elif is_strict_test and tool_name in SEARCH_DIR_TOOL_NAMES and os.environ.get("VOICEFI_CONTEXT_GATE_DISABLED") != "1":  # [direct-edit]
         query_val = str(
@@ -2906,6 +2934,29 @@ def run_ide_pre_tool_hook(
             decision = "deny" if strict_deny else "ask"
             stage_triggered = 3
             reason = f"🛡️ Blood-Brain Barrier {v_res.get('reason')}"
+        elif srv_name == "chrome-devtools-mcp" and mcp_tool in (
+            "take_screenshot",
+            "take_snapshot",
+            "click",
+            "fill",
+            "fill_form",
+            "type_text",
+            "hover",
+            "press_key",
+            "list_pages",
+            "select_page",
+        ):
+            foveal_guidance = (
+                f"👁️✋ [Foveal Eyes & Hands Shortcut for `{mcp_tool}`]: Instead of ~15,000-token screenshots or debug-port sessions, "
+                "inspect and drive your live logged-in Chrome window in <350ms (~995 tokens) via:\n"
+                '  • `uv run body eyes --app "Google Chrome" --max-elements 120`\n'
+                '  • `uv run body hands --click-title "<label>" --app "Google Chrome"`'
+            )
+            ephemeral_message = (
+                f"{ephemeral_message}\n{foveal_guidance}" if ephemeral_message else foveal_guidance
+            )
+            if sensory_vector.proprioception.harness_name in ("antigravity", "windsurf"):
+                _stash_preinv_context(conv_id, foveal_guidance)
     elif (
         tool_name.startswith("slack_")
         or tool_name.startswith("mcp_")
@@ -3349,7 +3400,12 @@ def run_ide_pre_tool_hook(
         if is_strict_test:
             out["additionalContext"] = combined_ctx
 
-    has_zero_donut_or_slice_ctx = bool(read_auto_sliced or tail_bridged or foveal_jumped)
+    has_zero_donut_or_slice_ctx = bool(
+        read_auto_sliced
+        or tail_bridged
+        or foveal_jumped
+        or (ephemeral_message and "[Foveal Eyes & Hands Shortcut" in ephemeral_message)
+    )
     if ephemeral_message:
         if is_strict_test or has_zero_donut_or_slice_ctx:
             out["ephemeralMessage"] = ephemeral_message

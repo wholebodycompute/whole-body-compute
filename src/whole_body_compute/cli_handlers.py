@@ -965,7 +965,7 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
                         print(f"    - ? {q}")
                 return 0
 
-    if cmd == "eyes":
+    if cmd in ("eyes", "hands"):
         if getattr(args, "daemon", False):
             from whole_body_compute.integrations.foveal_vision import run_foveal_daemon
 
@@ -973,14 +973,28 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
             run_foveal_daemon(enable_ambient_discovery=enable_ambient)
             return 0
 
+        raw_click = getattr(args, "click", None)
+        raw_click_xy = getattr(args, "click_xy", None)
+        # Auto-heal `body hands --click "1151,884"` -> click_xy="1151,884"
+        if raw_click and not raw_click_xy and "," in raw_click:
+            parts = [p.strip() for p in raw_click.split(",")]
+            if len(parts) == 2:
+                try:
+                    float(parts[0])
+                    float(parts[1])
+                    raw_click_xy = f"{parts[0]},{parts[1]}"
+                    raw_click = None
+                except ValueError:
+                    pass
+
         has_target = bool(
             getattr(args, "app", None)
             or getattr(args, "pid", None)
             or getattr(args, "title", None)
             or getattr(args, "filter", None)
             or getattr(args, "max_elements", None)
-            or getattr(args, "click", None)
-            or getattr(args, "click_xy", None)
+            or raw_click
+            or raw_click_xy
             or getattr(args, "hover", None)
             or getattr(args, "right_click", None)
             or getattr(args, "attach", None)
@@ -1002,14 +1016,18 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
                 send_foveal_socket_request,
             )
 
+            organ_num = "04" if cmd == "hands" else "03"
+            organ_name = "The Hands" if cmd == "hands" else "The Eyes"
+            organ_sub = "Goose, Tactile & Foveal Actuation" if cmd == "hands" else "Foveal DOM, Tactile & Vagus"
+
             req_payload = {
                 "pid": getattr(args, "pid", None),
                 "app_name": getattr(args, "app", None),
                 "window_title_query": getattr(args, "title", None),
                 "max_elements": getattr(args, "max_elements", None),
                 "filter_query": getattr(args, "filter", None),
-                "click": getattr(args, "click", None),
-                "click_xy": getattr(args, "click_xy", None),
+                "click": raw_click,
+                "click_xy": raw_click_xy,
                 "hover": getattr(args, "hover", None),
                 "right_click": getattr(args, "right_click", None),
                 "attach": getattr(args, "attach", None),
@@ -1029,9 +1047,9 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
             socket_resp = send_foveal_socket_request(req_payload)
             if socket_resp is not None:
                 if getattr(args, "json", False):
-                    socket_resp["organ_num"] = "03"
-                    socket_resp["name"] = "The Eyes"
-                    socket_resp["subsystem"] = "Foveal DOM, Tactile & Vagus"
+                    socket_resp["organ_num"] = organ_num
+                    socket_resp["name"] = organ_name
+                    socket_resp["subsystem"] = organ_sub
                     socket_resp["status"] = "pass"
                     print(json.dumps(socket_resp, indent=2))
                 else:
@@ -1050,8 +1068,8 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
                 window_title_query=getattr(args, "title", None),
                 max_elements=getattr(args, "max_elements", None),
                 filter_query=getattr(args, "filter", None),
-                click=getattr(args, "click", None),
-                click_xy=getattr(args, "click_xy", None),
+                click=raw_click,
+                click_xy=raw_click_xy,
                 hover=getattr(args, "hover", None),
                 right_click=getattr(args, "right_click", None),
                 attach=getattr(args, "attach", None),
@@ -1069,9 +1087,9 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
             )
             if getattr(args, "json", False):
                 res = snap.to_dict()
-                res["organ_num"] = "03"
-                res["name"] = "The Eyes"
-                res["subsystem"] = "Foveal DOM, Tactile & Vagus"
+                res["organ_num"] = organ_num
+                res["name"] = organ_name
+                res["subsystem"] = organ_sub
                 res["status"] = "pass"
                 print(json.dumps(res, indent=2))
                 return 0

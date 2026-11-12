@@ -36,8 +36,8 @@ from whole_body_compute.redaction import redact_secrets
 
 logger = logging.getLogger("whole_body_compute.procedural_telemetry")
 
-# Default public PostHog ingestion key for zero-PII open-core telemetry
-DEFAULT_POSTHOG_API_KEY = "phc_oFyLfqmnEeFMDehRQ4DzGrN9AGctauZiZhfufRtmW92e"
+# Default public PostHog ingestion key for zero-PII open-core telemetry (Project 730830: Whole Body Compute)
+DEFAULT_POSTHOG_API_KEY = "phc_D3TxQWXwnd9Z6wBBK3DpnsdKQAHdLpSSMxup4qL8djc2"
 
 
 def get_wbc_data_dir() -> Path:
@@ -1462,6 +1462,360 @@ def send_vitals_rollup(
     except Exception as exc:
         logger.debug("Vitals rollup send notice: %s", exc)
         return {"status": "network_error", "reason": str(exc), "cohort_id": cohort_id}
+
+
+def get_usage_stats_path() -> Path:
+    """Resolve the local JSON ledger for CLI command, audit, Edit Mode, and workflow usage stats."""
+    env_p = os.environ.get("WBC_USAGE_STATS_PATH")
+    if env_p:
+        return Path(env_p).expanduser()
+    return (get_wbc_data_dir() / "usage_stats.json").expanduser()
+
+
+def load_usage_stats(stats_path: Path | None = None) -> dict[str, Any]:
+    """Load the persistent local usage stats ledger."""
+    target = Path(stats_path).expanduser() if stats_path else get_usage_stats_path()
+    default_ledger: dict[str, Any] = {
+        "version": 1,
+        "updated_at": 0.0,
+        "total_events": 0,
+        "commands": {},
+        "events": {},
+        "recent_events": [],
+    }
+    if target.is_file():
+        try:
+            data = json.loads(target.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(data, dict):
+                for k, v in default_ledger.items():
+                    data.setdefault(k, v)
+                return data
+        except Exception:
+            pass
+    return default_ledger
+
+
+def track_wbc_event(
+    event_name: str,
+    properties: dict[str, Any] | None = None,
+    *,
+    consent_manager: TelemetryConsentManager | None = None,
+    stats_path: Path | None = None,
+    async_send: bool = True,
+    force_anonymous_ping: bool = True,
+    timeout: float = 1.5,
+) -> dict[str, Any]:
+    """
+    Record a zero-PII Whole Body Compute usage event:
+    1. Always increments the local usage ledger (`~/.whole_body_compute/usage_stats.json`).
+    2. Emits an anonymous PostHog event to Project 730830 (`DEFAULT_POSTHOG_API_KEY`) unless
+       disabled by `DO_NOT_TRACK=1`, `BODY_TELEMETRY=0|off|false|airgapped`, `CI=true`, or `PYTEST_CURRENT_TEST`.
+    """
+    import threading
+
+    clean_props = sanitize_telemetry_payload(dict(properties or {}))
+    now = round(time.time(), 3)
+
+    # 1. Update local usage_stats.json (skip writing to real home during pytest unless WBC_USAGE_STATS_PATH is set)
+    in_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    can_persist_local = (not in_pytest) or bool(stats_path or os.environ.get("WBC_USAGE_STATS_PATH"))
+    target_stats = Path(stats_path).expanduser() if stats_path else get_usage_stats_path()
+
+    if can_persist_local:
+        try:
+            ledger = load_usage_stats(target_stats)
+            ledger["updated_at"] = now
+            ledger["total_events"] = int(ledger.get("total_events", 0)) + 1
+
+            ev_map = ledger.setdefault("events", {})
+            ev_entry = ev_map.setdefault(
+                event_name,
+                {"count": 0, "first_ts": now, "last_ts": now, "last_properties": {}},
+            )
+            ev_entry["count"] = int(ev_entry.get("count", 0)) + 1
+            ev_entry["first_ts"] = min(float(ev_entry.get("first_ts", now)), now)
+            ev_entry["last_ts"] = max(float(ev_entry.get("last_ts", 0.0)), now)
+            ev_entry["last_properties"] = {
+                k: v for k, v in clean_props.items() if isinstance(v, (str, int, float, bool))
+            }
+
+            if event_name == "wbc_cli_command" and clean_props.get("command"):
+                cmd_name = str(clean_props["command"])
+                cmd_map = ledger.setdefault("commands", {})
+                c_entry = cmd_map.setdefault(
+                    cmd_name,
+                    {"count": 0, "first_ts": now, "last_ts": now},
+                )
+                c_entry["count"] = int(c_entry.get("count", 0)) + 1
+                c_entry["first_ts"] = min(float(c_entry.get("first_ts", now)), now)
+                c_entry["last_ts"] = max(float(c_entry.get("last_ts", 0.0)), now)
+
+            recent = list(ledger.get("recent_events", []))
+            recent.append(
+                {
+                    "timestamp": now,
+                    "event": event_name,
+                    "summary": {
+                        k: v
+                        for k, v in clean_props.items()
+                        if k in ("command", "action", "mode", "recipe_id", "engine_used", "harnesses_active", "threads_scanned", "wasted_spend_usd", "passive_workflows_crystallized", "discovered_count")
+                    },
+                }
+            )
+            ledger["recent_events"] = recent[-100:]
+            target_stats.parent.mkdir(parents=True, exist_ok=True)
+            tmp_file = target_stats.with_suffix(".json.tmp")
+            tmp_file.write_text(json.dumps(ledger, indent=2), encoding="utf-8")
+            tmp_file.replace(target_stats)
+        except Exception as exc:
+            logger.debug("Local usage stats write notice: %s", exc)
+
+    # 2. Check circuit-breakers before network dispatch
+    mgr = consent_manager or TelemetryConsentManager()
+    overridden, override_reason = mgr.check_environment_override()
+    if overridden:
+        return {
+            "status": "blocked_by_env",
+            "reason": override_reason,
+            "event": event_name,
+            "local_recorded": can_persist_local,
+        }
+
+    # During pytest, do not fire background network threads unless explicitly testing telemetry sync
+    if in_pytest and os.environ.get("WBC_TEST_TELEMETRY_PING") != "1":
+        return {
+            "status": "skipped_in_pytest",
+            "event": event_name,
+            "local_recorded": can_persist_local,
+        }
+
+    if not force_anonymous_ping and not mgr.can_share_vitals():
+        return {
+            "status": "blocked_by_consent",
+            "effective_tier": mgr.get_effective_tier().value,
+            "event": event_name,
+            "local_recorded": can_persist_local,
+        }
+
+    cohort_id = mgr.get_cohort_id()
+    api_key = (
+        os.environ.get("WBC_POSTHOG_KEY")
+        or os.environ.get("POSTHOG_API_KEY")
+        or os.environ.get("POSTHOG_PROJECT_TOKEN")
+        or DEFAULT_POSTHOG_API_KEY
+    )
+    target_url = os.environ.get("WBC_TELEMETRY_INGEST_URL")
+    if not target_url:
+        host = os.environ.get("POSTHOG_HOST") or "https://us.i.posthog.com"
+        target_url = f"{host.rstrip('/')}/capture/"
+
+    clean_props["cohort_id"] = cohort_id
+    clean_props["product"] = "whole_body_compute"
+    clean_props["source"] = "whole_body_compute_open_core"
+    clean_props["os"] = sys.platform.lower()
+    clean_props["arch"] = (os.uname().machine.lower() if hasattr(os, "uname") else "unknown")
+    clean_props["$is_server"] = True
+
+    payload_bytes = json.dumps(
+        {
+            "api_key": api_key,
+            "event": event_name,
+            "distinct_id": cohort_id,
+            "properties": clean_props,
+        }
+    ).encode("utf-8")
+
+    def _send() -> dict[str, Any]:
+        try:
+            req = urllib.request.Request(
+                target_url,
+                data=payload_bytes,
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "WholeBodyCompute-OpenCore/1.0",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                code = getattr(resp, "status", None) or resp.getcode()
+                return {"status": "ok", "http_status": code, "event": event_name, "cohort_id": cohort_id}
+        except Exception as exc:
+            logger.debug("PostHog event notice (%s): %s", event_name, exc)
+            return {"status": "network_error", "reason": str(exc), "event": event_name}
+
+    if not async_send or os.environ.get("WBC_TEST_SYNC") == "1" or os.environ.get("VOICEFI_TEST_SYNC") == "1":
+        res = _send()
+        res["local_recorded"] = can_persist_local
+        return res
+
+    threading.Thread(target=_send, daemon=False).start()
+    return {"status": "dispatched_async", "event": event_name, "cohort_id": cohort_id, "local_recorded": can_persist_local}
+
+
+def get_comprehensive_usage_stats_report(stats_path: Path | None = None) -> dict[str, Any]:
+    """
+    Build a unified Usage & Automation Telemetry Report combining:
+    1. CLI command & event counts (`usage_stats.json`: `body begin`, `audit-spend`, `doctor`, `savings`, etc.)
+    2. Shield Blood-Brain Barrier interceptions & tokens saved (`shield_savings_ledger`)
+    3. PalWorkflow executions & cloud savings (`pal_cloud_savings.json`)
+    4. Pal Live Edit Mode session stats (`active_editing_session.json` + `usage_stats.json`)
+    5. Ambient Workflow Discovery & REM Dreaming stats (`recipes/candidates/`, `telemetry_outbox.jsonl`)
+    """
+    usage = load_usage_stats(stats_path)
+    tel_status = get_telemetry_status_report()
+
+    # Shield savings summary
+    shield_summary: dict[str, Any] = {}
+    try:
+        from whole_body_compute.shield import get_savings_summary
+
+        s_all = get_savings_summary(window="all")
+        shield_summary = {
+            "total_interceptions": int(s_all.get("total_events", 0)),
+            "direct_tokens_saved": int(s_all.get("direct_tokens_saved", 0)),
+            "cumulative_tokens_saved": int(s_all.get("cumulative_tokens_saved", 0)),
+            "estimated_usd_saved": float(s_all.get("estimated_usd_saved", 0.0)),
+            "wall_time_saved_sec": float(s_all.get("wall_time_saved_sec", 0.0)),
+            "secrets_scrubbed": int(s_all.get("secrets_scrubbed", 0)),
+        }
+    except Exception:
+        pass
+
+    # Workflow execution savings
+    wf_savings: dict[str, Any] = {"total_runs": 0, "total_tokens_saved": 0, "workflows_count": 0}
+    try:
+        for cand_p in (
+            get_wbc_data_dir() / "telemetry" / "pal_cloud_savings.json",
+            Path.home() / ".voicefi" / "telemetry" / "pal_cloud_savings.json",
+        ):
+            if cand_p.is_file():
+                wf_raw = json.loads(cand_p.read_text(encoding="utf-8"))
+                wf_savings = {
+                    "total_runs": int(wf_raw.get("total_runs", 0)),
+                    "total_tokens_saved": int(wf_raw.get("total_tokens_saved", 0)),
+                    "total_screen_mb_saved": float(wf_raw.get("total_screen_mb_saved", 0.0)),
+                    "workflows_count": len(wf_raw.get("workflows", {})),
+                    "workflows": wf_raw.get("workflows", {}),
+                }
+                break
+    except Exception:
+        pass
+
+    # Ambient candidates & active recipes
+    ambient_info: dict[str, Any] = {"staged_candidates_count": 0, "active_recipes_count": 0, "ambient_transitions_logged": 0}
+    try:
+        from whole_body_compute.integrations.ambient_discovery import list_staged_candidates
+
+        c_rep = list_staged_candidates()
+        ambient_info = {
+            "staged_candidates_count": int(c_rep.get("staged_candidates_count", 0)),
+            "active_recipes_count": int(c_rep.get("active_recipes_count", 0)),
+            "ambient_transitions_logged": int(c_rep.get("ambient_transitions_logged", 0)),
+        }
+    except Exception:
+        pass
+
+    # Skills telemetry summary
+    skills_info: dict[str, Any] = {}
+    try:
+        from whole_body_compute.skills_telemetry import load_skill_telemetry
+
+        sk_ledger = load_skill_telemetry()
+        sk_map = sk_ledger.get("skills", {})
+        skills_info = {
+            "tracked_skills_count": len(sk_map),
+            "total_skill_reads": sum(int(v.get("total_reads", 0)) for v in sk_map.values() if isinstance(v, dict)),
+            "scanned_transcripts_count": len(sk_ledger.get("scanned_transcripts", {})),
+        }
+    except Exception:
+        pass
+
+    return {
+        "status": "ok",
+        "posthog_project_id": 730830,
+        "posthog_key_prefix": DEFAULT_POSTHOG_API_KEY[:12] + "...",
+        "consent": tel_status.get("consent", {}),
+        "usage_ledger": {
+            "path": str(Path(stats_path).expanduser() if stats_path else get_usage_stats_path()),
+            "total_events": int(usage.get("total_events", 0)),
+            "commands": usage.get("commands", {}),
+            "events": usage.get("events", {}),
+            "recent_events": usage.get("recent_events", [])[-15:],
+        },
+        "shield_savings": shield_summary,
+        "workflow_automations": wf_savings,
+        "ambient_and_dreaming": {
+            **ambient_info,
+            "procedural_dna_cards_total": int(tel_status.get("outbox_total_cards", 0)),
+            "procedural_dna_cards_synced": int(tel_status.get("outbox_synced_cards", 0)),
+            "procedural_dna_by_type": tel_status.get("outbox_cards_by_type", {}),
+        },
+        "skills_telemetry": skills_info,
+    }
+
+
+def format_usage_stats_table(report: dict[str, Any]) -> str:
+    """Format a rich terminal overview for `body telemetry stats` / `body stats`."""
+    consent = report.get("consent", {})
+    u_ledger = report.get("usage_ledger", {})
+    cmds = u_ledger.get("commands", {})
+    evts = u_ledger.get("events", {})
+    shield = report.get("shield_savings", {})
+    wf = report.get("workflow_automations", {})
+    amb = report.get("ambient_and_dreaming", {})
+    sk = report.get("skills_telemetry", {})
+
+    audit_runs = (
+        int(evts.get("wbc_audit_completed", {}).get("count", 0))
+        + int(cmds.get("audit-spend", {}).get("count", 0))
+    )
+    begin_runs = (
+        int(evts.get("wbc_body_begin", {}).get("count", 0))
+        + int(cmds.get("begin", {}).get("count", 0))
+    )
+    edit_applies = int(evts.get("wbc_pal_edit_applied", {}).get("count", 0))
+    edit_sessions = int(evts.get("wbc_pal_edit_session", {}).get("count", 0))
+    rem_runs = int(evts.get("wbc_rem_sleep_completed", {}).get("count", 0))
+
+    lines = [
+        "📊 Whole Body Compute - Unified Usage, Funnel & Automation Telemetry (`body telemetry stats`)",
+        "=" * 88,
+        f"  • PostHog Cloud Project:  Project #730830 ({report.get('posthog_key_prefix')}) | Cohort: `{consent.get('cohort_id')}`",
+        f"  • Consent & Egress Gate:  {consent.get('effective_tier')} (DO_NOT_TRACK Override: {'ACTIVE' if consent.get('env_override_active') else 'OFF'})",
+        "-" * 88,
+        "  [1] Top-of-Funnel & Core CLI Usage:",
+        f"      • No-Code / Spend Audits (`audit.py` / `body audit-spend`): {audit_runs:,} run(s)",
+        f"      • Workspace Awakenings (`body begin`):                      {begin_runs:,} run(s)",
+        f"      • Total Tracked CLI Invocations:                            {sum(int(v.get('count', 0)) for v in cmds.values()):,} command(s)",
+    ]
+    if cmds:
+        top_cmds = sorted(cmds.items(), key=lambda kv: int(kv[1].get("count", 0)), reverse=True)[:8]
+        cmd_str = ", ".join(f"`body {k}` ({v.get('count', 0)}x)" for k, v in top_cmds)
+        lines.append(f"      • Top CLI Subcommands: {cmd_str}")
+
+    lines.extend(
+        [
+            "",
+            "  [2] Organ 05 Blood-Brain Barrier & Skill Telemetry:",
+            f"      • Shield Hook Interceptions: {shield.get('total_interceptions', 0):,} gates | "
+            f"{shield.get('direct_tokens_saved', 0):,} direct tok saved ({shield.get('cumulative_tokens_saved', 0):,} cumulative)",
+            f"      • Estimated Cloud USD Saved: ${shield.get('estimated_usd_saved', 0.0):.2f} | "
+            f"Secrets Scrubbed: {shield.get('secrets_scrubbed', 0)}",
+            f"      • Skill Activations (`SKILL.md` reads): {sk.get('total_skill_reads', 0):,} reads across "
+            f"{sk.get('tracked_skills_count', 0)} skills ({sk.get('scanned_transcripts_count', 0)} transcripts audited)",
+            "",
+            "  [3] Workflow Automations, Live Edit Mode & Nocturnal REM Dreaming:",
+            f"      • PalWorkflow Executions:    {wf.get('total_runs', 0):,} run(s) across {wf.get('workflows_count', 0)} recipes "
+            f"({wf.get('total_tokens_saved', 0):,} cloud tokens saved)",
+            f"      • Pal Live Edit Mode:        {edit_sessions:,} session(s) | {edit_applies:,} voice edit(s) applied on-device",
+            f"      • Ambient Workflow Mining:   {amb.get('ambient_transitions_logged', 0):,} transitions observed -> "
+            f"{amb.get('staged_candidates_count', 0)} staged candidates / {amb.get('active_recipes_count', 0)} active recipes",
+            f"      • Nocturnal REM Dreaming:    {rem_runs:,} consolidation pass(es) | "
+            f"{amb.get('procedural_dna_cards_total', 0)} Procedural DNA cards harvested ({amb.get('procedural_dna_cards_synced', 0)} synced)",
+            "=" * 88,
+        ]
+    )
+    return "\n".join(lines)
 
 
 # ============================================================================

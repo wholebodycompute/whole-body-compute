@@ -27,8 +27,12 @@ import re
 import sqlite3
 import sys
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com"
+DEFAULT_POSTHOG_API_KEY = "phc_D3TxQWXwnd9Z6wBBK3DpnsdKQAHdLpSSMxup4qL8djc2"
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -2123,6 +2127,145 @@ def format_standalone_receipt(
     return "\n".join(lines)
 
 
+def _emit_audit_telemetry(audit: Dict[str, Any], no_telemetry: bool = False) -> None:
+    """
+    Emit an anonymous, zero-PII `wbc_audit_completed` funnel ping to PostHog (`730830`)
+    and increment the local `~/.whole_body/telemetry/usage_stats.json` counter.
+    Strictly honors DO_NOT_TRACK=1, CI=true, BODY_TELEMETRY=0/off/false/airgapped,
+    and PYTEST_CURRENT_TEST (unless WBC_TEST_TELEMETRY_PING=1).
+    """
+    if no_telemetry:
+        return
+    if "PYTEST_CURRENT_TEST" in os.environ and not os.environ.get("WBC_TEST_TELEMETRY_PING"):
+        return
+
+    # 1. Local usage_stats.json increment (best-effort)
+    cohort_id = ""
+    try:
+        wbc_dir = Path(
+            os.environ.get("WBC_DATA_DIR")
+            or (
+                Path.home() / ".whole_body_compute"
+                if (Path.home() / ".whole_body_compute").exists()
+                else (
+                    Path.home() / ".voicefi"
+                    if (Path.home() / ".voicefi").exists()
+                    else Path.home() / ".whole_body_compute"
+                )
+            )
+        ).expanduser()
+        stats_p = Path(
+            os.environ.get("WBC_USAGE_STATS_PATH") or (wbc_dir / "usage_stats.json")
+        ).expanduser()
+        consent_p = Path(
+            os.environ.get("WBC_TELEMETRY_CONFIG_PATH")
+            or (wbc_dir / "telemetry_consent.json")
+        ).expanduser()
+        if consent_p.is_file():
+            c_data = json.loads(consent_p.read_text(encoding="utf-8"))
+            cohort_id = str(c_data.get("cohort_id") or "")
+        if not cohort_id:
+            seed = f"{os.uname().sysname if hasattr(os, 'uname') else sys.platform}:{Path.home().name}"
+            cohort_id = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+
+        now = round(time.time(), 3)
+        if stats_p.parent.is_dir() or os.environ.get("WBC_USAGE_STATS_PATH"):
+            stats_p.parent.mkdir(parents=True, exist_ok=True)
+            stats: Dict[str, Any] = {
+                "version": 1,
+                "updated_at": now,
+                "total_events": 0,
+                "commands": {},
+                "events": {},
+                "recent_events": [],
+            }
+            if stats_p.is_file():
+                try:
+                    loaded = json.loads(stats_p.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        stats.update(loaded)
+                except Exception:
+                    pass
+            stats["updated_at"] = now
+            stats["total_events"] = int(stats.get("total_events", 0)) + 1
+            ev_map = stats.setdefault("events", {})
+            ev_entry = ev_map.setdefault(
+                "wbc_audit_completed",
+                {"count": 0, "first_ts": now, "last_ts": now, "last_properties": {}},
+            )
+            if isinstance(ev_entry, int):
+                ev_entry = {"count": ev_entry, "first_ts": now, "last_ts": now, "last_properties": {}}
+                ev_map["wbc_audit_completed"] = ev_entry
+            ev_entry["count"] = int(ev_entry.get("count", 0)) + 1
+            ev_entry["last_ts"] = now
+            ev_entry["last_properties"] = {
+                "mode": "standalone_audit_py",
+                "threads_scanned": int(audit.get("conversations_scanned", 0)),
+                "wasted_spend_usd": float(audit.get("wasted_spend_usd", 0.0)),
+            }
+            stats_p.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+    except Exception:
+        if not cohort_id:
+            cohort_id = "anon_audit"
+
+    # 2. Check DNT / CI / opt-out before network call
+    dnt = os.environ.get("DO_NOT_TRACK", "").strip().lower()
+    if dnt in ("1", "true", "yes", "on"):
+        return
+    if os.environ.get("CI", "").strip().lower() in ("1", "true", "yes"):
+        return
+    bt = os.environ.get("BODY_TELEMETRY", "").strip().lower()
+    if bt in ("0", "off", "false", "no", "none", "local", "airgapped", "tier0"):
+        return
+
+    api_key = (
+        os.environ.get("WBC_POSTHOG_API_KEY", "").strip()
+        or os.environ.get("POSTHOG_API_KEY", "").strip()
+        or DEFAULT_POSTHOG_API_KEY
+    )
+    host = (
+        os.environ.get("WBC_POSTHOG_HOST", "").strip()
+        or os.environ.get("POSTHOG_HOST", "").strip()
+        or DEFAULT_POSTHOG_HOST
+    ).rstrip("/")
+    if not api_key:
+        return
+
+    hb = audit.get("harness_breakdown", {}) or {}
+    active_harnesses = [k for k, v in hb.items() if isinstance(v, dict) and int(v.get("threads", 0)) > 0]
+    payload = {
+        "api_key": api_key,
+        "event": "wbc_audit_completed",
+        "distinct_id": cohort_id,
+        "properties": {
+            "cohort_id": cohort_id,
+            "mode": "standalone_audit_py",
+            "window_days": int(audit.get("window_days", 30)),
+            "conversations_scanned": int(audit.get("conversations_scanned", 0)),
+            "total_steps": int(audit.get("total_steps", 0)),
+            "active_harnesses": ",".join(active_harnesses),
+            "active_harnesses_count": len(active_harnesses),
+            "actual_cumulative_input_tokens": int(audit.get("actual_cumulative_input_tokens", 0)),
+            "wasted_bloat_tokens": int(audit.get("wasted_bloat_tokens", 0)),
+            "wasted_spend_usd": float(audit.get("wasted_spend_usd", 0.0)),
+            "savings_pct": float(audit.get("savings_pct", 0.0)),
+            "os_platform": sys.platform,
+            "$lib": "whole-body-compute-standalone-audit",
+        },
+    }
+    try:
+        req = urllib.request.Request(
+            f"{host}/capture/",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "User-Agent": "WholeBodyCompute-Audit/1.0"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=1.2):
+            pass
+    except Exception:
+        pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     explicit_seats = any(a == "--seats" or a.startswith("--seats=") for a in raw_argv)
@@ -2135,6 +2278,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--seats", type=int, default=1, help="Number of seats for team projection (default: 1 personal)")
     parser.add_argument("--top", type=int, default=5, help="Top expensive threads to show (default: 5)")
     parser.add_argument("--no-color", action="store_true", dest="no_color", help="Disable ANSI terminal colors")
+    parser.add_argument("--no-telemetry", action="store_true", dest="no_telemetry", help="Skip anonymous audit completion ping")
     parser.add_argument("--agy-dir", dest="agy_dir", default=None, help="Custom Antigravity brain directory")
     parser.add_argument("--claude-dir", dest="claude_dir", default=None, help="Custom Claude Code projects directory")
     parser.add_argument("--goose-db", dest="goose_db", default=None, help="Custom Block Goose sessions.db path")
@@ -2165,6 +2309,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         continue_dir=Path(args.continue_dir) if args.continue_dir else None,
         zed_dir=Path(args.zed_dir) if args.zed_dir else None,
     )
+    _emit_audit_telemetry(audit, no_telemetry=bool(getattr(args, "no_telemetry", False)))
 
     show_team = bool(explicit_seats or args.seats > 1)
     if args.export_receipt:

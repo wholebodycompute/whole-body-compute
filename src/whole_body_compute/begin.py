@@ -1539,6 +1539,30 @@ def run_body_begin(
     except Exception as exc:
         telemetry_policy["error"] = str(exc)
 
+    try:
+        from whole_body_compute.procedural_telemetry import track_wbc_event
+
+        fin_d = finops if isinstance(finops, dict) else {}
+        track_wbc_event(
+            "wbc_body_begin",
+            {
+                "dry_run": bool(dry_run),
+                "skip_audit": bool(skip_audit),
+                "wired_harnesses": ",".join(wired_list),
+                "wired_harnesses_count": len(wired_list),
+                "elapsed_ms": float(elapsed_ms),
+                "conversations_scanned": int(
+                    fin_d.get("conversations_scanned") or fin_d.get("threads_scanned", 0)
+                ),
+                "wasted_spend_usd": float(
+                    fin_d.get("wasted_spend_usd") or fin_d.get("net_savings_usd", 0.0)
+                ),
+                "effective_telemetry_tier": str(telemetry_policy.get("effective_tier", "TIER_0_LOCAL")),
+            },
+        )
+    except Exception:
+        pass
+
     return {
         "command": "begin",
         "elapsed_ms": elapsed_ms,

@@ -63,6 +63,26 @@ def _dispatch_main(
     args: argparse.Namespace,
     parser: argparse.ArgumentParser,
 ) -> int:
+    if cmd != "immune-hook":
+        try:
+            from whole_body_compute.procedural_telemetry import track_wbc_event
+
+            track_wbc_event("wbc_cli_command", {"command": cmd})
+        except Exception:
+            pass
+
+    if cmd in ("stats", "usage", "analytics"):
+        from whole_body_compute.procedural_telemetry import (
+            format_usage_stats_table,
+            get_comprehensive_usage_stats_report,
+        )
+
+        report = get_comprehensive_usage_stats_report()
+        if getattr(args, "json", False):
+            print(json.dumps(report, indent=2))
+        else:
+            print("\n" + format_usage_stats_table(report) + "\n")
+        return 0
 
     if cmd in ("begin", "init", "awaken", "start"):
         from whole_body_compute.begin import format_body_begin_banner, run_body_begin
@@ -514,6 +534,19 @@ def _dispatch_main(
                 print(json.dumps(report, indent=2))
             else:
                 print("\n" + format_telemetry_status(report) + "\n")
+            return 0
+
+        if action == "stats":
+            from whole_body_compute.procedural_telemetry import (
+                format_usage_stats_table,
+                get_comprehensive_usage_stats_report,
+            )
+
+            report = get_comprehensive_usage_stats_report()
+            if is_json:
+                print(json.dumps(report, indent=2))
+            else:
+                print("\n" + format_usage_stats_table(report) + "\n")
             return 0
 
         if action == "harvest":

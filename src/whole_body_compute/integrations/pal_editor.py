@@ -120,6 +120,12 @@ class PalEditSession:
         self._running = True
         self._ensure_active_item()
         self._write_journal(active=True)
+        try:
+            from whole_body_compute.procedural_telemetry import track_wbc_event
+
+            track_wbc_event("wbc_pal_edit_session", {"action": "start"})
+        except Exception:
+            pass
         self._thread = threading.Thread(
             target=self._run_tap, daemon=True, name="PalEditSessionTap"
         )
@@ -872,6 +878,20 @@ class PalEditSession:
             )
         except Exception:
             pass
+        try:
+            from whole_body_compute.procedural_telemetry import track_wbc_event
+
+            track_wbc_event(
+                "wbc_pal_edit_applied",
+                {
+                    "engine_used": str(engine_used),
+                    "elapsed_ms": float(elapsed_ms),
+                    "app_name": str(app_name),
+                    "mode": "apply_voice_edit",
+                },
+            )
+        except Exception:
+            pass
         self._record_and_notify(rec)
         return rec
 
@@ -1263,6 +1283,21 @@ class PalEditSession:
             from whole_body_compute.audio.chimes import play_chime
 
             play_chime("done", block=False)
+        except Exception:
+            pass
+
+        try:
+            from whole_body_compute.procedural_telemetry import track_wbc_event
+
+            track_wbc_event(
+                "wbc_pal_edit_applied",
+                {
+                    "engine_used": str(engine_used),
+                    "elapsed_ms": float(elapsed_ms),
+                    "app_name": str(app_name),
+                    "mode": "record_edit",
+                },
+            )
         except Exception:
             pass
 

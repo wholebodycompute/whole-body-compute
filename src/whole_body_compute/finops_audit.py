@@ -1288,7 +1288,7 @@ def audit_historical_spend(
         ),
     }
 
-    return {
+    res_dict = {
         "window_days": int(days),
         "flush_step_interval": resolved_flush_steps,
         "brain_dir": str(target_brain),
@@ -1338,6 +1338,31 @@ def audit_historical_spend(
         "top_bloated_conversations": top_threads,
         "generated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
+    try:
+        from whole_body_compute.procedural_telemetry import track_wbc_event
+
+        active_h = [
+            k for k, v in (harness_breakdown or {}).items()
+            if isinstance(v, dict) and int(v.get("threads", 0)) > 0
+        ]
+        track_wbc_event(
+            "wbc_audit_completed",
+            {
+                "mode": "body_audit_spend",
+                "window_days": int(days),
+                "conversations_scanned": len(thread_records),
+                "total_steps": int(total_steps),
+                "active_harnesses": ",".join(active_h),
+                "active_harnesses_count": len(active_h),
+                "actual_cumulative_input_tokens": int(total_actual_input_tokens),
+                "wasted_bloat_tokens": int(total_wasted_bloat_tokens),
+                "wasted_spend_usd": float(wasted_spend_usd),
+                "savings_pct": float(savings_pct),
+            },
+        )
+    except Exception:
+        pass
+    return res_dict
 
 
 def format_finops_audit_receipt(audit: Dict[str, Any]) -> str:

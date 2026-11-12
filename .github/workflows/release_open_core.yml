@@ -27,6 +27,7 @@ concurrency:
 jobs:
   verify-open-core:
     name: "Clean-Room Leak Audit & Matrix Smoke (${{ matrix.os }}, py${{ matrix.python-version }})"
+    if: ${{ !github.event.repository.private }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

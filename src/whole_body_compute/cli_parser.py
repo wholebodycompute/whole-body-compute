@@ -205,13 +205,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_dna = subparsers.add_parser(
         "telemetry",
         aliases=["dna", "learnings"],
-        help="Federated Procedural DNA & Ethical Telemetry Engine (status, harvest, inspect, generalize, compact, opt-in, opt-out)",
+        help="Federated Procedural DNA & Ethical Telemetry Engine (status, stats, harvest, inspect, generalize, compact, opt-in, opt-out)",
     )
     p_dna.add_argument(
         "action",
         nargs="?",
         default="status",
-        choices=["status", "harvest", "sync", "flush", "inspect", "generalize", "compact", "opt-in", "opt-out"],
+        choices=["status", "stats", "harvest", "sync", "flush", "inspect", "generalize", "compact", "opt-in", "opt-out"],
         help="Telemetry action (default: status)",
     )
     p_dna.add_argument(
@@ -247,6 +247,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_dna.add_argument("--logs", action="store_true", help="Print historical Readiness & Biometric state logs")
     p_dna.add_argument("--limit", type=int, default=20, help="Number of log entries to display")
     p_dna.add_argument("--json", action="store_true", help="Output structured JSON")
+
+    # body stats (aliases: usage, analytics)
+    p_stats = subparsers.add_parser(
+        "stats",
+        aliases=["usage", "analytics"],
+        help="Unified Usage & Funnel Telemetry Report (Audits, body begin, CLI commands, Workflow Automations, Edit Mode & REM Dreaming)",
+    )
+    p_stats.add_argument("--json", action="store_true", help="Output structured JSON")
 
     # body radix-cache (aliases: radix, prewarm, kv-cache)
     p_rad = subparsers.add_parser(
@@ -801,14 +809,29 @@ def build_parser() -> argparse.ArgumentParser:
     for organ_key in SINGLE_ORGAN_DISPATCH:
         p_org = subparsers.add_parser(organ_key, help=f"Inspect organ '{organ_key}' vital signs and latency")
         p_org.add_argument("--json", action="store_true", help="Output structured JSON")
-        if organ_key == "eyes":
+        if organ_key in ("eyes", "hands"):
             p_org.add_argument("--app", type=str, default=None, help="Target application name (e.g. 'Claude', 'Muse', 'Google Chrome')")
             p_org.add_argument("--title", type=str, default=None, help="Target window or browser tab title substring")
             p_org.add_argument("--pid", type=int, default=None, help="Target process ID")
             p_org.add_argument("--max-elements", type=int, default=None, help="Maximum interactive elements to capture (default: 10 or 40)")
             p_org.add_argument("--filter", type=str, default=None, help="Filter elements by case-insensitive substring on role, title, value, or description")
-            p_org.add_argument("--click", type=str, default=None, help="Click element by ID (e.g. 'e1') or label substring")
-            p_org.add_argument("--click-xy", type=str, default=None, help="Click exact coordinates 'x,y'")
+            p_org.add_argument(
+                "--click",
+                "--click-title",
+                "--act",
+                dest="click",
+                type=str,
+                default=None,
+                help="Click element by ID (e.g. 'e1') or label substring (aliases: --click-title, --act)",
+            )
+            p_org.add_argument(
+                "--click-xy",
+                "--xy",
+                dest="click_xy",
+                type=str,
+                default=None,
+                help="Click exact coordinates 'x,y' (alias: --xy)",
+            )
             p_org.add_argument("--hover", type=str, default=None, help="Hover over element ID ('e1') or coordinates 'x,y' to reveal context controls")
             p_org.add_argument("--right-click", dest="right_click", type=str, default=None, help="Right-click element ID or 'x,y' to open context menu")
             p_org.add_argument("--attach", type=str, default=None, help="Attach file via macOS NSOpenPanel Go-to-folder sheet injection")
@@ -818,7 +841,7 @@ def build_parser() -> argparse.ArgumentParser:
             p_org.add_argument("--type", dest="type_text", type=str, default=None, help="Type text into targeted or focused input")
             p_org.add_argument("--paste", dest="paste_text", type=str, default=None, help="Atomically paste text via clipboard Cmd+V (fast React/ProseMirror injection)")
             p_org.add_argument("--scroll", dest="scroll", choices=["up", "down", "top", "bottom"], default=None, help="Scroll window/view up/down/top/bottom via AXScroll + Quartz")
-            p_org.add_argument("--hotkey", dest="hotkey", type=str, default=None, help="Dispatch key chord (e.g. 'cmd+n', 'cmd+shift+p', 'escape', 'enter')")
+            p_org.add_argument("--hotkey", "--key", dest="hotkey", type=str, default=None, help="Dispatch key chord (e.g. 'cmd+n', 'cmd+shift+p', 'escape', 'enter')")
             p_org.add_argument("--menu", dest="menu", type=str, default=None, help="Trigger menu item (e.g. 'View > Hide Sidebar') via AXPress in <3ms")
             p_org.add_argument("--submit", action="store_true", help="Send Return/Enter keystroke after clicking or typing")
             p_org.add_argument("--read-last", dest="read_last", action="store_true", help="Extract latest meaningful text blocks from window")
