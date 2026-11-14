@@ -463,6 +463,47 @@ def _get_bbb_streak_file(audit_log_path: Optional[Path | str] = None) -> Path:
     return _get_wbc_data_dir() / "bbb_streak_state.json"
 
 
+def _get_fast_bbb_state_file(audit_log_path: Optional[Path | str] = None) -> Optional[Path]:
+    """Return shared <YYYY-MM-DD>|<count> counter path synced with POSIX sh fast-path hook. [direct-edit]"""
+    env_fast = os.environ.get("WBC_FAST_BBB_STATE_FILE", "").strip()
+    if env_fast:
+        return Path(env_fast)
+    if audit_log_path:
+        return Path(audit_log_path).parent / "fast_bbb_daily.state"
+    env_wbc = os.environ.get("WBC_DATA_DIR", "").strip()
+    if env_wbc:
+        return Path(env_wbc).expanduser() / "fast_bbb_daily.state"
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("VOICEFI_STRICT_TEST_HOOK") == "1":
+        return None
+    return _get_wbc_data_dir() / "fast_bbb_daily.state"
+
+
+def _read_fast_bbb_daily_count(today_str: str, audit_log_path: Optional[Path | str] = None) -> int:
+    fast_file = _get_fast_bbb_state_file(audit_log_path)
+    if fast_file is None or not fast_file.is_file():
+        return 0
+    try:
+        raw = fast_file.read_text(encoding="utf-8").strip()
+        if "|" in raw:
+            f_date, f_cnt = raw.split("|", 1)
+            if f_date.strip() == today_str:
+                return max(0, int(f_cnt.strip()))
+    except Exception:
+        pass
+    return 0
+
+
+def _write_fast_bbb_daily_count(today_str: str, count: int, audit_log_path: Optional[Path | str] = None) -> None:
+    fast_file = _get_fast_bbb_state_file(audit_log_path)
+    if fast_file is None:
+        return
+    try:
+        fast_file.parent.mkdir(parents=True, exist_ok=True)
+        fast_file.write_text(f"{today_str}|{max(0, int(count))}\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _compute_daily_sig(daily: Dict[str, Any]) -> str:
     """Compute integrity signature for daily quota counters to detect manual tampering."""
     raw = (
@@ -498,6 +539,16 @@ def _get_daily_immune_state(audit_log_path: Optional[Path | str] = None) -> Dict
             "daily_anti_cheat_blocks": 0,
             "em_dashes_healed_today": 0,
         }
+        daily["sig"] = _compute_daily_sig(daily)
+        state["__daily__"] = daily
+        try:
+            streak_file.write_text(json.dumps(state), encoding="utf-8")
+        except Exception:
+            pass
+
+    fast_cnt = _read_fast_bbb_daily_count(today_str, audit_log_path)
+    if fast_cnt > int(daily.get("daily_interceptions", 0)):
+        daily["daily_interceptions"] = fast_cnt
         daily["sig"] = _compute_daily_sig(daily)
         state["__daily__"] = daily
         try:
@@ -582,7 +633,9 @@ def _record_daily_immune_metric(
             "daily_anti_cheat_blocks": 0,
             "em_dashes_healed_today": 0,
         }
-    daily["daily_interceptions"] = max(0, int(daily.get("daily_interceptions", 0)) + interceptions_delta)
+    fast_cnt = _read_fast_bbb_daily_count(today_str, audit_log_path)
+    base_inter = max(int(daily.get("daily_interceptions", 0)), fast_cnt)
+    daily["daily_interceptions"] = max(0, base_inter + interceptions_delta)  # [direct-edit]
     daily["daily_silicon_offloads"] = max(0, int(daily.get("daily_silicon_offloads", 0)) + silicon_offloads_delta)
     daily["offloaded_tokens_today"] = max(0, int(daily.get("offloaded_tokens_today", 0)) + offloaded_tokens_delta)
     daily["daily_anti_cheat_blocks"] = max(0, int(daily.get("daily_anti_cheat_blocks", 0)) + anti_cheat_blocks_delta)
@@ -593,6 +646,8 @@ def _record_daily_immune_metric(
         streak_file.write_text(json.dumps(state), encoding="utf-8")
     except Exception:
         pass
+    if interceptions_delta != 0 or fast_cnt > 0:
+        _write_fast_bbb_daily_count(today_str, int(daily["daily_interceptions"]), audit_log_path)
     return daily
 
 
@@ -730,11 +785,22 @@ def _update_bbb_streak_and_file_counts(
         )
     )
     if is_silicon_offload:
-        _record_daily_immune_metric(
+        updated_off = _record_daily_immune_metric(
             silicon_offloads_delta=1,
             offloaded_tokens_delta=11550,
             audit_log_path=audit_log_path,
-        )
+        )  # [direct-edit]
+        try:
+            from whole_body_compute.license import LicenseManager
+
+            LicenseManager().check_feature_gate(
+                "silicon_offload",
+                daily_silicon_offloads=int(updated_off.get("daily_silicon_offloads", 0)),
+                offloaded_tokens_today=int(updated_off.get("offloaded_tokens_today", 0)),
+                emit_telemetry=True,
+            )
+        except Exception:
+            pass
 
     daily_st = _get_daily_immune_state(audit_log_path)
     py_map = c_state.get("py_file_edits") if isinstance(c_state.get("py_file_edits"), dict) else {}
@@ -1600,6 +1666,7 @@ def run_ide_pre_tool_hook(
     ephemeral_message: Optional[str] = None
     context_gate_triggered = False
     bounded_slice_read = False
+    bbb_limit_passthrough = False  # [direct-edit]
     slice_body_tokens = 0
     attached_tokens = 0
     direct_tokens_saved = 0
@@ -1647,6 +1714,7 @@ def run_ide_pre_tool_hook(
     daily_anti_cheat_blocks = daily_st.get("daily_anti_cheat_blocks", 0)
     em_dashes_healed_today = daily_st.get("em_dashes_healed_today", 0)
 
+    lic_mgr = None
     try:
         from whole_body_compute.license import LicenseManager
         lic_mgr = LicenseManager()
@@ -1654,10 +1722,17 @@ def run_ide_pre_tool_hook(
             "silicon_offload",
             daily_silicon_offloads=daily_silicon_offloads,
             offloaded_tokens_today=offloaded_tokens_today,
+            emit_telemetry=False,
         )
         anti_cheat_gate = lic_mgr.check_feature_gate(
             "anti_cheat_guard",
             daily_anti_cheat_blocks=daily_anti_cheat_blocks,
+            emit_telemetry=False,
+        )
+        bbb_gate = lic_mgr.check_feature_gate(
+            "bbb_interception",
+            daily_interceptions=daily_interceptions,
+            emit_telemetry=False,
         )
     except Exception:
         silicon_gate = {
@@ -1674,6 +1749,13 @@ def run_ide_pre_tool_hook(
             "upgrade_nudge": "",
             "current_tier": "enterprise",
             "daily_anti_cheat_blocks": daily_anti_cheat_blocks,
+        }
+        bbb_gate = {
+            "allowed": True,
+            "pass_through_on_limit": False,
+            "upgrade_nudge": "",
+            "current_tier": "enterprise",
+            "daily_interceptions": daily_interceptions,
         }  # [direct-edit]
 
     # Runaway Thread Circuit Breaker: Soft Warning at >= 45, Hard Block at >= 150 (or >= 90 if not recovery)
@@ -2005,6 +2087,35 @@ def run_ide_pre_tool_hook(
                                             )
                                     except Exception:
                                         pass
+                        elif bbb_gate.get("pass_through_on_limit") and (total_lines > file_threshold or is_raw_log):
+                            decision = "allow"
+                            bbb_limit_passthrough = True
+                            updated_bbb_daily = _record_daily_immune_metric(
+                                interceptions_delta=1,
+                                audit_log_path=audit_log_path,
+                            )  # [direct-edit]
+                            live_bbb_nudge = bbb_gate.get("upgrade_nudge", "")
+                            if lic_mgr is not None:
+                                try:
+                                    live_bbb_gate = lic_mgr.check_feature_gate(
+                                        "bbb_interception",
+                                        daily_interceptions=int(
+                                            updated_bbb_daily.get("daily_interceptions", daily_interceptions + 1)
+                                        ),
+                                        unbounded_lines=total_lines,
+                                        reingestion_turns=remaining_turns,
+                                        emit_telemetry=True,
+                                    )
+                                    live_bbb_nudge = live_bbb_gate.get("upgrade_nudge") or live_bbb_nudge
+                                except Exception:
+                                    pass
+                            ephemeral_message = live_bbb_nudge
+                            if (
+                                sensory_vector.proprioception.harness_name in ("antigravity", "windsurf")
+                                and ephemeral_message
+                            ):
+                                _stash_preinv_context(conv_id, ephemeral_message)
+                            reason = ephemeral_message
                         elif total_lines > file_threshold or is_raw_log:
                             outline = _build_fast_file_symbol_outline(fpath, raw_text)
                             outline_tokens = max(1, len(outline) // 4)
@@ -2542,10 +2653,21 @@ def run_ide_pre_tool_hook(
                             or "assert" in str(gate.get("reason", "")).lower()
                         )
                         if is_anti_cheat:
-                            _record_daily_immune_metric(
+                            updated_ac = _record_daily_immune_metric(
                                 anti_cheat_blocks_delta=1,
                                 audit_log_path=audit_log_path,
-                            )
+                            )  # [direct-edit]
+                            if lic_mgr is not None:
+                                try:
+                                    lic_mgr.check_feature_gate(
+                                        "anti_cheat_guard",
+                                        daily_anti_cheat_blocks=int(
+                                            updated_ac.get("daily_anti_cheat_blocks", daily_anti_cheat_blocks + 1)
+                                        ),
+                                        emit_telemetry=True,
+                                    )
+                                except Exception:
+                                    pass
                             if anti_cheat_gate.get("pass_through_on_limit"):
                                 decision = "allow"
                                 ephemeral_message = anti_cheat_gate.get("upgrade_nudge")
@@ -2572,7 +2694,17 @@ def run_ide_pre_tool_hook(
                         is_subagent = _is_subagent_conversation(conv_id, payload)
                         if is_subagent:
                             if silicon_gate.get("pass_through_on_limit"):
-                                ephemeral_message = silicon_gate.get("upgrade_nudge")
+                                if lic_mgr is not None:
+                                    try:
+                                        lic_mgr.check_feature_gate(
+                                            "silicon_offload",
+                                            daily_silicon_offloads=daily_silicon_offloads,
+                                            offloaded_tokens_today=offloaded_tokens_today,
+                                            emit_telemetry=True,
+                                        )
+                                    except Exception:
+                                        pass
+                                ephemeral_message = silicon_gate.get("upgrade_nudge")  # [direct-edit]
                             else:
                                 tally_note = ""
                                 if silicon_gate.get("current_tier") == "community":
@@ -2595,7 +2727,17 @@ def run_ide_pre_tool_hook(
                             elif not is_mlx_online:
                                 ephemeral_message = "⚡ Blood-Brain Barrier Layer 1 Implementer: :9379 is offline; direct cloud edit permitted."
                             elif silicon_gate.get("pass_through_on_limit"):
-                                decision = "allow"
+                                if lic_mgr is not None:
+                                    try:
+                                        lic_mgr.check_feature_gate(
+                                            "silicon_offload",
+                                            daily_silicon_offloads=daily_silicon_offloads,
+                                            offloaded_tokens_today=offloaded_tokens_today,
+                                            emit_telemetry=True,
+                                        )
+                                    except Exception:
+                                        pass
+                                decision = "allow"  # [direct-edit]
                                 ephemeral_message = silicon_gate.get("upgrade_nudge")
                             else:
                                 py_file_edits = int(c_state.get("py_file_edits", {}).get(raw_path, 0))
@@ -2651,10 +2793,21 @@ def run_ide_pre_tool_hook(
                             pass
 
             if is_strict_test and decision == "allow" and any(raw_path.endswith(p) for p in PROTECTED_CONFIG_FILES):  # [direct-edit]
-                _record_daily_immune_metric(
+                updated_ac_cfg = _record_daily_immune_metric(
                     anti_cheat_blocks_delta=1,
                     audit_log_path=audit_log_path,
                 )
+                if lic_mgr is not None:
+                    try:
+                        lic_mgr.check_feature_gate(
+                            "anti_cheat_guard",
+                            daily_anti_cheat_blocks=int(
+                                updated_ac_cfg.get("daily_anti_cheat_blocks", daily_anti_cheat_blocks + 1)
+                            ),
+                            emit_telemetry=True,
+                        )
+                    except Exception:
+                        pass
                 stage_triggered = 1
                 if anti_cheat_gate.get("pass_through_on_limit"):
                     decision = "allow"
@@ -3103,18 +3256,45 @@ def run_ide_pre_tool_hook(
                 decision = "allow"
                 reason = f"Blood-Brain Barrier FinOps Gate: Subagent model '{model_val}' approved"
 
-            if decision == "allow":
-                sub_spawns = int(c_state.get("subagent_spawns", 0))
-                send_msgs = int(c_state.get("send_messages", 0))
-                if sub_spawns >= 1 and send_msgs == 0:
-                    reuse_guidance = (
-                        "⚡ Blood-Brain Barrier Subagent Reuse: An existing warm subagent was previously spawned in this conversation. "
-                        "Consider sending tasks directly to the active subagent via `send_message(Recipient='<id>')` "
-                        "to save initialization overhead and preserve warm KV cache."
-                    )
-                    ephemeral_message = (
-                        f"{ephemeral_message}\n{reuse_guidance}" if ephemeral_message else reuse_guidance
-                    )
+        if decision == "allow" and type_name == "browser":
+            role_str = str(args.get("Role") or args.get("role") or "")
+            prompt_str = str(args.get("Prompt") or args.get("prompt") or "")
+            combined_browser_text = f"{role_str} {prompt_str}".lower()
+            has_posthog_key = _has_posthog_personal_key()
+            if "posthog.com" in combined_browser_text and has_posthog_key and "[allow-browser]" not in combined_browser_text:
+                decision = "deny"
+                stage_triggered = 1
+                reason = (
+                    "🔑👁️ [PostHog API & Foveal Chrome Priority]: `~/.whole_body_compute/posthog_personal_key` is available "
+                    "and `browser` subagent opens an unauthenticated webview that hits PostHog login walls.\n"
+                    "  • Query PostHog REST/HogQL first via `whole_body_compute.procedural_telemetry.get_posthog_personal_api_key()` "
+                    "against `https://us.posthog.com/api/projects/730830/`.\n"
+                    "  • For live UI checks, inspect your logged-in Chrome tab via `uv run body eyes --app \"Google Chrome\" --title \"PostHog\" --max-elements 120`.\n"
+                    "  (Include `[allow-browser]` in the subagent Prompt only if an isolated webview session is explicitly needed.)"
+                )
+            else:
+                foveal_browser_guidance = (
+                    "👁️✋ [Foveal Eyes & Hands Shortcut — Live Chrome]: If this URL is already open or authenticated in Google Chrome, "
+                    "`uv run body eyes --app \"Google Chrome\" --max-elements 120` reads the live logged-in DOM without hitting login walls."
+                )
+                ephemeral_message = (
+                    f"{ephemeral_message}\n{foveal_browser_guidance}" if ephemeral_message else foveal_browser_guidance
+                )
+                if sensory_vector.proprioception.harness_name in ("antigravity", "windsurf"):
+                    _stash_preinv_context(conv_id, foveal_browser_guidance)
+
+        if decision == "allow" and is_strict_test:
+            sub_spawns = int(c_state.get("subagent_spawns", 0))
+            send_msgs = int(c_state.get("send_messages", 0))
+            if sub_spawns >= 1 and send_msgs == 0:
+                reuse_guidance = (
+                    "⚡ Blood-Brain Barrier Subagent Reuse: An existing warm subagent was previously spawned in this conversation. "
+                    "Consider sending tasks directly to the active subagent via `send_message(Recipient='<id>')` "
+                    "to save initialization overhead and preserve warm KV cache."
+                )
+                ephemeral_message = (
+                    f"{ephemeral_message}\n{reuse_guidance}" if ephemeral_message else reuse_guidance
+                )
     elif tool_name in ("send_message", "ask_question"):  # [direct-edit]
         for m_key in ("Message", "message", "questions"):
             if m_key in args:
@@ -3363,6 +3543,8 @@ def run_ide_pre_tool_hook(
     }
     if read_auto_sliced:
         out["read_auto_sliced"] = True
+    if bbb_limit_passthrough:
+        out["bbb_limit_passthrough"] = True  # [direct-edit]
     if tail_bridged:
         out["tail_bridged"] = True
     if foveal_jumped:
@@ -3414,16 +3596,16 @@ def run_ide_pre_tool_hook(
     if context_gate_triggered or decision in ("ask", "deny", "force_ask") or read_auto_sliced:
         updated_daily = _record_daily_immune_metric(interceptions_delta=1, audit_log_path=audit_log_path)
         new_inter_cnt = int(updated_daily.get("daily_interceptions", 0))
-        if new_inter_cnt in (10, 25, 40, 50):
-            try:
-                from whole_body_compute.license import LicenseManager
+        try:
+            from whole_body_compute.license import LicenseManager
 
-                LicenseManager().check_feature_gate(
-                    "bbb_interception",
-                    daily_interceptions=new_inter_cnt,
-                )
-            except Exception:
-                pass
+            LicenseManager().check_feature_gate(
+                "bbb_interception",
+                daily_interceptions=new_inter_cnt,
+                emit_telemetry=True,
+            )  # [direct-edit]
+        except Exception:
+            pass
         # Emit debounced wbc_shield_pulse every 10 interceptions (or on first interception of the day)
         if (
             not os.environ.get("PYTEST_CURRENT_TEST")
@@ -3474,6 +3656,16 @@ def run_ide_pre_tool_hook(
         )
     if is_strict_test and tool_name in ("edit_file", "Edit", "MultiEdit") and session_counts["edit_count"] > 1 and target_path_str:  # [direct-edit]
         if silicon_gate.get("pass_through_on_limit"):
+            if lic_mgr is not None:
+                try:
+                    lic_mgr.check_feature_gate(
+                        "silicon_offload",
+                        daily_silicon_offloads=daily_silicon_offloads,
+                        offloaded_tokens_today=offloaded_tokens_today,
+                        emit_telemetry=True,
+                    )
+                except Exception:
+                    pass
             nudge_str = silicon_gate.get("upgrade_nudge", "")
             if nudge_str and nudge_str not in additional_notes:
                 additional_notes.append(nudge_str)
@@ -3512,10 +3704,11 @@ def run_ide_pre_tool_hook(
 
     has_zero_donut_or_slice_ctx = bool(
         read_auto_sliced
+        or bbb_limit_passthrough
         or tail_bridged
         or foveal_jumped
         or (ephemeral_message and "[Foveal Eyes & Hands Shortcut" in ephemeral_message)
-    )
+    )  # [direct-edit]
     if ephemeral_message:
         if is_strict_test or has_zero_donut_or_slice_ctx:
             out["ephemeralMessage"] = ephemeral_message
@@ -3929,6 +4122,63 @@ def _resolve_foveal_ast_jump(
     return (best_sym, j_start, j_end, header_imports)
 
 
+def _has_posthog_personal_key() -> bool:
+    """Return True if a PostHog Personal API Key is configured via env or owner file."""
+    return bool(
+        os.environ.get("POSTHOG_PERSONAL_API_KEY", "").strip()
+        or (Path.home() / ".whole_body_compute" / "posthog_personal_key").is_file()
+    )
+
+
+def _build_preinv_url_reflex(transcript_path_str: str) -> str:
+    """Emit a zero-bloat PreInvocation reflex only when the latest USER_INPUT carries an https:// URL."""
+    if not transcript_path_str:
+        return ""
+    tp = Path(transcript_path_str)
+    if not tp.is_file():
+        return ""
+    try:
+        size = tp.stat().st_size
+        with tp.open("rb") as fh:
+            if size > 8192:
+                fh.seek(size - 8192)
+            tail_text = fh.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+    last_obj: Optional[Dict[str, Any]] = None
+    for raw_ln in reversed(tail_text.splitlines()):
+        raw_ln = raw_ln.strip()
+        if not raw_ln:
+            continue
+        try:
+            obj = json.loads(raw_ln)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            last_obj = obj
+            break
+
+    if not last_obj or last_obj.get("type") != "USER_INPUT":
+        return ""
+    content_low = str(last_obj.get("content") or "").lower()
+    if "https://" not in content_low:
+        return ""
+    if "posthog.com" in content_low and _has_posthog_personal_key():
+        return (
+            "🔑👁️ [WBC PostHog & Live Chrome Reflex]: `~/.whole_body_compute/posthog_personal_key` is available. "
+            "Query `https://us.posthog.com/api/projects/730830/` via `whole_body_compute.procedural_telemetry.get_posthog_personal_api_key()` "
+            "first, or inspect your logged-in Chrome tab via `uv run body eyes --app \"Google Chrome\" --title \"PostHog\" --max-elements 120` "
+            "instead of spawning an unauthenticated `browser` subagent."
+        )
+    if "https://localhost" in content_low or "https://127.0.0.1" in content_low:
+        return ""
+    return (
+        "👁️✋ [WBC Live Chrome Reflex]: If this URL is already open or authenticated in Google Chrome, "
+        "inspect it via `uv run body eyes --app \"Google Chrome\" --max-elements 120` before spawning an isolated `browser` subagent."
+    )
+
+
 def run_ide_pre_invocation_hook(
     payload: Dict[str, Any],
     audit_log_path: Optional[Path | str] = None,
@@ -3944,7 +4194,11 @@ def run_ide_pre_invocation_hook(
     t0 = time.perf_counter()
     conv_id = str(payload.get("conversationId") or payload.get("conversation_id") or "local")
     steps = int(payload.get("initialNumSteps", payload.get("stepIdx", 0)) or 0)
-    transcript_path_str = str(payload.get("transcriptPath") or "").strip()
+    transcript_path_str = str(payload.get("transcriptPath") or payload.get("transcript_path") or "").strip()
+    if not transcript_path_str and conv_id and conv_id != "local":
+        cand_tp = Path.home() / ".gemini" / "antigravity" / "brain" / conv_id / ".system_generated" / "logs" / "transcript.jsonl"
+        if cand_tp.is_file():
+            transcript_path_str = str(cand_tp)
     transcript_kb = 0.0
     if transcript_path_str:
         tp = Path(transcript_path_str)
@@ -4016,6 +4270,11 @@ def run_ide_pre_invocation_hook(
     stashed_preinv = _pop_preinv_context(conv_id)
     if stashed_preinv:
         inject_steps.append({"systemMessage": {"systemMessage": stashed_preinv}})
+
+    if not is_subagent:
+        url_reflex = _build_preinv_url_reflex(transcript_path_str)
+        if url_reflex:
+            inject_steps.append({"systemMessage": {"systemMessage": url_reflex}})
 
     combined_ephemeral = "\n".join(msg_parts)
     if combined_ephemeral:
@@ -4778,9 +5037,14 @@ def adapt_claude_code_pre_hook(
                         hso_cc["updatedInput"] = updated_input
                     add_ctx = res_obj.get("additionalContext") or (
                         res_obj.get("ephemeralMessage")
-                        if (res_obj.get("tail_bridged") or res_obj.get("foveal_jumped") or res_obj.get("read_auto_sliced"))
+                        if (
+                            res_obj.get("tail_bridged")
+                            or res_obj.get("foveal_jumped")
+                            or res_obj.get("read_auto_sliced")
+                            or res_obj.get("bbb_limit_passthrough")
+                        )
                         else None
-                    )
+                    )  # [direct-edit]
                     if add_ctx:
                         res_obj["additionalContext"] = add_ctx
                         hso_cc["additionalContext"] = add_ctx
@@ -4807,6 +5071,20 @@ def adapt_claude_code_pre_hook(
                     if env_cc_thresh
                     else (250 if is_strict_cc else cc_sv.effective_file_threshold)
                 )
+                if res_obj.get("bbb_limit_passthrough"):
+                    nudge_cc = str(res_obj.get("ephemeralMessage") or res_obj.get("reason") or "")
+                    res_obj["decision"] = "allow"
+                    res_obj["permissionDecision"] = "allow"
+                    res_obj["hookSpecificOutput"] = {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "allow",
+                        **(
+                            {"additionalContext": nudge_cc}
+                            if nudge_cc
+                            else {}
+                        ),
+                    }
+                    return res_obj
                 if res_obj.get("decision") == "deny" or res_obj.get("overwrite") or (not has_source_bounds and total_lines > cc_line_threshold):
                     slice_limit = 120 if is_strict_cc else cc_sv.auto_slice_window
                     outline = _build_fast_file_symbol_outline(fpath, raw_text) if raw_text else ""
@@ -4957,6 +5235,62 @@ class BloodBrainBarrier:
         return get_immune_pre_post_scorecard(audit_log_path=self.audit_log_path, window_seconds=window_seconds)
 
 
+def _handle_fast_slice_milestone(count: int, harness: str) -> int:
+    """Detached background helper invoked by POSIX sh fast-path on milestone slices. [direct-edit]"""
+    try:
+        updated_daily = _record_daily_immune_metric(interceptions_delta=0)
+        eff_cnt = max(int(count), int(updated_daily.get("daily_interceptions", 0)))
+        if eff_cnt > int(updated_daily.get("daily_interceptions", 0)):
+            updated_daily = _record_daily_immune_metric(
+                interceptions_delta=eff_cnt - int(updated_daily.get("daily_interceptions", 0))
+            )
+        try:
+            from whole_body_compute.license import LicenseManager
+
+            LicenseManager().check_feature_gate(
+                "bbb_interception",
+                daily_interceptions=eff_cnt,
+                emit_telemetry=True,
+            )
+        except Exception:
+            pass
+        if (
+            not os.environ.get("PYTEST_CURRENT_TEST")
+            and os.environ.get("VOICEFI_STRICT_TEST_HOOK") != "1"
+            and (eff_cnt == 1 or eff_cnt % 10 == 0)
+        ):
+            try:
+                from whole_body_compute.procedural_telemetry import track_wbc_event
+                from whole_body_compute.shield import get_savings_summary
+
+                sav = get_savings_summary(window="24h")
+                track_wbc_event(
+                    "wbc_shield_pulse",
+                    {
+                        "trigger": "hook_milestone",
+                        "harness": str(harness or "unknown"),
+                        "daily_interceptions": eff_cnt,
+                        "daily_silicon_offloads": int(updated_daily.get("daily_silicon_offloads", 0)),
+                        "daily_anti_cheat_blocks": int(updated_daily.get("daily_anti_cheat_blocks", 0)),
+                        "events_24h": int(sav.get("total_events", 0)),
+                        "direct_tokens_saved_24h": int(sav.get("direct_tokens_saved", 0)),
+                        "cumulative_tokens_saved_24h": int(sav.get("cumulative_tokens_saved", 0)),
+                        "estimated_usd_saved_24h": float(sav.get("estimated_usd_saved", 0.0)),
+                        "secrets_scrubbed_24h": int(sav.get("secrets_scrubbed", 0)),
+                        "last_tool_name": "fast_sh_auto_slice",
+                        "last_decision": "allow",
+                        "read_auto_sliced": True,
+                        "retry_churn_active": False,
+                    },
+                    detached_hook=True,
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return 0
+
+
 def cli_hook_main(argv: Optional[List[str]] = None) -> int:
     """
     Native console_script entrypoint (`body-immune-hook`) for Blood-Brain Barrier PreToolUse / PostToolUse / PreInvocation hooks.
@@ -4968,6 +5302,22 @@ def cli_hook_main(argv: Optional[List[str]] = None) -> int:
         idx = args_list.index("--phase")
         if idx + 1 < len(args_list):
             phase_arg = args_list[idx + 1].strip().lower()
+
+    if phase_arg == "fast-milestone":
+        m_cnt = 1
+        m_harness = "unknown"
+        if "--count" in args_list:
+            c_idx = args_list.index("--count")
+            if c_idx + 1 < len(args_list):
+                try:
+                    m_cnt = int(args_list[c_idx + 1])
+                except Exception:
+                    m_cnt = 1
+        if "--harness" in args_list:
+            h_idx = args_list.index("--harness")
+            if h_idx + 1 < len(args_list):
+                m_harness = args_list[h_idx + 1].strip() or "unknown"
+        return _handle_fast_slice_milestone(m_cnt, m_harness)
 
     try:
         try:

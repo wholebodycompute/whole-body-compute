@@ -243,6 +243,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_dna.add_argument("--port", type=int, default=9381, help="Dashboard server port (default: 9381)")
     p_dna.add_argument("--host", default="127.0.0.1", help="Dashboard server host (default: 127.0.0.1)")
+    p_dna.add_argument(
+        "--cloud",
+        action="store_true",
+        help="Include live PostHog Cloud Project #730830 external funnel, limit-hit, and conversion stats",
+    )
     p_dna.add_argument("--open", action="store_true", help="Automatically open dashboard in default browser")
     p_dna.add_argument("--logs", action="store_true", help="Print historical Readiness & Biometric state logs")
     p_dna.add_argument("--limit", type=int, default=20, help="Number of log entries to display")
@@ -489,6 +494,21 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Simulated daily Anti-Reward-Hacking blocks count for feature gate check",
+    )
+    p_lic.add_argument(
+        "--open",
+        "--checkout",
+        dest="open_checkout",
+        nargs="?",
+        const="pro",
+        choices=["pro", "team", "enterprise"],
+        help="Open Polar checkout link in browser (default: pro) and log upgrade checkout intent",
+    )
+    p_lic.add_argument(
+        "--no-browser",
+        dest="no_browser",
+        action="store_true",
+        help="Print tracked checkout URL without launching a browser window",
     )
     p_lic.add_argument("--json", action="store_true", help="Output structured JSON")
 

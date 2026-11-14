@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from typing import Optional
@@ -598,7 +599,12 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
         return 0
 
     if cmd in ("license", "tier", "pricing", "upgrade", "plan"):
-        from whole_body_compute.license import LicenseManager, format_license_and_pricing_card
+        from whole_body_compute.license import (
+            POLAR_CHECKOUT_URLS,
+            LicenseManager,
+            build_checkout_url,
+            format_license_and_pricing_card,
+        )
 
         mgr = LicenseManager()
         set_t = getattr(args, "set_tier", None)
@@ -611,6 +617,8 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
         no_install_wheel = getattr(args, "no_install_wheel", False)
         reinstall_wheel = getattr(args, "reinstall_wheel", False)
         chk_f = getattr(args, "check_feature", None)
+        open_checkout = getattr(args, "open_checkout", None)
+        no_browser = bool(getattr(args, "no_browser", False))
         daily_int = getattr(args, "daily_interceptions", 0)
         daily_off = getattr(args, "daily_silicon_offloads", 0)
         daily_ac = getattr(args, "daily_anti_cheat_blocks", 0)
@@ -647,6 +655,66 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
                 print(f"Error: {err}")
             return 1
 
+        if open_checkout:
+            cohort_id = None
+            try:
+                from whole_body_compute.procedural_telemetry import TelemetryConsentManager, track_wbc_event
+
+                cohort_id = TelemetryConsentManager().get_cohort_id()
+            except Exception:
+                track_wbc_event = None  # type: ignore[assignment]
+
+            checkout_url = build_checkout_url(open_checkout, surface=f"cli_{cmd}", cohort_id=cohort_id)
+            polar_direct_url = build_checkout_url(
+                open_checkout, surface=f"cli_{cmd}", cohort_id=cohort_id, direct_polar=True
+            )
+            opened_browser = False
+            if (
+                not no_browser
+                and "PYTEST_CURRENT_TEST" not in os.environ
+                and os.environ.get("CI", "").lower() not in ("1", "true", "yes")
+            ):
+                try:
+                    import webbrowser
+
+                    opened_browser = bool(webbrowser.open(checkout_url))
+                except Exception:
+                    opened_browser = False
+
+            if track_wbc_event is not None:
+                try:
+                    track_wbc_event(
+                        "wbc_checkout_clicked",
+                        {
+                            "tier": open_checkout,
+                            "surface": f"cli_{cmd}",
+                            "current_tier": str(status.get("tier") or "community"),
+                            "opened_browser": opened_browser,
+                        },
+                    )
+                except Exception:
+                    pass
+
+            status["checkout_opened"] = {
+                "tier": open_checkout,
+                "checkout_url": checkout_url,
+                "polar_url": polar_direct_url,
+                "opened_browser": opened_browser,
+            }
+        elif not any((act_key, reinstall_wheel, wheel_path, deact, set_t, chk_f)):
+            try:
+                from whole_body_compute.procedural_telemetry import track_wbc_event
+
+                track_wbc_event(
+                    "wbc_pricing_viewed",
+                    {
+                        "surface": f"cli_{cmd}",
+                        "current_tier": str(status.get("tier") or "community"),
+                    },
+                )
+            except Exception:
+                pass
+
         if chk_f:
             gate = mgr.check_feature_gate(
                 chk_f,
@@ -660,6 +728,15 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
             print(json.dumps(status, indent=2))
         else:
             print(format_license_and_pricing_card(status))
+            if open_checkout and status.get("checkout_opened"):
+                co = status["checkout_opened"]
+                state_tag = "Opened in browser" if co["opened_browser"] else "Checkout link ready"
+                print(
+                    f"  🛒 [{state_tag}] Whole Body Compute {open_checkout.title()} Checkout:\n"
+                    f"     -> {co['checkout_url']}\n"
+                    f"     -> Direct Polar: {POLAR_CHECKOUT_URLS.get(open_checkout, co['polar_url'])}\n"
+                    f"     -> After purchase, run: `body license --activate <POLAR_KEY>`\n"
+                )
             if chk_f and status.get("feature_gate", {}).get("upgrade_nudge"):
                 print(f"  {status['feature_gate']['upgrade_nudge']}\n")
         return 0

@@ -47,6 +47,67 @@ POLAR_CHECKOUT_URLS: Dict[str, str] = {
     ),
 }
 
+PUBLIC_CHECKOUT_URLS: Dict[str, str] = {
+    "pro": "https://wholebodycompute.com/checkout/pro",
+    "team": "https://wholebodycompute.com/checkout/team",
+    "enterprise": "https://wholebodycompute.com/checkout/enterprise",
+}
+
+
+def build_checkout_url(
+    tier: str = "pro",
+    *,
+    surface: str = "cli",
+    cohort_id: Optional[str] = None,
+    direct_polar: bool = False,
+) -> str:
+    """Build an attributed checkout URL (edge-tracked redirect by default, or direct Polar checkout)."""
+    import urllib.parse
+
+    clean_tier = (tier or "pro").strip().lower()
+    if clean_tier not in POLAR_CHECKOUT_URLS:
+        clean_tier = "pro"
+    base = POLAR_CHECKOUT_URLS[clean_tier] if direct_polar else PUBLIC_CHECKOUT_URLS[clean_tier]
+    params: Dict[str, str] = {
+        "utm_source": "whole_body_compute",
+        "utm_medium": surface,
+        "utm_campaign": f"upgrade_{clean_tier}",
+    }
+    if cohort_id:
+        params["cohort_id"] = str(cohort_id)[:32]
+    sep = "&" if "?" in base else "?"
+    return f"{base}{sep}{urllib.parse.urlencode(params)}"
+
+
+def _classify_activation_failure(err_msg: str) -> str:
+    """Classify activation failure into a zero-PII category for conversion funnel diagnostics."""
+    low = (err_msg or "").lower()
+    if _is_seat_limit_error(low):
+        return "seat_limit_reached"
+    if "expired" in low:
+        return "expired_key"
+    if "revoked" in low or "disabled" in low:
+        return "revoked_or_disabled"
+    if "network error" in low or "timed out" in low:
+        return "network_error"
+    if "empty" in low or "format" in low or "too short" in low or "maximum allowed length" in low:
+        return "invalid_key_format"
+    if "wheel" in low:
+        return "pro_wheel_install_error"
+    if "validation failed" in low or "activation failed" in low or "not active" in low:
+        return "polar_rejected"
+    return "other_error"
+
+
+def _emit_license_telemetry(event_name: str, properties: Dict[str, Any], *, detached: bool = False) -> None:
+    """Best-effort zero-PII PostHog event emitter for license lifecycle & checkout actions."""
+    try:
+        from whole_body_compute.procedural_telemetry import track_wbc_event
+
+        track_wbc_event(event_name, properties, detached_hook=detached)
+    except Exception:
+        pass
+
 
 def _is_expired_iso(expires_at: Any) -> bool:
     """Return True if an ISO-8601 `expires_at` timestamp is in the past."""
@@ -506,6 +567,40 @@ class LicenseManager:
         install_wheel: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Activate and verify a Polar.sh license key (online or offline) and install Pro plugin wheel."""
+        prev_tier = self.get_active_tier()
+        try:
+            return self._activate_polar_key_impl(
+                key=key,
+                organization_id=organization_id,
+                label=label,
+                offline=offline,
+                wheel_path=wheel_path,
+                wheel_url=wheel_url,
+                install_wheel=install_wheel,
+                previous_tier=prev_tier,
+            )
+        except Exception as exc:
+            _emit_license_telemetry(
+                "wbc_license_activation_failed",
+                {
+                    "mode": "polar_offline" if offline else "polar_online",
+                    "previous_tier": prev_tier,
+                    "failure_category": _classify_activation_failure(str(exc)),
+                },
+            )
+            raise
+
+    def _activate_polar_key_impl(
+        self,
+        key: str,
+        organization_id: Optional[str] = None,
+        label: Optional[str] = None,
+        offline: bool = False,
+        wheel_path: Optional[Path | str] = None,
+        wheel_url: Optional[str] = None,
+        install_wheel: Optional[bool] = None,
+        previous_tier: str = "community",
+    ) -> Dict[str, Any]:
         clean_key = (key or "").strip()
         if not clean_key:
             raise ValueError("License key cannot be empty.")
@@ -730,6 +825,16 @@ class LicenseManager:
         status_out = self.get_status()
         if pro_install_receipt is not None:
             status_out["pro_plugin_install"] = pro_install_receipt
+        _emit_license_telemetry(
+            "wbc_license_activated",
+            {
+                "tier": tier,
+                "previous_tier": previous_tier,
+                "mode": mode,
+                "provider": "polar.sh",
+                "pro_wheel_installed": bool(pro_install_receipt),
+            },
+        )
         return status_out
 
     def reinstall_pro_wheel(
@@ -810,6 +915,13 @@ class LicenseManager:
             clear_pro_module_cache(unload_sys_modules=True)
         except Exception:
             pass
+        _emit_license_telemetry(
+            "wbc_license_deactivated",
+            {
+                "previous_tier": str(existing.get("tier") or "community"),
+                "had_polar_activation": bool(act_id),
+            },
+        )
         return self.get_status()
 
     def set_tier(self, tier: str) -> Dict[str, Any]:
@@ -836,6 +948,33 @@ class LicenseManager:
             pass
         return self.get_status()
 
+    def _claim_daily_quota_telemetry_bucket(self, feature_name: str, bucket: str) -> bool:
+        """Return True the first time `(today, feature_name, bucket)` is observed on this machine."""
+        today_str = datetime.date.today().isoformat()
+        dedup_path = self.license_path.parent / ".quota_events_today.json"
+        key = f"{feature_name}:{bucket}"
+        doc: Dict[str, Any] = {}
+        if dedup_path.is_file():
+            try:
+                doc = json.loads(dedup_path.read_text(encoding="utf-8"))
+            except Exception:
+                doc = {}
+        if not isinstance(doc, dict) or doc.get("date") != today_str:
+            doc = {"date": today_str, "seen": {}}
+        seen = doc.setdefault("seen", {})
+        if not isinstance(seen, dict):
+            seen = {}
+            doc["seen"] = seen
+        if seen.get(key):
+            return False
+        seen[key] = int(time.time())
+        try:
+            dedup_path.parent.mkdir(parents=True, exist_ok=True)
+            dedup_path.write_text(json.dumps(doc), encoding="utf-8")
+        except Exception:
+            pass
+        return True
+
     def is_feature_allowed(self, feature_name: str, **kwargs: Any) -> bool:
         """Convenience boolean check wrapping `check_feature_gate`."""
         return bool(self.check_feature_gate(feature_name, **kwargs).get("allowed"))
@@ -851,6 +990,8 @@ class LicenseManager:
         daily_anti_cheat_blocks: int = 0,
         em_dashes_healed_today: int = 0,
         skill_exports_used: int = 0,
+        *,
+        emit_telemetry: bool = True,
     ) -> Dict[str, Any]:
         """
         Check whether `feature_name` is permitted under the active tier. [direct-edit]
@@ -885,6 +1026,8 @@ class LicenseManager:
             allowed = True
             pass_through_on_limit = False
 
+        pro_checkout = PUBLIC_CHECKOUT_URLS["pro"]
+
         if curr_tier == "community" and feature_name in ("pal_skill_export", "unlimited_pal_skill_export"):
             if skill_exports_used < 1 and feature_name == "pal_skill_export":
                 allowed = True
@@ -897,7 +1040,7 @@ class LicenseManager:
                     f"🎓 [WBC Community Limit: {max(1, skill_exports_used)}/1 Free Portable Skill Exports Used] "
                     "Dry-Run Preview active: unlock Unlimited Hey Pal Demonstration Compiling & `.skill.zip` Exports "
                     "for Claude Duet, Claude Code & Antigravity with Whole Body Compute Pro ($29/mo): "
-                    "`body license --activate <POLAR_KEY>`"
+                    f"{pro_checkout} (`body upgrade --open` -> `body license --activate <POLAR_KEY>`)"
                 )
 
         if curr_tier == "community" and feature_name in ("bbb_interception", "unlimited_bbb"):
@@ -909,7 +1052,8 @@ class LicenseManager:
                     f"⚠️ [WBC Community Limit: {max(50, daily_interceptions)}/50 BBB Shields Used Today - "
                     f"${daily_saved_usd:.2f} Saved] Pass-through active: this {unbounded_lines}-line read adds "
                     f"~{est_tokens_per_read:,} re-ingested tokens (${est_waste_usd:.2f}) to your cloud bill. "
-                    "Unlock unlimited BBB + 25-step Glymphatic Flush for $29/mo: `body license --activate <POLAR_KEY>`"
+                    f"Unlock unlimited BBB + 25-step Glymphatic Flush for $29/mo: {pro_checkout} "
+                    "(`body upgrade --open` -> `body license --activate <POLAR_KEY>`)"
                 )
 
         if curr_tier == "community" and feature_name in ("silicon_offload", "unlimited_silicon_offload"):
@@ -926,7 +1070,7 @@ class LicenseManager:
                     f"⚡ [WBC Community Limit: {max(25, daily_silicon_offloads)}/25 Local Silicon Offloads Used Today - "
                     f"{tokens_handled:,} Cloud Tokens (${saved_usd:.2f}) Handled 100% on Your Mac GPU] Passing through to "
                     "cloud frontier model. Unlock Unlimited 82.8% Local Silicon Offloading + 3:30 AM REM LoRA Distillation "
-                    "for $29/mo: `body license --activate <POLAR_KEY>`"
+                    f"for $29/mo: {pro_checkout} (`body upgrade --open` -> `body license --activate <POLAR_KEY>`)"
                 )
 
         if curr_tier == "community" and feature_name in ("anti_cheat_guard", "unlimited_anti_cheat_guard"):
@@ -940,33 +1084,79 @@ class LicenseManager:
                 nudge = (
                     f"⚠️ [WBC Community Limit: {max(3, daily_anti_cheat_blocks)}/3 Anti-Reward-Hacking Blocks Used Today] "
                     "Pass-through alert: agent attempted a test-integrity or protected-file modification. "
-                    "Unlock Unlimited AST Test-Integrity & Protected-File Lock for $29/mo: `body license --activate <POLAR_KEY>`"
+                    f"Unlock Unlimited AST Test-Integrity & Protected-File Lock for $29/mo: {pro_checkout} "
+                    "(`body upgrade --open` -> `body license --activate <POLAR_KEY>`)"
                 )
 
         if not allowed and not nudge:
             req_cat = TIER_CATALOG[req_tier]
+            target_checkout = PUBLIC_CHECKOUT_URLS.get(req_tier, pro_checkout)
             nudge = (
                 f"Feature `{feature_name}` requires {req_cat['name']} ({req_cat['price_display']}). "
-                "Activate with `body license --activate <POLAR_KEY>`."
+                f"Upgrade at {target_checkout} (`body upgrade --open {req_tier}`) and activate with `body license --activate <POLAR_KEY>`."
             )
 
-        # Track quota milestones and limit hits in PostHog
-        if curr_tier == "community" and (
-            pass_through_on_limit
-            or not allowed
-            or daily_interceptions in (10, 25, 40, 50)
-            or daily_silicon_offloads in (10, 20, 25)
-            or daily_anti_cheat_blocks in (1, 2, 3)
-        ):
+        # Determine feature-scoped milestone bucket and deduplicate per-day in PostHog [direct-edit]
+        milestone_bucket: Optional[str] = None
+        current_usage_val = 0
+        if feature_name in ("bbb_interception", "unlimited_bbb"):
+            current_usage_val = int(daily_interceptions)
+        elif feature_name in ("silicon_offload", "unlimited_silicon_offload"):
+            current_usage_val = int(daily_silicon_offloads)
+        elif feature_name in ("anti_cheat_guard", "unlimited_anti_cheat_guard"):
+            current_usage_val = int(daily_anti_cheat_blocks)
+        elif feature_name in ("pal_skill_export", "unlimited_pal_skill_export"):
+            current_usage_val = int(skill_exports_used)
+
+        if curr_tier == "community":
+            if feature_name in ("bbb_interception", "unlimited_bbb"):
+                if pass_through_on_limit or not allowed:
+                    milestone_bucket = (
+                        f"overflow_{daily_interceptions}"
+                        if daily_interceptions > 50 and daily_interceptions % 25 == 0
+                        else "limit_hit"
+                    )
+                elif daily_interceptions >= 40:
+                    milestone_bucket = "m_40"
+                elif daily_interceptions >= 25:
+                    milestone_bucket = "m_25"
+                elif daily_interceptions >= 10:
+                    milestone_bucket = "m_10"
+            elif feature_name in ("silicon_offload", "unlimited_silicon_offload"):
+                if pass_through_on_limit or not allowed:
+                    milestone_bucket = (
+                        f"overflow_{daily_silicon_offloads}"
+                        if daily_silicon_offloads > 25 and daily_silicon_offloads % 25 == 0
+                        else "limit_hit"
+                    )
+                elif daily_silicon_offloads >= 20:
+                    milestone_bucket = "m_20"
+                elif daily_silicon_offloads >= 10:
+                    milestone_bucket = "m_10"
+            elif feature_name in ("anti_cheat_guard", "unlimited_anti_cheat_guard"):
+                if pass_through_on_limit or not allowed:
+                    milestone_bucket = "limit_hit"
+                elif daily_anti_cheat_blocks >= 2:
+                    milestone_bucket = "m_2"
+                elif daily_anti_cheat_blocks >= 1:
+                    milestone_bucket = "m_1"
+            elif pass_through_on_limit or not allowed:
+                milestone_bucket = "limit_hit"
+
+        if emit_telemetry and milestone_bucket and self._claim_daily_quota_telemetry_bucket(feature_name, milestone_bucket):
             try:
                 from whole_body_compute.procedural_telemetry import track_wbc_event
 
+                is_hit = bool(pass_through_on_limit or not allowed)
                 track_wbc_event(
                     "wbc_quota_event",
                     {
                         "feature": feature_name,
+                        "milestone_bucket": milestone_bucket,
                         "allowed": bool(allowed),
-                        "limit_reached": bool(pass_through_on_limit or not allowed),
+                        "limit_hit": is_hit,
+                        "limit_reached": is_hit,
+                        "current_usage": current_usage_val,
                         "current_tier": curr_tier,
                         "required_tier": req_tier,
                         "daily_interceptions": int(daily_interceptions),
@@ -979,6 +1169,7 @@ class LicenseManager:
             except Exception:
                 pass
 
+        checkout_url = PUBLIC_CHECKOUT_URLS.get(req_tier, pro_checkout)
         return {
             "feature": feature_name,
             "allowed": allowed,
@@ -992,6 +1183,8 @@ class LicenseManager:
             "estimated_offloaded_tokens_today": est_offloaded_tokens_today,
             "estimated_read_reingestion_tokens": est_tokens_per_read,
             "estimated_read_waste_usd": est_waste_usd,
+            "checkout_url": checkout_url,
+            "polar_checkout_url": POLAR_CHECKOUT_URLS.get(req_tier, POLAR_CHECKOUT_URLS["pro"]),
             "upgrade_nudge": nudge,
             "roi_payback_summary": "Pro ($29/mo) pays for itself in <2 hours of frontier coding (473x-782x ROI • SWE-bench_Verified k=3: 1.48x context, 1.52x net context, 1.34x billed runway, -18.8% turns @ 100% Pass^3).",
         }
@@ -1069,8 +1262,9 @@ def format_license_and_pricing_card(
     lines.extend(
         [
             "  └──────────────────────┴───────────────────┴─────────────────────────────────────────────────────────┘",
-            "  💡 Eyes & Hands: 100% Free Forever | Revert to Free: `body license --deactivate`",
-            "  🔑 Polar License: `body license --activate <POLAR_KEY>` | Reinstall Plugin: `body license --reinstall-wheel`",
+            "  🛒 Upgrade Checkout: Pro ($29): https://wholebodycompute.com/checkout/pro • Team ($79): https://wholebodycompute.com/checkout/team",
+            "  🚀 1-Click Browser:  `body upgrade --open` (or `--open team`) -> then `body license --activate <POLAR_KEY>`",
+            "  💡 Eyes & Hands: 100% Free Forever | Revert to Free: `body license --deactivate` | Reinstall: `body license --reinstall-wheel`",
             "  🌐 Web & ROI Calculator: https://wholebodycompute.com  •  https://wholebodycompute.com/roi  •  https://wholebodycompute.org/audit.py",
             f"  📜 Patent Notice: {PATENT_NOTICES}",
             "",

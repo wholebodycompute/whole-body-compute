@@ -23,7 +23,9 @@ ${LINE2}"
     fi
   fi
 fi
-TS="$(date +%s)"
+TS_DAY="$(date '+%s|%Y-%m-%d')"
+TS="${TS_DAY%%|*}"
+TODAY_ISO="${TS_DAY#*|}"
 
 IS_CLAUDE=0
 case "$PAYLOAD" in
@@ -47,8 +49,33 @@ if [ "$PHASE" = "pre-invocation" ] || [ "$PHASE" = "pre_invocation" ]; then
   if [ -z "$PYTEST_CURRENT_TEST" ] && [ "$VOICEFI_STRICT_TEST_HOOK" != "1" ]; then
     PREINV_QDIR="${WBC_PREINV_QUEUE_DIR:-/tmp/wbc_preinv_queue}"
     if [ ! -d "$PREINV_QDIR" ] || [ -z "$(ls -A "$PREINV_QDIR" 2>/dev/null)" ]; then
-      printf '{"injectSteps": []}\n'
-      exit 0
+      # Zero-bloat URL reflex: only wake Python when the latest USER_INPUT contains an https:// URL
+      PREINV_URL_MATCH=0
+      TP_VAL=""
+      case "$PAYLOAD" in
+        *'"transcriptPath"'*)
+          TP_TMP="${PAYLOAD#*\"transcriptPath\"}"
+          TP_TMP="${TP_TMP#*\"}"
+          TP_VAL="${TP_TMP%%\"*}"
+          ;;
+        *'"transcript_path"'*)
+          TP_TMP="${PAYLOAD#*\"transcript_path\"}"
+          TP_TMP="${TP_TMP#*\"}"
+          TP_VAL="${TP_TMP%%\"*}"
+          ;;
+      esac
+      if [ -n "$TP_VAL" ] && [ -f "$TP_VAL" ]; then
+        LAST_TP="$(tail -n 2 "$TP_VAL" 2>/dev/null || true)"
+        case "$LAST_TP" in
+          *'"type":"USER_INPUT"'*https://* | *'"type": "USER_INPUT"'*https://*)
+            PREINV_URL_MATCH=1
+            ;;
+        esac
+      fi
+      if [ "$PREINV_URL_MATCH" = "0" ]; then
+        printf '{"injectSteps": []}\n'
+        exit 0
+      fi
     fi
   fi
 fi
@@ -211,10 +238,13 @@ case "$WBC_AIRLOCK_MODE" in
                         if [ -f "$SH_FPATH" ]; then
                           AWK_PACK="$(awk '
                             /^[[:space:]]*(async[[:space:]]+def|def|class)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/ {
-                              if (cnt < 40) {
+                              if (cnt < 180) {
                                 line = $0
                                 sub(/^[[:space:]]+/, "  ", line)
                                 sub(/:[[:space:]]*(#.*)?$/, "", line)
+                                if (length(line) > 80) {
+                                  sub(/\(.*/, "(...)", line)
+                                }
                                 gsub(/\\/, "\\\\", line)
                                 gsub(/"/, "\\\"", line)
                                 gsub(/\r/, "", line)
@@ -268,24 +298,77 @@ case "$WBC_AIRLOCK_MODE" in
                             printf '%s\n' "$ALLOW_JSON"
                             exit 0
                           elif [ "$SH_ACTION" = "slice_agy" ] || [ "$SH_ACTION" = "slice_claude" ]; then
-                            FBASE="${SH_FPATH##*/}"
-                            SAVED_TOK=$(( (TOTAL_LINES - 160) * 10 ))
-                            [ "$SAVED_TOK" -lt 100 ] 2>/dev/null && SAVED_TOK=100
-                            QUAD_TOK=$(( SAVED_TOK * 20 ))
-                            AUDIT_LOG="${VOICEFI_IMMUNE_AUDIT_PATH:-${WBC_IMMUNE_AUDIT_PATH:-$WBC_DIR/immune_audit.jsonl}}"
-                            if [ "$SH_ACTION" = "slice_claude" ]; then
-                              SLICE_OUT="{\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"permissionDecision\": \"allow\", \"updatedInput\": {\"file_path\": \"${FPATH_JSON}\", \"offset\": 1, \"limit\": 160}, \"additionalContext\": \"Blood-Brain Barrier Auto-Slice (\`${FBASE}\`, ${TOTAL_LINES} lines -> L1-160):\\nInstant AST / Section Map for \`${FBASE}\`:\\n${OUTLINE_ESC}\"}, \"reason\": \"Blood-Brain Barrier Auto-Slice (\`${FBASE}\`, ${TOTAL_LINES} lines -> L1-160)\"}"
-                              printf '{"timestamp":%s.0,"phase":"pre","fast_path":true,"conversation_id":"global","step_idx":0,"tool":"Read","target":"%s","decision":"allow","read_auto_sliced":true,"direct_tokens_saved":%s,"quadratic_tokens_saved":%s,"stage":0,"assert_delta":0,"latency_ms":4.2,"reason":"Blood-Brain Barrier sh AST auto-slice L1-160"}\n' "$TS" "$TARGET" "$SAVED_TOK" "$QUAD_TOK" >> "$AUDIT_LOG" 2>/dev/null || true
-                            else
-                              SLICE_OUT="{\"decision\": \"allow\", \"overwrite\": {\"StartLine\": 1, \"EndLine\": 160}, \"reason\": \"Blood-Brain Barrier Auto-Slice (\`${FBASE}\`, ${TOTAL_LINES} lines -> L1-160):\\nInstant AST / Section Map for \`${FBASE}\`:\\n${OUTLINE_ESC}\"}"
-                              printf '{"timestamp":%s.0,"phase":"pre","fast_path":true,"conversation_id":"global","step_idx":0,"tool":"read_file","target":"%s","decision":"allow","read_auto_sliced":true,"direct_tokens_saved":%s,"quadratic_tokens_saved":%s,"stage":0,"assert_delta":0,"latency_ms":4.2,"reason":"Blood-Brain Barrier sh AST auto-slice L1-160"}\n' "$TS" "$TARGET" "$SAVED_TOK" "$QUAD_TOK" >> "$AUDIT_LOG" 2>/dev/null || true
+                            FAST_BBB_STATE="${WBC_FAST_BBB_STATE_FILE:-$WBC_DIR/fast_bbb_daily.state}"
+                            PREV_BBB_CNT=0
+                            if [ -f "$FAST_BBB_STATE" ]; then
+                              IFS='|' read -r STATE_DAY STATE_CNT < "$FAST_BBB_STATE" 2>/dev/null || true
+                              if [ "$STATE_DAY" = "$TODAY_ISO" ]; then
+                                case "$STATE_CNT" in
+                                  ''|*[!0-9]*) PREV_BBB_CNT=0 ;;
+                                  *) PREV_BBB_CNT="$STATE_CNT" ;;
+                                esac
+                              fi
                             fi
-                            if [ -z "$VOICEFI_IMMUNE_AUDIT_PATH" ]; then
-                              printf '%s' "$SLICE_OUT" > "${DEDUP_FILE}.res" 2>/dev/null || true
-                              printf '%s' "$DEDUP_SIG" > "$DEDUP_FILE" 2>/dev/null || true
+                            MAY_BE_COMMUNITY=0
+                            if [ "$PREV_BBB_CNT" -ge 50 ] 2>/dev/null && [ "${WBC_FOUNDER_MODE:-0}" != "1" ]; then
+                              if [ "${WBC_FORCE_COMMUNITY:-0}" = "1" ]; then
+                                MAY_BE_COMMUNITY=1
+                              elif [ -f "$WBC_DIR/license.json" ]; then
+                                case "$(cat "$WBC_DIR/license.json" 2>/dev/null)" in
+                                  *'"community"'*) MAY_BE_COMMUNITY=1 ;;
+                                  *'"pro"'*|*'"team"'*|*'"enterprise"'*) MAY_BE_COMMUNITY=0 ;;
+                                  *) MAY_BE_COMMUNITY=1 ;;
+                                esac
+                              elif [ -n "${WBC_DATA_DIR:-}" ] || [ -n "${WBC_HOME:-}" ] || [ ! -d "$(dirname "$0")/../.git" ]; then
+                                MAY_BE_COMMUNITY=1
+                              fi
                             fi
-                            printf '%s\n' "$SLICE_OUT"
-                            exit 0
+                            if [ "$MAY_BE_COMMUNITY" = "0" ]; then
+                              NEW_BBB_CNT=$(( PREV_BBB_CNT + 1 ))
+                              mkdir -p "$(dirname "$FAST_BBB_STATE")" 2>/dev/null || true
+                              printf '%s|%s\n' "$TODAY_ISO" "$NEW_BBB_CNT" > "$FAST_BBB_STATE" 2>/dev/null || true
+                              FBASE="${SH_FPATH##*/}"
+                              SAVED_TOK=$(( (TOTAL_LINES - 160) * 10 ))
+                              [ "$SAVED_TOK" -lt 100 ] 2>/dev/null && SAVED_TOK=100
+                              QUAD_TOK=$(( SAVED_TOK * 20 ))
+                              AUDIT_LOG="${VOICEFI_IMMUNE_AUDIT_PATH:-${WBC_IMMUNE_AUDIT_PATH:-$WBC_DIR/immune_audit.jsonl}}"
+                              if [ "$SH_ACTION" = "slice_claude" ]; then
+                                SLICE_OUT="{\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"permissionDecision\": \"allow\", \"updatedInput\": {\"file_path\": \"${FPATH_JSON}\", \"offset\": 1, \"limit\": 160}, \"additionalContext\": \"Blood-Brain Barrier Auto-Slice (\`${FBASE}\`, ${TOTAL_LINES} lines -> L1-160):\\nInstant AST / Section Map for \`${FBASE}\`:\\n${OUTLINE_ESC}\"}, \"reason\": \"Blood-Brain Barrier Auto-Slice (\`${FBASE}\`, ${TOTAL_LINES} lines -> L1-160)\"}"
+                                printf '{"timestamp":%s.0,"phase":"pre","fast_path":true,"conversation_id":"global","step_idx":0,"tool":"Read","target":"%s","decision":"allow","read_auto_sliced":true,"direct_tokens_saved":%s,"quadratic_tokens_saved":%s,"stage":0,"assert_delta":0,"latency_ms":4.2,"reason":"Blood-Brain Barrier sh AST auto-slice L1-160"}\n' "$TS" "$TARGET" "$SAVED_TOK" "$QUAD_TOK" >> "$AUDIT_LOG" 2>/dev/null || true
+                              else
+                                SLICE_OUT="{\"decision\": \"allow\", \"overwrite\": {\"StartLine\": 1, \"EndLine\": 160}, \"reason\": \"Blood-Brain Barrier Auto-Slice (\`${FBASE}\`, ${TOTAL_LINES} lines -> L1-160):\\nInstant AST / Section Map for \`${FBASE}\`:\\n${OUTLINE_ESC}\"}"
+                                printf '{"timestamp":%s.0,"phase":"pre","fast_path":true,"conversation_id":"global","step_idx":0,"tool":"read_file","target":"%s","decision":"allow","read_auto_sliced":true,"direct_tokens_saved":%s,"quadratic_tokens_saved":%s,"stage":0,"assert_delta":0,"latency_ms":4.2,"reason":"Blood-Brain Barrier sh AST auto-slice L1-160"}\n' "$TS" "$TARGET" "$SAVED_TOK" "$QUAD_TOK" >> "$AUDIT_LOG" 2>/dev/null || true
+                              fi
+                              if [ -z "$VOICEFI_IMMUNE_AUDIT_PATH" ]; then
+                                printf '%s' "$SLICE_OUT" > "${DEDUP_FILE}.res" 2>/dev/null || true
+                                printf '%s' "$DEDUP_SIG" > "$DEDUP_FILE" 2>/dev/null || true
+                              fi
+                              printf '%s\n' "$SLICE_OUT"
+                              if [ -z "$PYTEST_CURRENT_TEST" ] && [ "$VOICEFI_STRICT_TEST_HOOK" != "1" ]; then
+                                if [ "$NEW_BBB_CNT" -eq 1 ] || [ "$NEW_BBB_CNT" -eq 25 ] || [ $(( NEW_BBB_CNT % 10 )) -eq 0 ]; then
+                                  (
+                                    H_NAME="antigravity"
+                                    [ "$IS_CLAUDE" = "1" ] && H_NAME="claude_code"
+                                    H_DIR="$(cd "$(dirname "$0")" && pwd)"
+                                    R_ROOT="$(cd "$H_DIR/.." && pwd)"
+                                    IM_PY="$R_ROOT/src/whole_body_compute/organs/immune.py"
+                                    PY_B="${WBC_PYTHON_BIN:-$R_ROOT/.venv/bin/python}"
+                                    if [ ! -f "$IM_PY" ] && [ -f "$H_DIR/../organs/immune.py" ]; then
+                                      IM_PY="$(cd "$H_DIR/../organs" && pwd)/immune.py"
+                                    fi
+                                    if [ ! -x "$PY_B" ]; then
+                                      PY_B="$(command -v python3 2>/dev/null || printf 'python3')"
+                                    fi
+                                    if [ -f "$IM_PY" ]; then
+                                      "$PY_B" -S "$IM_PY" --phase fast-milestone --count "$NEW_BBB_CNT" --harness "$H_NAME" >/dev/null 2>&1
+                                    elif command -v whole-body-immune-gate >/dev/null 2>&1; then
+                                      whole-body-immune-gate --phase fast-milestone --count "$NEW_BBB_CNT" --harness "$H_NAME" >/dev/null 2>&1
+                                    fi
+                                  ) </dev/null >/dev/null 2>&1 &
+                                fi
+                              fi
+                              exit 0
+                            fi
                           fi
                         fi
                         ;;

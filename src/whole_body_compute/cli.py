@@ -542,7 +542,7 @@ def _dispatch_main(
                 get_comprehensive_usage_stats_report,
             )
 
-            report = get_comprehensive_usage_stats_report()
+            report = get_comprehensive_usage_stats_report(include_cloud=bool(getattr(args, "cloud", False)))
             if is_json:
                 print(json.dumps(report, indent=2))
             else:

@@ -1157,6 +1157,7 @@
           </div>
           <div class="term-tabs">
             <button type="button" class="term-tab active" id="tab-begin" onclick="setTab('begin')">install</button>
+            <button type="button" class="term-tab" id="tab-uv" onclick="setTab('uv')">uv / pipx</button>
             <button type="button" class="term-tab" id="tab-audit" onclick="setTab('audit')">audit spend</button>
             <button type="button" class="term-tab" id="tab-commit" onclick="setTab('commit')">$0 commit</button>
             <button type="button" class="term-tab" id="tab-handoff" onclick="setTab('handoff')">fresh chat</button>
@@ -1448,7 +1449,7 @@
               <li><span class="check">✓</span><span>Zero-click thread handoffs (<code>body flush --auto</code>)</span></li>
             </ul>
           </div>
-          <a href="https://buy.polar.sh/polar_cl_W4re7lSF6revpXa1huLqAMbecKgnMUzT4P5xK21eobp" class="tier-btn" target="_blank" rel="noopener">Get Pro &rarr;</a>
+          <a href="https://buy.polar.sh/polar_cl_W4re7lSF6revpXa1huLqAMbecKgnMUzT4P5xK21eobp" class="tier-btn" target="_blank" rel="noopener" onclick="trackCheckoutClick('pro')">Get Pro &rarr;</a>
         </div>
 
         <!-- $79 Team -->
@@ -1464,7 +1465,7 @@
               <li><span class="check">✓</span><span>Shared secret egress rules</span></li>
             </ul>
           </div>
-          <a href="https://buy.polar.sh/polar_cl_WdAQSkL5Y5eOdot0FtPUjzW52BwUEp4vray3G0yyDao" class="tier-btn" target="_blank" rel="noopener">Start Team</a>
+          <a href="https://buy.polar.sh/polar_cl_WdAQSkL5Y5eOdot0FtPUjzW52BwUEp4vray3G0yyDao" class="tier-btn" target="_blank" rel="noopener" onclick="trackCheckoutClick('team')">Start Team</a>
         </div>
 
         <!-- $199 Enterprise -->
@@ -1480,7 +1481,7 @@
               <li><span class="check">✓</span><span>SOC2 security audit logs</span></li>
             </ul>
           </div>
-          <a href="mailto:hello@wholebodycompute.com?subject=Whole%20Body%20Compute%20Enterprise%20Fleet" class="tier-btn">Contact Sales</a>
+          <a href="mailto:hello@wholebodycompute.com?subject=Whole%20Body%20Compute%20Enterprise%20Fleet" class="tier-btn" onclick="trackCheckoutClick('enterprise')">Contact Sales</a>
         </div>
       </div>
     </section>
@@ -1506,6 +1507,10 @@
       begin: {
         raw: "curl -fsSL https://wholebodycompute.com/begin | sh",
         html: 'curl -fsSL <span class="cmd-hl">https://wholebodycompute.com/begin</span> | sh'
+      },
+      uv: {
+        raw: "uv tool install whole-body-compute && body begin",
+        html: 'uv tool install <span class="cmd-hl">whole-body-compute</span> &amp;&amp; body begin <span style="color:var(--term-muted)"># or: pipx install whole-body-compute</span>'
       },
       audit: {
         raw: "curl -sSL https://wholebodycompute.com/audit.py | python3",
@@ -1536,7 +1541,49 @@
       if (display) display.innerHTML = TERM_CMDS[key].html;
     }
 
+    function emitWebFunnelEvent(eventName, extraProps) {
+      try {
+        if (navigator.doNotTrack === "1" || navigator.globalPrivacyControl) return;
+        let visitorId = localStorage.getItem("wbc_anon_vid");
+        if (!visitorId) {
+          visitorId = "web_" + Math.random().toString(16).slice(2, 10) + Date.now().toString(16).slice(-6);
+          localStorage.setItem("wbc_anon_vid", visitorId);
+        }
+        const body = JSON.stringify({
+          api_key: "phc_D3TxQWXwnd9Z6wBBK3DpnsdKQAHdLpSSMxup4qL8djc2",
+          event: eventName,
+          distinct_id: visitorId,
+          properties: Object.assign({
+            product: "whole_body_compute",
+            source: "web_landing",
+            host: window.location.hostname,
+            pathname: window.location.pathname,
+            $current_url: window.location.href,
+            $referrer: document.referrer || undefined
+          }, extraProps || {})
+        });
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon("https://us.i.posthog.com/capture/", new Blob([body], { type: "application/json" }));
+        } else {
+          fetch("https://us.i.posthog.com/capture/", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: body,
+            keepalive: true
+          }).catch(function () {});
+        }
+      } catch (_) {}
+    }
+
+    function trackCheckoutClick(tier) {
+      emitWebFunnelEvent("wbc_checkout_clicked", {
+        tier: tier,
+        surface: "web_pricing_card"
+      });
+    }
+
     function copyCurrentCmd() {
+      emitWebFunnelEvent("wbc_web_install_copied", { command_tab: activeKey });
       navigator.clipboard.writeText(TERM_CMDS[activeKey].raw).then(() => {
         const btn = document.getElementById("copyBtn");
         const copyText = document.getElementById("copyText");
@@ -1551,6 +1598,7 @@
 
     function copyZeroInstallAudit() {
       setTab("audit");
+      emitWebFunnelEvent("wbc_web_install_copied", { command_tab: "zero_audit_pill" });
       navigator.clipboard.writeText(TERM_CMDS.audit.raw).then(() => {
         const pill = document.getElementById("zeroAuditPill");
         const badge = document.getElementById("zeroAuditBadge");

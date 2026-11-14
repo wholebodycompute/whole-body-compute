@@ -1691,7 +1691,106 @@ def track_wbc_event(
     return {"status": "dispatched_async", "event": event_name, "cohort_id": cohort_id, "local_recorded": can_persist_local}
 
 
-def get_comprehensive_usage_stats_report(stats_path: Path | None = None) -> dict[str, Any]:
+def get_posthog_personal_api_key() -> str:
+    """
+    Resolve an optional PostHog Personal API Key (`phx_...`) for read-only HogQL cloud analytics.
+    Checks `POSTHOG_PERSONAL_API_KEY` env var first, then `~/.whole_body_compute/posthog_personal_key`
+    (owner-only `0600` file outside git repositories, so `.env` is never required).
+    """
+    env_key = os.environ.get("POSTHOG_PERSONAL_API_KEY", "").strip()
+    if env_key:
+        return env_key
+    for cand in (
+        get_wbc_data_dir() / "posthog_personal_key",
+        Path.home() / ".whole_body_compute" / "posthog_personal_key",
+    ):
+        try:
+            if cand.is_file():
+                val = cand.read_text(encoding="utf-8", errors="ignore").strip()
+                if val.startswith("phx_"):
+                    return val
+        except Exception:
+            continue
+    return ""
+
+
+def fetch_posthog_cloud_funnel_summary(
+    project_id: int | str = 730830,
+    personal_api_key: str | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    """Query live external funnel, quota limit-hit, and conversion stats from PostHog Cloud via HogQL."""
+    key = (personal_api_key or get_posthog_personal_api_key()).strip()
+    if not key:
+        return {
+            "status": "missing_personal_key",
+            "hint": "Store a read-only phx_ key at ~/.whole_body_compute/posthog_personal_key (chmod 600) or set POSTHOG_PERSONAL_API_KEY.",
+        }
+
+    ext_pred = (
+        "distinct_id != '257d2d48b088ef95' "
+        "AND distinct_id NOT LIKE 'edge_wholebodycompute%' "
+        "AND coalesce(toString(person.properties.$internal_or_test_user), 'false') != 'true' "
+        "AND coalesce(toString(properties.is_internal_dev), 'false') != 'true' "
+        "AND coalesce(toString(properties.is_internal), 'false') != 'true' "
+        "AND coalesce(toString(properties.is_bot), 'false') != 'true'"
+    )
+    sql = f"""
+        SELECT
+            countIf(event = '$pageview' AND ({ext_pred})) AS ext_pageviews,
+            count(DISTINCT if(event = '$pageview' AND ({ext_pred}), distinct_id, NULL)) AS ext_web_visitors,
+            countIf(event = 'wbc_edge_begin_fetch' AND ({ext_pred}) AND toString(properties.is_cli_client) = 'true') AS ext_cli_begin_fetches,
+            countIf(event = 'wbc_edge_audit_fetch' AND ({ext_pred}) AND toString(properties.is_cli_client) = 'true') AS ext_cli_audit_fetches,
+            count(DISTINCT if(event IN ('wbc_body_begin', 'wbc_audit_completed', 'wbc_cli_command', 'wbc_shield_pulse', 'wbc_quota_event') AND ({ext_pred}), distinct_id, NULL)) AS ext_product_cohorts,
+            count(DISTINCT if(event = 'wbc_quota_event' AND ({ext_pred}) AND (toString(properties.limit_reached) = 'true' OR toString(properties.allowed) = 'false'), distinct_id, NULL)) AS ext_cohorts_hitting_limits,
+            countIf(event = 'wbc_quota_event' AND ({ext_pred})) AS ext_quota_events,
+            countIf(event IN ('wbc_edge_pricing_click', 'wbc_pricing_viewed') AND ({ext_pred})) AS ext_pricing_intents,
+            countIf(event = 'wbc_checkout_clicked' AND ({ext_pred})) AS ext_checkout_clicks,
+            countIf(event = 'wbc_license_activated' AND ({ext_pred})) AS ext_licenses_activated,
+            countIf(event = 'wbc_license_activation_failed' AND ({ext_pred})) AS ext_license_failures
+        FROM events
+    """
+    url = f"https://us.posthog.com/api/projects/{project_id}/query/"
+    body = json.dumps({"query": {"kind": "HogQLQuery", "query": sql}}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        rows = payload.get("results") or []
+        row = rows[0] if rows else [0] * 11
+        return {
+            "status": "ok",
+            "project_id": int(project_id),
+            "ext_pageviews": int(row[0] or 0),
+            "ext_web_visitors": int(row[1] or 0),
+            "ext_cli_begin_fetches": int(row[2] or 0),
+            "ext_cli_audit_fetches": int(row[3] or 0),
+            "ext_product_cohorts": int(row[4] or 0),
+            "ext_cohorts_hitting_limits": int(row[5] or 0),
+            "ext_quota_events": int(row[6] or 0),
+            "ext_pricing_intents": int(row[7] or 0),
+            "ext_checkout_clicks": int(row[8] or 0),
+            "ext_licenses_activated": int(row[9] or 0),
+            "ext_license_failures": int(row[10] or 0),
+        }
+    except Exception as exc:
+        return {"status": "error", "reason": str(exc)}
+
+
+def get_comprehensive_usage_stats_report(
+    stats_path: Path | None = None,
+    *,
+    include_cloud: bool = False,
+) -> dict[str, Any]:
     """
     Build a unified Usage & Automation Telemetry Report combining:
     1. CLI command & event counts (`usage_stats.json`: `body begin`, `audit-spend`, `doctor`, `savings`, etc.)
@@ -1769,7 +1868,7 @@ def get_comprehensive_usage_stats_report(stats_path: Path | None = None) -> dict
     except Exception:
         pass
 
-    return {
+    out_report: dict[str, Any] = {
         "status": "ok",
         "posthog_project_id": 730830,
         "posthog_key_prefix": DEFAULT_POSTHOG_API_KEY[:12] + "...",
@@ -1791,6 +1890,9 @@ def get_comprehensive_usage_stats_report(stats_path: Path | None = None) -> dict
         },
         "skills_telemetry": skills_info,
     }
+    if include_cloud:
+        out_report["posthog_cloud"] = fetch_posthog_cloud_funnel_summary()
+    return out_report
 
 
 def format_usage_stats_table(report: dict[str, Any]) -> str:
@@ -1851,9 +1953,27 @@ def format_usage_stats_table(report: dict[str, Any]) -> str:
             f"{amb.get('staged_candidates_count', 0)} staged candidates / {amb.get('active_recipes_count', 0)} active recipes",
             f"      • Nocturnal REM Dreaming:    {rem_runs:,} consolidation pass(es) | "
             f"{amb.get('procedural_dna_cards_total', 0)} Procedural DNA cards harvested ({amb.get('procedural_dna_cards_synced', 0)} synced)",
-            "=" * 88,
         ]
     )
+    cloud = report.get("posthog_cloud")
+    if isinstance(cloud, dict):
+        lines.append("")
+        lines.append("  [4] Live PostHog Cloud Funnel & Limit Stats (Project #730830 - External Non-Bot):")
+        if cloud.get("status") == "ok":
+            lines.extend(
+                [
+                    f"      • Web Visitors / Pageviews:   {cloud.get('ext_web_visitors', 0):,} unique visitors ({cloud.get('ext_pageviews', 0):,} views)",
+                    f"      • CLI Script `curl` Fetches:  {cloud.get('ext_cli_begin_fetches', 0):,} `/begin.sh` • {cloud.get('ext_cli_audit_fetches', 0):,} `/audit.py`",
+                    f"      • Active Product Cohorts:     {cloud.get('ext_product_cohorts', 0):,} external cohort(s) | "
+                    f"Limit Hits: {cloud.get('ext_cohorts_hitting_limits', 0):,} cohort(s) ({cloud.get('ext_quota_events', 0):,} quota events)",
+                    f"      • Upgrade Conversion Funnel:  {cloud.get('ext_pricing_intents', 0):,} pricing views -> "
+                    f"{cloud.get('ext_checkout_clicks', 0):,} checkout clicks -> {cloud.get('ext_licenses_activated', 0):,} activated "
+                    f"({cloud.get('ext_license_failures', 0):,} failed)",
+                ]
+            )
+        else:
+            lines.append(f"      • Cloud Query Status: {cloud.get('status')} ({cloud.get('hint') or cloud.get('reason')})")
+    lines.append("=" * 88)
     return "\n".join(lines)
 
 
