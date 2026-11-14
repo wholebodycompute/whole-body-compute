@@ -1,6 +1,21 @@
 # Whole Body Compute - Empirical Benchmarks & Princeton HAL Receipts
 
-Evaluated against the [**Princeton HAL (Holistic Agent Leaderboard)**](https://hal.cs.princeton.edu/#leaderboards) cost-vs-accuracy Pareto methodology and 4-pillar reliability framework (*Towards a Science of AI Agent Reliability*, 2026) with **zero simulation** - every figure below is computed directly from **146 saved live unscripted frontier & open-weight sessions** (`100` official upstream `princeton-nlp/SWE-bench_Verified` sessions across `10` distinct official Python organizations - `60` multi-trial `k=3` on `Gemini 4 Carbon` + `40` `2x2` Claude Code CLI runs across `Claude Sonnet` & `Claude Haiku` - plus `22` Anthropic API JSON billing receipts across `Claude Haiku 4.5` & `Sonnet` + `24` Antigravity server-side `transcript.jsonl` receipts across `Gemini 4 Argon`, `Gemini 4 Carbon`, `Gemini 3.8 Flash`, and `GPT-OSS 120B`) and live Apple Silicon organ executions.
+Evaluated against the [**Princeton HAL (Holistic Agent Leaderboard)**](https://hal.cs.princeton.edu/#leaderboards) cost-vs-accuracy Pareto methodology and 4-pillar reliability framework (*Towards a Science of AI Agent Reliability*, 2026) with **zero simulation** - every figure below is computed directly from **186+ saved live unscripted frontier & open-weight sessions** (`140` official upstream `princeton-nlp/SWE-bench_Verified` runs across `10` distinct official Python organizations - `120` `k=3` cross-harness frontier trials across `Gemini 4 Carbon` & `Claude Sonnet`, plus `20` `Claude Haiku` CLI runs - plus `22` Anthropic API JSON billing receipts across `Claude Haiku 4.5` & `Sonnet` and `24` Antigravity server-side `transcript.jsonl` receipts across `Gemini 4 Argon`, `Gemini 4 Carbon`, `Gemini 3.8 Flash`, and `GPT-OSS 120B`) and live Apple Silicon organ executions.
+
+---
+
+## 0. Unified 120-Trial Cross-Harness `SWE-bench_Verified` (`k=3`) Scorecard (`60` Gemini 4 Carbon + `60` Claude Sonnet)
+
+- **Combined Cross-Harness Frontier (`120` Trials, `N=10` Official Orgs):** **`+ Whole Body Compute`** achieved **`60/60` (`100.0% Pass@1`)** and **`20/20` (`100.0% Pass^3`)** vs. Vanilla's **`59/60` (`98.3% Pass@1`)** and **`19/20` (`95.0% Pass^3`)**, while cutting combined cumulative context by **`-29.2%`** (`225.08M -> 159.30M`, saving **`65.78M` tokens**), billed input by **`-23.0%`** (`8.73M -> 6.72M`), and planner turns by **`-14.3%`** (`2,234 -> 1,915`).
+- **Claude Sonnet `k=3` Lift (`60` Trials):** **`Claude Sonnet + Whole Body Compute`** resolved **`30/30` (`100.0% Pass@1`)** and **`10/10` (`100.0% Pass^3`)** vs. Vanilla **`29/30` (`96.7% Pass@1`)** and **`9/10` (`90.0% Pass^3`)** (`+10.0pp Pass^3` via `mwaskom__seaborn-3069`), while cutting matched-solved (`N=29`) wall time by **`-12.2%`** (`3,908.1s -> 3,432.2s`), matched context by **`-5.5%`** (`20.84M -> 19.70M`), and matched API cost by **`-5.3%`** (`$9.90 -> $9.38`).
+
+| Frontier Harness & Model (`k=3`, `N=10` Repos) | Native Read Ceiling | Vanilla `Pass@1` | `+ WBC` `Pass@1` | Vanilla `Pass^3` | `+ WBC` `Pass^3` | Context Ingested (`Vanilla -> + WBC`) | Billed Input (`Vanilla -> + WBC`) | Planner Turns (`Vanilla -> + WBC`) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Antigravity (`Gemini 4 Carbon`, `60` trials)** | `800L` (`46KB`) | `30/30` (`100.0%`) | **`30/30` (`100.0%`)** | `10/10` (`100.0%`) | **`10/10` (`100.0%`)** | `203.08M -> 137.23M` (**`-32.4%`**) | `7.83M -> 5.83M` (**`-25.6%`**) | `1,685 -> 1,368` (**`-18.8%`**) |
+| **Claude Code (`Claude Sonnet`, `60` trials)** | `2,000L` (`200KB`) | `29/30` (`96.7%`) | **`30/30` (`100.0%`)** | `9/10` (`90.0%`) | **`10/10` (`100.0%`, `+10pp`)** | `22.00M -> 22.08M` (**`-5.5%` matched**) | `900,017 -> 895,066` (**`-2.6%` matched**) | `549 -> 547` (**`-3.5%` matched**) |
+| **Combined Cross-Harness Frontier (`120` trials)** | `800L` & `2,000L` | `59/60` (`98.3%`) | **`60/60` (`100.0%`)** | `19/20` (`95.0%`) | **`20/20` (`100.0%`)** | `225.08M -> 159.30M` (**`-29.2%`**) | `8.73M -> 6.72M` (**`-23.0%`**) | `2,234 -> 1,915` (**`-14.3%`**) |
+
+Full 120-trial report: [`CROSS_HARNESS_120_TRIAL_SWEBENCH_K3_REPORT.md`](CROSS_HARNESS_120_TRIAL_SWEBENCH_K3_REPORT.md) · Claude Sonnet `k=3` (`60`-trial) report & receipts: [`LIVE_CLAUDE_UPSTREAM_SWEBENCH_K3_REPORT_2026_11_10.md`](LIVE_CLAUDE_UPSTREAM_SWEBENCH_K3_REPORT_2026_11_10.md) · [`live_claude_upstream_swebench_k3_results.json`](live_claude_upstream_swebench_k3_results.json).
 
 ---
 

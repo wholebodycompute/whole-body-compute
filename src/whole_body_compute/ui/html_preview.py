@@ -35,6 +35,9 @@ ROUTE_ALIASES = {
     "/hud": "body_telemetry.html",
     "/hal": "hal_pareto_leaderboard.html",
     "/patents": "patents.html",
+    "/blog": "blog/index.html",
+    "/blog/decision-1": "blog/decision-1-spinal-reflex.html",
+    "/decision-1": "blog/decision-1-spinal-reflex.html",
     "/begin": "begin.sh",
     "/audit": "audit.py",
     "/studio": "editorial_carousel_studio.html",
@@ -280,6 +283,10 @@ def make_handler(repo_root: Path):
             cand = (base / rel).resolve()
             if cand.is_file() and str(cand).startswith(str(root)):
                 return cand, str(cand.relative_to(root))
+            if cand.is_dir() and str(cand).startswith(str(root)):
+                cand_idx = (cand / "index.html").resolve()
+                if cand_idx.is_file():
+                    return cand_idx, str(cand_idx.relative_to(root))
             cand_html = (base / (rel + ".html")).resolve()
             if cand_html.is_file() and str(cand_html).startswith(str(root)):
                 return cand_html, str(cand_html.relative_to(root))
@@ -339,13 +346,14 @@ def make_handler(repo_root: Path):
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
             rel_arg = str(payload.get("rel_path", ""))
             fname = Path(rel_arg).name
+            sub_rel = re.sub(r"^(site|docs)/", "", rel_arg)
             changes = payload.get("changes", [])
 
             candidates = []
             exact = (root / rel_arg).resolve()
             if exact.is_file() and str(exact).startswith(str(root)):
                 candidates.append(exact)
-            for mirror in (docs_dir / fname, site_dir / fname):
+            for mirror in (docs_dir / sub_rel, site_dir / sub_rel, docs_dir / fname, site_dir / fname):
                 m_res = mirror.resolve()
                 if m_res.is_file() and m_res not in candidates:
                     candidates.append(m_res)

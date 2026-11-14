@@ -2113,6 +2113,24 @@ def format_standalone_receipt(
         prove_cmd = "body doctor --exercise"
         awaken_cmd = "uv tool install whole-body-compute && body begin"
 
+    if convs > 0:
+        q_lo, q_hi = (min(q_mult, 3.11), max(q_mult, 3.11)) if q_mult > 0 else (1.00, 3.11)
+        lines.extend(
+            [
+                "",
+                f"{BOLD}{days}d Agent Audit:{RESET}",
+                f"{convs:,} sessions, {planner_turns:,} LLM turns",
+                f"${exact_usd:,.2f} actual API-equiv. usage",
+                "",
+                f"{BOLD}Projected savings w/ Whole Body Compute: {GREEN}68% lower API spend{RESET}",
+                f"~${hal_saved_usd:,.0f}/{days}d (~${hal_yr_saved:,.0f}/yr)",
+                f"{q_lo:.2f}x-{q_hi:.2f}x increase in subscription runway",
+                "",
+                f"{BOLD}Check yours free:{RESET}",
+                f"{CYAN}curl -sSL https://wholebodycompute.org/audit.py | python3{RESET}",
+            ]
+        )
+
     lines.extend(
         [
             "",

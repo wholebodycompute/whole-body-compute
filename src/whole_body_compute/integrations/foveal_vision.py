@@ -731,9 +731,325 @@ class FovealVisionEngine:
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
         return "kCGHIDEventTap"
 
+    _CHROMIUM_SCRIPT_APPS: Tuple[str, ...] = (
+        "Google Chrome",
+        "Brave Browser",
+        "Microsoft Edge",
+        "Vivaldi",
+        "Chromium",
+    )
+
     @classmethod
-    def click_xy(cls, x: float, y: float) -> Dict[str, Any]:
-        """Performs a Quartz CGEvent left-click at (x, y)."""
+    def _is_no_cursor_env(cls, no_cursor: bool = False) -> bool:
+        if no_cursor:
+            return True
+        return os.environ.get("WBC_HANDS_NO_CURSOR", "").strip().lower() in ("1", "true", "yes")
+
+    @classmethod
+    def _snapshot_has_live_ax(
+        cls,
+        snapshot: Optional[FovealWindowSnapshot] = None,
+        element: Optional[FovealUIElement] = None,
+    ) -> bool:
+        if element is not None and element.raw_element is not None:
+            return True
+        if snapshot is not None:
+            if snapshot.focused_element is not None and snapshot.focused_element.raw_element is not None:
+                return True
+            for el in snapshot.interactive_elements:
+                if el.raw_element is not None:
+                    return True
+        return False
+
+    @classmethod
+    def _can_use_global_cursor(
+        cls,
+        snapshot: Optional[FovealWindowSnapshot] = None,
+        element: Optional[FovealUIElement] = None,
+        pid: Optional[int] = None,
+        allow_focus_steal: bool = False,
+        no_cursor: bool = False,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """
+        Determine whether global kCGHIDEventTap mouse/cursor/scroll events may be posted.
+        Blocks physical cursor takeover whenever:
+          1. `no_cursor=True` or `WBC_HANDS_NO_CURSOR=1`, OR
+          2. On live AX snapshots (`has_live_ax=True`), target app is in the background
+             (`not is_target_frontmost` and `not can_focus_steal`) or human HID was active
+             within 1.5s (`human_active_recently` and `not allow_focus_steal`).
+        """
+        eff_pid = pid if pid is not None else (snapshot.pid if snapshot else None)
+        guard = cls._check_human_hid_guard(target_pid=eff_pid, allow_focus_steal=allow_focus_steal)
+        no_cursor_locked = cls._is_no_cursor_env(no_cursor)
+        guard["no_cursor"] = no_cursor_locked
+        if no_cursor_locked:
+            return False, guard
+
+        has_live_ax = cls._snapshot_has_live_ax(snapshot=snapshot, element=element)
+        if has_live_ax:
+            if not guard["is_target_frontmost"] and not guard["can_focus_steal"]:
+                return False, guard
+            if guard["human_active_recently"] and not allow_focus_steal:
+                return False, guard
+        return True, guard
+
+    @classmethod
+    def _resolve_chromium_app_name(cls, app_name: Optional[str]) -> Optional[str]:
+        if not app_name:
+            return None
+        low = app_name.strip().lower()
+        for cand in cls._CHROMIUM_SCRIPT_APPS:
+            if cand.lower() == low or low in cand.lower():
+                return cand
+        return None
+
+    @classmethod
+    def _chrome_background_dom_actuate(
+        cls,
+        op: str,
+        element: Optional[FovealUIElement] = None,
+        snapshot: Optional[FovealWindowSnapshot] = None,
+        app_name: Optional[str] = None,
+        window_title: Optional[str] = None,
+        label_override: Optional[str] = None,
+        screen_xy: Optional[Tuple[float, float]] = None,
+        direction: str = "down",
+        amount: int = 5,
+        text_value: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Zero-cursor, zero-focus-steal DOM actuation inside a background Chromium tab
+        via AppleScript `execute t javascript ...` (never calls `activate` or touches HID cursor).
+        """
+        raw_app = app_name or (snapshot.app_name if snapshot else None)
+        browser_app = cls._resolve_chromium_app_name(raw_app)
+        if not browser_app:
+            return {"ok": False, "reason": "not_chromium"}
+
+        raw_title = (window_title or (snapshot.window_title if snapshot else "") or "").strip()
+        # Strip trailing " - Google Chrome" suffix from macOS AXWindow titles so tab title matches cleanly
+        title_query = re.sub(r"\s*[-– - ]\s*(Google Chrome|Brave|Microsoft Edge|Vivaldi|Chromium).*$", "", raw_title, flags=re.IGNORECASE).strip()
+
+        label = (
+            label_override
+            if label_override is not None
+            else ((element.label or element.title or element.description or "") if element else "")
+        ).strip()
+        win_bbox = list(snapshot.window_bbox) if snapshot else [0.0, 0.0, 0.0, 0.0]
+        payload = {
+            "op": op,
+            "label": label,
+            "role": element.role if element else "",
+            "screenXY": list(screen_xy) if screen_xy else None,
+            "winBBox": win_bbox,
+            "direction": direction,
+            "amount": int(amount),
+            "textValue": text_value,
+        }
+        js_code = (
+            "(function(){"
+            f"const p = {json.dumps(payload)};"
+            "function findEl(q){"
+            "  if(!q) return null;"
+            "  const ql = q.toLowerCase();"
+            "  const sel = 'button,a,[role=\"button\"],[role=\"tab\"],[role=\"menuitem\"],[role=\"option\"],[role=\"checkbox\"],[role=\"switch\"],[role=\"link\"],input,textarea,select,summary,label,[tabindex]';"
+            "  const nodes = Array.from(document.querySelectorAll(sel));"
+            "  let best = null; let bestScore = 999999999;"
+            "  for(const el of nodes){"
+            "    const r = el.getBoundingClientRect();"
+            "    if(r.width <= 0 || r.height <= 0) continue;"
+            "    const attrs = [el.getAttribute('aria-label'), el.getAttribute('title'), el.getAttribute('placeholder'), el.getAttribute('name'), el.innerText, el.textContent, el.value];"
+            "    for(const raw of attrs){"
+            "      if(!raw) continue;"
+            "      const s = String(raw).trim();"
+            "      if(!s) continue;"
+            "      const sl = s.toLowerCase();"
+            "      if(sl === ql){ return el; }"
+            "      if(sl.includes(ql)){"
+            "        const area = r.width * r.height + s.length * 10;"
+            "        if(area < bestScore){ bestScore = area; best = el; }"
+            "      }"
+            "    }"
+            "  }"
+            "  return best;"
+            "}"
+            "if(p.op === 'scroll'){"
+            "  const dy = (p.direction === 'down' || p.direction === 'bottom') ? (p.direction === 'bottom' ? 2400 : p.amount * 120) : (p.direction === 'top' ? -2400 : -p.amount * 120);"
+            "  window.scrollBy({top: dy, behavior: 'instant'});"
+            "  return 'scrolled_bg_dom';"
+            "}"
+            "let el = null;"
+            "if(p.op === 'click_point' && p.screenXY && p.winBBox && p.winBBox[2] > 0){"
+            "  const chromeTop = Math.max(0, p.winBBox[3] - window.innerHeight);"
+            "  const rx = p.screenXY[0] - p.winBBox[0];"
+            "  const ry = p.screenXY[1] - (p.winBBox[1] + chromeTop);"
+            "  if(rx >= 0 && ry >= 0 && rx <= window.innerWidth && ry <= window.innerHeight){"
+            "    el = document.elementFromPoint(rx, ry);"
+            "  }"
+            "} else {"
+            "  el = findEl(p.label);"
+            "}"
+            "if(!el) return 'not_found';"
+            "if(typeof el.scrollIntoView === 'function') el.scrollIntoView({block:'nearest', inline:'nearest'});"
+            "const rect = el.getBoundingClientRect();"
+            "const cx = rect.left + rect.width / 2; const cy = rect.top + rect.height / 2;"
+            "const evInit = {bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy};"
+            "if(p.op === 'hover'){"
+            "  el.dispatchEvent(new PointerEvent('pointerover', evInit));"
+            "  el.dispatchEvent(new MouseEvent('mouseover', evInit));"
+            "  el.dispatchEvent(new PointerEvent('pointerenter', Object.assign({}, evInit, {bubbles: false})));"
+            "  el.dispatchEvent(new MouseEvent('mouseenter', Object.assign({}, evInit, {bubbles: false})));"
+            "  return 'hovered_bg_dom';"
+            "}"
+            "if(p.op === 'contextmenu'){"
+            "  el.dispatchEvent(new MouseEvent('contextmenu', Object.assign({}, evInit, {button: 2, buttons: 2})));"
+            "  return 'contextmenu_bg_dom';"
+            "}"
+            "if(p.op === 'input' && p.textValue !== null){"
+            "  el.focus();"
+            "  const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;"
+            "  const desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;"
+            "  if(desc && desc.set){ desc.set.call(el, p.textValue); } else { el.value = p.textValue; }"
+            "  el.dispatchEvent(new InputEvent('input', {bubbles: true, data: p.textValue, inputType: 'insertText'}));"
+            "  el.dispatchEvent(new Event('change', {bubbles: true}));"
+            "  return 'input_bg_dom';"
+            "}"
+            "el.dispatchEvent(new PointerEvent('pointerdown', evInit));"
+            "el.dispatchEvent(new MouseEvent('mousedown', evInit));"
+            "el.dispatchEvent(new PointerEvent('pointerup', evInit));"
+            "el.dispatchEvent(new MouseEvent('mouseup', evInit));"
+            "if(typeof el.click === 'function'){ el.click(); } else { el.dispatchEvent(new MouseEvent('click', evInit)); }"
+            "return 'clicked_bg_dom';"
+            "})()"
+        )
+        applescript = (
+            "on run argv\n"
+            "    set browserApp to item 1 of argv\n"
+            "    set titleQuery to item 2 of argv\n"
+            "    set jsCode to item 3 of argv\n"
+            "    tell application browserApp\n"
+            "        if (count of windows) is 0 then return \"no_window\"\n"
+            "        if titleQuery is not \"\" then\n"
+            "            repeat with w in windows\n"
+            "                repeat with t in tabs of w\n"
+            "                    if ((title of t as text) contains titleQuery) or ((URL of t as text) contains titleQuery) then\n"
+            "                        return (execute t javascript jsCode) as text\n"
+            "                    end if\n"
+            "                end repeat\n"
+            "            end repeat\n"
+            "        end if\n"
+            "        return (execute active tab of front window javascript jsCode) as text\n"
+            "    end tell\n"
+            "end run\n"
+        )
+        try:
+            proc = subprocess.run(
+                ["osascript", "-", browser_app, title_query, js_code],
+                input=applescript,
+                text=True,
+                capture_output=True,
+                timeout=1.5,
+            )
+            out = (proc.stdout or "").strip()
+            err = (proc.stderr or "").strip()
+            if proc.returncode == 0 and out in (
+                "clicked_bg_dom",
+                "hovered_bg_dom",
+                "contextmenu_bg_dom",
+                "scrolled_bg_dom",
+                "input_bg_dom",
+            ):
+                return {"ok": True, "result": out, "browser": browser_app}
+            hint = ""
+            if "Allow JavaScript from Apple Events" in err:
+                hint = " (Enable Chrome: View > Developer > Allow JavaScript from Apple Events for background DOM clicks)"
+            return {"ok": False, "reason": out or err or "failed", "hint": hint}
+        except Exception as exc:
+            return {"ok": False, "reason": str(exc), "hint": ""}
+
+    @classmethod
+    def _find_element_at_point(
+        cls,
+        x: float,
+        y: float,
+        snapshot: Optional[FovealWindowSnapshot],
+        tolerance_px: float = 14.0,
+    ) -> Optional[FovealUIElement]:
+        """Resolve the most specific interactive AX element containing screen point (x, y)."""
+        if not snapshot or not snapshot.interactive_elements:
+            return None
+        best_el: Optional[FovealUIElement] = None
+        best_area = float("inf")
+        for el in snapshot.interactive_elements:
+            bx, by, bw, bh = el.bbox
+            if bw > 0 and bh > 0:
+                if (bx - tolerance_px) <= x <= (bx + bw + tolerance_px) and (by - tolerance_px) <= y <= (by + bh + tolerance_px):
+                    area = bw * bh
+                    if area < best_area:
+                        best_area = area
+                        best_el = el
+        return best_el
+
+    @classmethod
+    def click_xy(
+        cls,
+        x: float,
+        y: float,
+        pid: Optional[int] = None,
+        snapshot: Optional[FovealWindowSnapshot] = None,
+        allow_focus_steal: bool = False,
+        no_cursor: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Performs a coordinate click at (x, y).
+        When targeting a background app or `no_cursor=True`, automatically reroutes (x, y)
+        to zero-cursor AXPress / ChromeBackgroundDOM instead of hijacking kCGHIDEventTap.
+        """
+        can_cursor, guard = cls._can_use_global_cursor(
+            snapshot=snapshot,
+            pid=pid,
+            allow_focus_steal=allow_focus_steal,
+            no_cursor=no_cursor,
+        )
+        if not can_cursor:
+            hit_el = cls._find_element_at_point(float(x), float(y), snapshot)
+            if hit_el is not None:
+                ax_res = cls.click_element(
+                    hit_el,
+                    snapshot=snapshot,
+                    allow_focus_steal=allow_focus_steal,
+                    no_cursor=True,
+                )
+                if ax_res.get("status") == "success":
+                    ax_res["coordinates"] = [float(x), float(y)]
+                    ax_res["rerouted_from_xy"] = True
+                    ax_res["cursor_moved"] = False
+                    return ax_res
+
+            dom_res = cls._chrome_background_dom_actuate(
+                "click_point",
+                snapshot=snapshot,
+                screen_xy=(float(x), float(y)),
+            )
+            if dom_res.get("ok"):
+                return {
+                    "status": "success",
+                    "method": "ChromeBackgroundDOM_xy",
+                    "coordinates": [float(x), float(y)],
+                    "cursor_moved": False,
+                    "summary": f"Clicked ({x:.1f}, {y:.1f}) in background Chrome DOM without moving cursor",
+                }
+
+            return {
+                "status": "error",
+                "method": "CGEvent_xy_blocked_focus_steal",
+                "coordinates": [float(x), float(y)],
+                "cursor_moved": False,
+                "hid_guard": guard,
+                "error": f"Blocked cursor-hijacking coordinate click at ({x:.1f}, {y:.1f}) while backgrounded{dom_res.get('hint', '')}",
+                "summary": f"Blocked focus-stealing coordinate click at ({x:.1f}, {y:.1f})",
+            }
+
         try:
             import Quartz
             from Quartz import CGPoint
@@ -765,11 +1081,12 @@ class FovealVisionEngine:
         target: Any,
         snapshot: Optional[FovealWindowSnapshot] = None,
         allow_focus_steal: bool = False,
+        no_cursor: bool = False,
     ) -> Dict[str, Any]:
         """
         Click element by exact ID ('e1') or substring match against title/label/value/role.
-        First attempts native AXPress action; falls back to Quartz CGEvent coordinate click at center
-        only when safe under _check_human_hid_guard.
+        First attempts native AXPress action, then background Chromium DOM click if needed;
+        falls back to Quartz CGEvent coordinate click only when safe under _can_use_global_cursor.
         """
         element: Optional[FovealUIElement] = None
         if isinstance(target, FovealUIElement):
@@ -827,13 +1144,32 @@ class FovealVisionEngine:
                 "role": element.role,
                 "label": element.label,
                 "center": list(element.center),
+                "cursor_moved": False,
                 "summary": f"Pressed [{element.id or element.role}] '{element.label}' via native AXPress",
             }
 
         # Guard against focus-stealing global mouse clicks on background live AX elements
         target_pid = snapshot.pid if snapshot else None
-        guard = cls._check_human_hid_guard(target_pid=target_pid, allow_focus_steal=allow_focus_steal)
-        if element.raw_element is not None and not guard["is_target_frontmost"] and not guard["can_focus_steal"]:
+        can_cursor, guard = cls._can_use_global_cursor(
+            snapshot=snapshot,
+            element=element,
+            pid=target_pid,
+            allow_focus_steal=allow_focus_steal,
+            no_cursor=no_cursor,
+        )
+        if not can_cursor:
+            dom_res = cls._chrome_background_dom_actuate("click", element=element, snapshot=snapshot)
+            if dom_res.get("ok"):
+                return {
+                    "status": "success",
+                    "method": "ChromeBackgroundDOM",
+                    "element_id": element.id,
+                    "role": element.role,
+                    "label": element.label,
+                    "center": list(element.center),
+                    "cursor_moved": False,
+                    "summary": f"Clicked [{element.id or element.role}] '{element.label}' via background Chrome DOM (0 cursor move)",
+                }
             return {
                 "status": "error",
                 "method": "AXPress_blocked_focus_steal",
@@ -841,8 +1177,9 @@ class FovealVisionEngine:
                 "role": element.role,
                 "label": element.label,
                 "center": list(element.center),
+                "cursor_moved": False,
                 "hid_guard": guard,
-                "error": f"AXPress failed ({err_code}) and global coordinate click blocked by focus-steal guard",
+                "error": f"AXPress failed ({err_code}) and global coordinate click blocked by focus-steal guard{dom_res.get('hint', '')}",
                 "summary": f"Blocked focus-stealing click on background [{element.id or element.role}] '{element.label}'",
             }
 
