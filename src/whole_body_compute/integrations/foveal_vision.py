@@ -828,7 +828,12 @@ class FovealVisionEngine:
 
         raw_title = (window_title or (snapshot.window_title if snapshot else "") or "").strip()
         # Strip trailing " - Google Chrome" suffix from macOS AXWindow titles so tab title matches cleanly
-        title_query = re.sub(r"\s*[-– - ]\s*(Google Chrome|Brave|Microsoft Edge|Vivaldi|Chromium).*$", "", raw_title, flags=re.IGNORECASE).strip()
+        title_query = re.sub(
+            r"\s*(?:-|\u2013|\u2014)\s*(Google Chrome|Brave|Microsoft Edge|Vivaldi|Chromium).*$",
+            "",
+            raw_title,
+            flags=re.IGNORECASE,
+        ).strip()
 
         label = (
             label_override
@@ -1250,10 +1255,13 @@ class FovealVisionEngine:
         pid: Optional[int] = None,
         window_title: Optional[str] = None,
         settle_ms: int = 80,
+        allow_focus_steal: bool = False,
+        no_cursor: bool = False,
     ) -> Dict[str, Any]:
         """
         Hover over element ID ('e1') or coordinates 'x,y' to reveal context controls and React toolbars.
-        Posts kCGEventMouseMoved Quartz event and waits settle_ms (default: 80ms).
+        Uses zero-cursor AX focus / background Chrome DOM events when backgrounded; posts kCGEventMouseMoved
+        only when safe under _can_use_global_cursor.
         """
         target_pid = snapshot.pid if snapshot and snapshot.pid else pid
         target_app = snapshot.app_name if snapshot and snapshot.app_name else app_name
@@ -1281,23 +1289,64 @@ class FovealVisionEngine:
                 "summary": f"Target '{target}' not found for hover",
             }
 
-        try:
-            import Quartz
-            from Quartz import CGPoint
+        can_cursor, guard = cls._can_use_global_cursor(
+            snapshot=current_snap,
+            element=elem,
+            pid=target_pid,
+            allow_focus_steal=allow_focus_steal,
+            no_cursor=no_cursor,
+        )
+        hover_method = "CGEvent_mouse_moved"
+        if not can_cursor:
+            ax_focused_ok = False
+            if elem is not None and elem.raw_element is not None:
+                try:
+                    import ApplicationServices as AS
 
-            pt = CGPoint(float(cx), float(cy))
-            move_event = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, pt, 0)
-            Quartz.CGEventPost(Quartz.kCGHIDEventTap, move_event)
+                    if AS.AXUIElementSetAttributeValue(elem.raw_element, "AXFocused", True) == 0:
+                        ax_focused_ok = True
+                except Exception:
+                    pass
+            dom_res = cls._chrome_background_dom_actuate(
+                "hover",
+                element=elem,
+                snapshot=current_snap,
+                app_name=target_app,
+                window_title=target_win,
+                label_override=None if elem else str(target),
+            )
+            if not dom_res.get("ok") and not ax_focused_ok:
+                return {
+                    "status": "error",
+                    "action": "hover",
+                    "method": "hover_blocked_focus_steal",
+                    "target": str(target),
+                    "coordinates": [float(cx), float(cy)],
+                    "cursor_moved": False,
+                    "hid_guard": guard,
+                    "error": f"Blocked cursor-hijacking hover at ({cx:.1f}, {cy:.1f}) while backgrounded{dom_res.get('hint', '')}",
+                    "summary": f"Blocked focus-stealing hover at ({cx:.1f}, {cy:.1f})",
+                }
+            hover_method = "ChromeBackgroundDOM_hover" if dom_res.get("ok") else "AXFocused_hover"
             time.sleep(settle_ms / 1000.0)
-        except Exception as exc:
-            return {
-                "status": "error",
-                "action": "hover",
-                "target": str(target),
-                "coordinates": [float(cx), float(cy)],
-                "error": str(exc),
-                "summary": f"Failed hover at ({cx}, {cy}): {exc}",
-            }
+        else:
+            try:
+                import Quartz
+                from Quartz import CGPoint
+
+                pt = CGPoint(float(cx), float(cy))
+                move_event = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, pt, 0)
+                Quartz.CGEventPost(Quartz.kCGHIDEventTap, move_event)
+                time.sleep(settle_ms / 1000.0)
+            except Exception as exc:
+                return {
+                    "status": "error",
+                    "action": "hover",
+                    "target": str(target),
+                    "coordinates": [float(cx), float(cy)],
+                    "error": str(exc),
+                    "summary": f"Failed hover at ({cx}, {cy}): {exc}",
+                }
 
         post_snap = None
         if target_pid or target_app or target_win or current_snap:
@@ -1318,12 +1367,14 @@ class FovealVisionEngine:
         return {
             "status": "success",
             "action": "hover",
+            "method": hover_method,
+            "cursor_moved": bool(can_cursor),
             "target": str(target),
             "element_id": elem.id if elem else None,
             "role": elem.role if elem else None,
             "label": elem.label if elem else None,
             "coordinates": [float(cx), float(cy)],
-            "summary": f"Hovered over [{elem.id or 'xy' if elem else 'xy'}] '{elem.label if elem else target}' at ({cx:.1f}, {cy:.1f})",
+            "summary": f"Hovered over [{elem.id or 'xy' if elem else 'xy'}] '{elem.label if elem else target}' at ({cx:.1f}, {cy:.1f}) ({hover_method})",
             "tactile_delta": tactile_delta,
             "post_snapshot": post_snap.to_dict() if post_snap else None,
         }
@@ -1337,10 +1388,13 @@ class FovealVisionEngine:
         pid: Optional[int] = None,
         window_title: Optional[str] = None,
         settle_ms: int = 80,
+        allow_focus_steal: bool = False,
+        no_cursor: bool = False,
     ) -> Dict[str, Any]:
         """
         Right-click element ID ('e1') or coordinates 'x,y' to open context menu.
-        Posts kCGEventRightMouseDown + kCGEventRightMouseUp Quartz events and waits settle_ms (default: 80ms).
+        Uses native AXShowMenu / background Chrome DOM contextmenu when backgrounded;
+        posts kCGEventRightMouseDown + kCGEventRightMouseUp only when safe under _can_use_global_cursor.
         """
         target_pid = snapshot.pid if snapshot and snapshot.pid else pid
         target_app = snapshot.app_name if snapshot and snapshot.app_name else app_name
@@ -1368,26 +1422,72 @@ class FovealVisionEngine:
                 "summary": f"Target '{target}' not found for right-click",
             }
 
-        try:
-            import Quartz
-            from Quartz import CGPoint
+        can_cursor, guard = cls._can_use_global_cursor(
+            snapshot=current_snap,
+            element=elem,
+            pid=target_pid,
+            allow_focus_steal=allow_focus_steal,
+            no_cursor=no_cursor,
+        )
+        rc_method = "CGEvent_right_click"
+        if not can_cursor:
+            ax_menu_ok = False
+            if elem is not None and elem.raw_element is not None:
+                try:
+                    import ApplicationServices as AS
 
-            pt = CGPoint(float(cx), float(cy))
-            down = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventRightMouseDown, pt, Quartz.kCGMouseButtonRight)
-            up = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventRightMouseUp, pt, Quartz.kCGMouseButtonRight)
-            Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
-            time.sleep(0.02)
-            Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+                    if AS.AXUIElementPerformAction(elem.raw_element, "AXShowMenu") == 0:
+                        ax_menu_ok = True
+                except Exception:
+                    pass
+            dom_ok = False
+            dom_hint = ""
+            if not ax_menu_ok:
+                dom_res = cls._chrome_background_dom_actuate(
+                    "contextmenu",
+                    element=elem,
+                    snapshot=current_snap,
+                    app_name=target_app,
+                    window_title=target_win,
+                    label_override=None if elem else str(target),
+                )
+                dom_ok = bool(dom_res.get("ok"))
+                dom_hint = dom_res.get("hint", "")
+            if not ax_menu_ok and not dom_ok:
+                return {
+                    "status": "error",
+                    "action": "right_click",
+                    "method": "right_click_blocked_focus_steal",
+                    "target": str(target),
+                    "coordinates": [float(cx), float(cy)],
+                    "cursor_moved": False,
+                    "hid_guard": guard,
+                    "error": f"Blocked cursor-hijacking right-click at ({cx:.1f}, {cy:.1f}) while backgrounded{dom_hint}",
+                    "summary": f"Blocked focus-stealing right-click at ({cx:.1f}, {cy:.1f})",
+                }
+            rc_method = "AXShowMenu" if ax_menu_ok else "ChromeBackgroundDOM_contextmenu"
             time.sleep(settle_ms / 1000.0)
-        except Exception as exc:
-            return {
-                "status": "error",
-                "action": "right_click",
-                "target": str(target),
-                "coordinates": [float(cx), float(cy)],
-                "error": str(exc),
-                "summary": f"Failed right-click at ({cx}, {cy}): {exc}",
-            }
+        else:
+            try:
+                import Quartz
+                from Quartz import CGPoint
+
+                pt = CGPoint(float(cx), float(cy))
+                down = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventRightMouseDown, pt, Quartz.kCGMouseButtonRight)
+                up = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventRightMouseUp, pt, Quartz.kCGMouseButtonRight)
+                Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
+                time.sleep(0.02)
+                Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+                time.sleep(settle_ms / 1000.0)
+            except Exception as exc:
+                return {
+                    "status": "error",
+                    "action": "right_click",
+                    "target": str(target),
+                    "coordinates": [float(cx), float(cy)],
+                    "error": str(exc),
+                    "summary": f"Failed right-click at ({cx}, {cy}): {exc}",
+                }
 
         post_snap = None
         if target_pid or target_app or target_win or current_snap:
@@ -1408,12 +1508,14 @@ class FovealVisionEngine:
         return {
             "status": "success",
             "action": "right_click",
+            "method": rc_method,
+            "cursor_moved": bool(can_cursor),
             "target": str(target),
             "element_id": elem.id if elem else None,
             "role": elem.role if elem else None,
             "label": elem.label if elem else None,
             "coordinates": [float(cx), float(cy)],
-            "summary": f"Right-clicked [{elem.id or 'xy' if elem else 'xy'}] '{elem.label if elem else target}' at ({cx:.1f}, {cy:.1f})",
+            "summary": f"Right-clicked [{elem.id or 'xy' if elem else 'xy'}] '{elem.label if elem else target}' at ({cx:.1f}, {cy:.1f}) ({rc_method})",
             "tactile_delta": tactile_delta,
             "post_snapshot": post_snap.to_dict() if post_snap else None,
         }
@@ -1502,6 +1604,8 @@ class FovealVisionEngine:
         pid: Optional[int] = None,
         window_title: Optional[str] = None,
         snapshot: Optional[FovealWindowSnapshot] = None,
+        allow_focus_steal: bool = False,
+        no_cursor: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute compound multi-step action pipeline in a single turn.
@@ -1554,6 +1658,12 @@ class FovealVisionEngine:
         else:
             raw_steps = list(steps)
 
+        cursor_kwargs: Dict[str, Any] = {}
+        if allow_focus_steal:
+            cursor_kwargs["allow_focus_steal"] = True
+        if no_cursor:
+            cursor_kwargs["no_cursor"] = True
+
         actions_taken = []
         for step in raw_steps:
             if isinstance(step, dict):
@@ -1573,35 +1683,70 @@ class FovealVisionEngine:
                 arg = arg[1:-1]
 
             if act_type in ("click", "act"):
-                actions_taken.append(cls.click_element(arg, snapshot=current_snap))
+                actions_taken.append(cls.click_element(arg, snapshot=current_snap, **cursor_kwargs))
             elif act_type in ("click-xy", "click_xy"):
                 parts = [p.strip() for p in arg.split(",")]
                 if len(parts) == 2:
                     try:
-                        actions_taken.append(cls.click_xy(float(parts[0]), float(parts[1])))
+                        actions_taken.append(
+                            cls.click_xy(
+                                float(parts[0]),
+                                float(parts[1]),
+                                pid=target_pid,
+                                snapshot=current_snap,
+                                **cursor_kwargs,
+                            )
+                        )
                     except Exception as e:
                         actions_taken.append({"status": "error", "action": "click_xy", "error": str(e)})
                 else:
                     actions_taken.append({"status": "error", "action": "click_xy", "error": f"Invalid coordinates '{arg}'"})
             elif act_type == "hover":
-                actions_taken.append(cls.hover(arg, snapshot=current_snap, app_name=target_app, pid=target_pid, window_title=target_win))
+                actions_taken.append(
+                    cls.hover(
+                        arg,
+                        snapshot=current_snap,
+                        app_name=target_app,
+                        pid=target_pid,
+                        window_title=target_win,
+                        **cursor_kwargs,
+                    )
+                )
             elif act_type in ("right-click", "right_click"):
-                actions_taken.append(cls.right_click(arg, snapshot=current_snap, app_name=target_app, pid=target_pid, window_title=target_win))
+                actions_taken.append(
+                    cls.right_click(
+                        arg,
+                        snapshot=current_snap,
+                        app_name=target_app,
+                        pid=target_pid,
+                        window_title=target_win,
+                        **cursor_kwargs,
+                    )
+                )
             elif act_type == "type":
-                actions_taken.append(cls.type_text(arg, snapshot=current_snap))
+                actions_taken.append(cls.type_text(arg, snapshot=current_snap, **cursor_kwargs))
             elif act_type == "paste":
-                actions_taken.append(cls.paste_element(arg, snapshot=current_snap, submit=False))
+                if allow_focus_steal:
+                    actions_taken.append(cls.paste_element(arg, snapshot=current_snap, submit=False, allow_focus_steal=True))
+                else:
+                    actions_taken.append(cls.paste_element(arg, snapshot=current_snap, submit=False))
             elif act_type == "attach":
                 actions_taken.append(cls.attach_file(arg, snapshot=current_snap, app_name=target_app, pid=target_pid, window_title=target_win))
             elif act_type in ("hotkey", "key"):
-                actions_taken.append(cls.dispatch_hotkey(arg, pid=target_pid, app_name=target_app))
+                if allow_focus_steal:
+                    actions_taken.append(cls.dispatch_hotkey(arg, pid=target_pid, app_name=target_app, allow_focus_steal=True))
+                else:
+                    actions_taken.append(cls.dispatch_hotkey(arg, pid=target_pid, app_name=target_app))
             elif act_type == "menu":
                 actions_taken.append(cls.trigger_menu_item(arg, pid=target_pid, app_name=target_app))
             elif act_type == "scroll":
-                actions_taken.append(cls.scroll(arg, snapshot=current_snap))
+                actions_taken.append(cls.scroll(arg, snapshot=current_snap, **cursor_kwargs))
             elif act_type == "submit":
                 time.sleep(0.04)
-                actions_taken.append(cls.send_submit(snapshot=current_snap))
+                if allow_focus_steal:
+                    actions_taken.append(cls.send_submit(snapshot=current_snap, allow_focus_steal=True))
+                else:
+                    actions_taken.append(cls.send_submit(snapshot=current_snap))
             elif act_type in ("wait-reply", "wait_reply"):
                 t_sec = float(arg) if arg else 15.0
                 actions_taken.append(cls.wait_for_reply(app_name=target_app, pid=target_pid, window_title=target_win, timeout_sec=t_sec))
@@ -2005,13 +2150,19 @@ class FovealVisionEngine:
         amount: int = 5,
         target_center: Optional[Tuple[float, float]] = None,
         snapshot: Optional[FovealWindowSnapshot] = None,
+        allow_focus_steal: bool = False,
+        no_cursor: bool = False,
     ) -> Dict[str, Any]:
         """
-        Scroll target window/view up/down/top/bottom via native AXScroll actions and Quartz scroll events.
+        Scroll target window/view up/down/top/bottom via native AXScroll actions, background Chrome DOM,
+        or PID keycodes. Only posts global kCGHIDEventTap scroll wheel when safe under _can_use_global_cursor.
         """
         d = direction.lower().strip()
         ax_action_ok = False
+        bg_dom_ok = False
+        pid_key_ok = False
         quartz_ok = False
+        ax_scroll_act = "AXScrollDownByPage" if d in ("down", "bottom") else "AXScrollUpByPage"
 
         if snapshot:
             for el in snapshot.interactive_elements:
@@ -2019,15 +2170,90 @@ class FovealVisionEngine:
                     try:
                         import ApplicationServices as AS
 
-                        if d in ("down", "bottom"):
-                            err = AS.AXUIElementPerformAction(el.raw_element, "AXScrollDownByPage")
-                        else:
-                            err = AS.AXUIElementPerformAction(el.raw_element, "AXScrollUpByPage")
+                        err = AS.AXUIElementPerformAction(el.raw_element, ax_scroll_act)
                         if err == 0:
                             ax_action_ok = True
                             break
                     except Exception:
                         pass
+
+            # Walk AXParent chain of first live element to locate enclosing AXScrollArea / AXWebArea
+            if not ax_action_ok:
+                try:
+                    import ApplicationServices as AS
+
+                    seed_el = next((e.raw_element for e in snapshot.interactive_elements if e.raw_element is not None), None)
+                    curr = seed_el
+                    for _ in range(12):
+                        if curr is None:
+                            break
+                        role_c = cls._get_ax_attribute(curr, "AXRole")
+                        if role_c in ("AXScrollArea", "AXWebArea", "AXList", "AXTable"):
+                            if AS.AXUIElementPerformAction(curr, ax_scroll_act) == 0:
+                                ax_action_ok = True
+                                break
+                        curr = cls._get_ax_attribute(curr, "AXParent")
+                except Exception:
+                    pass
+
+        # When native AXScroll succeeded, return immediately without firing global HID wheel on the active cursor window
+        if ax_action_ok:
+            return {
+                "status": "success",
+                "action": "scroll",
+                "direction": d,
+                "ax_scroll": True,
+                "quartz_scroll": False,
+                "cursor_moved": False,
+                "summary": f"Scrolled {d} via background AXScroll (0 cursor impact)",
+            }
+
+        target_pid = snapshot.pid if snapshot and snapshot.pid else None
+        can_cursor, guard = cls._can_use_global_cursor(
+            snapshot=snapshot,
+            pid=target_pid,
+            allow_focus_steal=allow_focus_steal,
+            no_cursor=no_cursor,
+        )
+        if not can_cursor:
+            dom_res = cls._chrome_background_dom_actuate(
+                "scroll",
+                snapshot=snapshot,
+                direction=d,
+                amount=amount,
+            )
+            bg_dom_ok = bool(dom_res.get("ok"))
+            if not bg_dom_ok and target_pid and int(target_pid) > 0:
+                try:
+                    import Quartz
+
+                    # PageDown=121, PageUp=116, End=119, Home=115
+                    kcode = 119 if d == "bottom" else (115 if d == "top" else (121 if d == "down" else 116))
+                    ev_down = Quartz.CGEventCreateKeyboardEvent(None, kcode, True)
+                    ev_up = Quartz.CGEventCreateKeyboardEvent(None, kcode, False)
+                    mode = cls._post_key_event(ev_down, pid=target_pid, allow_focus_steal=allow_focus_steal)
+                    time.sleep(0.02)
+                    cls._post_key_event(ev_up, pid=target_pid, allow_focus_steal=allow_focus_steal)
+                    pid_key_ok = mode == "CGEventPostToPid"
+                except Exception:
+                    pass
+            ok_bg = bg_dom_ok or pid_key_ok
+            return {
+                "status": "success" if ok_bg else "error",
+                "action": "scroll",
+                "direction": d,
+                "ax_scroll": False,
+                "bg_dom_scroll": bg_dom_ok,
+                "pid_key_scroll": pid_key_ok,
+                "quartz_scroll": False,
+                "cursor_moved": False,
+                "hid_guard": guard,
+                "summary": (
+                    f"Scrolled {d} in background ({'ChromeDOM' if bg_dom_ok else 'CGEventPostToPid'})"
+                    if ok_bg
+                    else f"Blocked global HID scroll ({d}) to protect active cursor window"
+                ),
+            }
 
         try:
             import Quartz
@@ -2037,13 +2263,6 @@ class FovealVisionEngine:
                 delta_y = -amount * 4
             elif d == "top":
                 delta_y = amount * 4
-
-            cx, cy = 500.0, 500.0
-            if target_center:
-                cx, cy = target_center
-            elif snapshot and snapshot.window_bbox != (0.0, 0.0, 0.0, 0.0):
-                cx = snapshot.window_bbox[0] + snapshot.window_bbox[2] / 2.0
-                cy = snapshot.window_bbox[1] + snapshot.window_bbox[3] / 2.0
 
             ev = Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitLine, 1, int(delta_y))
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
@@ -2066,15 +2285,21 @@ class FovealVisionEngine:
         text: str,
         target: Any = None,
         snapshot: Optional[FovealWindowSnapshot] = None,
+        allow_focus_steal: bool = False,
+        no_cursor: bool = False,
     ) -> Dict[str, Any]:
         """
         Type text into target or focused input element.
-        Sets AXValue and sends Quartz keystrokes to ensure React/Electron input handlers fire.
-        If AXValue fails or on rich-text editors and len(text) > 40, falls back to atomic paste.
+        Sets AXValue and sends PID-targeted Quartz keystrokes (never stealing focus).
         """
         target_elem: Optional[FovealUIElement] = None
         if target:
-            cls.click_element(target, snapshot=snapshot)
+            cls.click_element(
+                target,
+                snapshot=snapshot,
+                allow_focus_steal=allow_focus_steal,
+                no_cursor=no_cursor,
+            )
             if snapshot and snapshot.interactive_elements:
                 t_str = str(target).strip().lower()
                 for el in snapshot.interactive_elements:
@@ -2121,9 +2346,40 @@ class FovealVisionEngine:
 
         target_pid = snapshot.pid if snapshot and snapshot.pid else None
 
+        # Zero-clipboard, zero-cursor React input injection for background Chromium tabs when AXValue fails
+        if not ax_val_set and target_elem is not None:
+            can_cursor, _ = cls._can_use_global_cursor(
+                snapshot=snapshot,
+                element=target_elem,
+                pid=target_pid,
+                allow_focus_steal=allow_focus_steal,
+                no_cursor=no_cursor,
+            )
+            if not can_cursor:
+                dom_in = cls._chrome_background_dom_actuate(
+                    "input",
+                    element=target_elem,
+                    snapshot=snapshot,
+                    text_value=text,
+                )
+                if dom_in.get("ok"):
+                    return {
+                        "status": "success",
+                        "method": "ChromeBackgroundDOM_input",
+                        "typed_text": text,
+                        "cursor_moved": False,
+                        "target_element": target_elem.to_dict(),
+                        "summary": f"Injected {len(text)} chars via background Chrome DOM setter (0 cursor move)",
+                    }
+
         # Fast path for rich text or multi-character text where AXValue didn't stick or len > 40
         if (not ax_val_set or is_rich_text) and len(text) > 40:
-            pasted = cls._atomic_paste_text(text, target_elem=target_elem, pid=target_pid)
+            pasted = cls._atomic_paste_text(
+                text,
+                target_elem=target_elem,
+                pid=target_pid,
+                allow_focus_steal=allow_focus_steal,
+            )
             if pasted:
                 return {
                     "status": "success",
@@ -2139,11 +2395,11 @@ class FovealVisionEngine:
 
             ev_down = Quartz.CGEventCreateKeyboardEvent(None, 0, True)
             Quartz.CGEventKeyboardSetUnicodeString(ev_down, len(text), text)
-            cls._post_key_event(ev_down, pid=target_pid)
+            cls._post_key_event(ev_down, pid=target_pid, allow_focus_steal=allow_focus_steal)
             time.sleep(0.01)
             ev_up = Quartz.CGEventCreateKeyboardEvent(None, 0, False)
             Quartz.CGEventKeyboardSetUnicodeString(ev_up, len(text), text)
-            cls._post_key_event(ev_up, pid=target_pid)
+            cls._post_key_event(ev_up, pid=target_pid, allow_focus_steal=allow_focus_steal)
             quartz_ok = True
         except Exception as exc:
             logger.debug("Quartz typing failed: %s", exc)
@@ -2467,20 +2723,35 @@ class FovealVisionEngine:
         app_name: Optional[str] = None,
         pid: Optional[int] = None,
         window_title: Optional[str] = None,
+        allow_focus_steal: bool = False,
+        no_cursor: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute composite actuation sequence with closed-loop proprioception (tactile_delta).
-        Auto-escalates failed AXPress clicks to Quartz CGEvent if verified == False.
+        Auto-escalates failed AXPress clicks to Quartz CGEvent only when safe under _can_use_global_cursor.
         """
         actions_taken = []
         target_pid = snapshot.pid if snapshot and snapshot.pid else pid
         target_app = snapshot.app_name if snapshot and snapshot.app_name else app_name
         target_win = snapshot.window_title if snapshot and snapshot.window_title else window_title
 
+        cursor_kwargs: Dict[str, Any] = {}
+        if allow_focus_steal:
+            cursor_kwargs["allow_focus_steal"] = True
+        if no_cursor:
+            cursor_kwargs["no_cursor"] = True
+
         # 1. Hover-reveal
         if hover:
             actions_taken.append(
-                cls.hover(hover, snapshot=snapshot, app_name=target_app, pid=target_pid, window_title=target_win)
+                cls.hover(
+                    hover,
+                    snapshot=snapshot,
+                    app_name=target_app,
+                    pid=target_pid,
+                    window_title=target_win,
+                    **cursor_kwargs,
+                )
             )
 
         # 2. Coordinate Click
@@ -2489,20 +2760,32 @@ class FovealVisionEngine:
             if len(parts) == 2:
                 try:
                     x, y = float(parts[0]), float(parts[1])
-                    actions_taken.append(cls.click_xy(x, y))
+                    if snapshot is not None or target_pid is not None or cursor_kwargs:
+                        actions_taken.append(
+                            cls.click_xy(x, y, pid=target_pid, snapshot=snapshot, **cursor_kwargs)
+                        )
+                    else:
+                        actions_taken.append(cls.click_xy(x, y))
                 except Exception as e:
                     actions_taken.append({"status": "error", "action": "click_xy", "error": str(e)})
 
         # 3. Element Click
         click_action = None
         if click:
-            click_action = cls.click_element(click, snapshot=snapshot)
+            click_action = cls.click_element(click, snapshot=snapshot, **cursor_kwargs)
             actions_taken.append(click_action)
 
         # 4. Right-Click
         if right_click:
             actions_taken.append(
-                cls.right_click(right_click, snapshot=snapshot, app_name=target_app, pid=target_pid, window_title=target_win)
+                cls.right_click(
+                    right_click,
+                    snapshot=snapshot,
+                    app_name=target_app,
+                    pid=target_pid,
+                    window_title=target_win,
+                    **cursor_kwargs,
+                )
             )
 
         # 5. File Attachment (NSOpenPanel)
@@ -2522,21 +2805,40 @@ class FovealVisionEngine:
 
         # 6. Text injection (Paste / Type)
         if paste_text is not None:
-            actions_taken.append(
-                cls.paste_element(paste_text, target=click if not click_xy else None, snapshot=snapshot, submit=False)
-            )
+            if allow_focus_steal:
+                actions_taken.append(
+                    cls.paste_element(
+                        paste_text,
+                        target=click if not click_xy else None,
+                        snapshot=snapshot,
+                        submit=False,
+                        allow_focus_steal=True,
+                    )
+                )
+            else:
+                actions_taken.append(
+                    cls.paste_element(paste_text, target=click if not click_xy else None, snapshot=snapshot, submit=False)
+                )
 
         if type_text is not None:
-            actions_taken.append(cls.type_text(type_text, target=click if not click_xy else None, snapshot=snapshot))
+            actions_taken.append(
+                cls.type_text(type_text, target=click if not click_xy else None, snapshot=snapshot, **cursor_kwargs)
+            )
 
         # 7. Hotkey chord
         if hotkey:
-            actions_taken.append(cls.dispatch_hotkey(hotkey, pid=target_pid, app_name=target_app))
+            if allow_focus_steal:
+                actions_taken.append(cls.dispatch_hotkey(hotkey, pid=target_pid, app_name=target_app, allow_focus_steal=True))
+            else:
+                actions_taken.append(cls.dispatch_hotkey(hotkey, pid=target_pid, app_name=target_app))
 
         # 8. Submit keystroke
         if submit:
             time.sleep(0.04)
-            actions_taken.append(cls.send_submit(snapshot=snapshot))
+            if allow_focus_steal:
+                actions_taken.append(cls.send_submit(snapshot=snapshot, allow_focus_steal=True))
+            else:
+                actions_taken.append(cls.send_submit(snapshot=snapshot))
 
         # 9. Menu triggering
         if menu:
@@ -2544,12 +2846,19 @@ class FovealVisionEngine:
 
         # 10. Scroll
         if scroll:
-            actions_taken.append(cls.scroll(scroll, snapshot=snapshot))
+            actions_taken.append(cls.scroll(scroll, snapshot=snapshot, **cursor_kwargs))
 
         # 11. Compound Macro Chain
         if chain:
             actions_taken.append(
-                cls.execute_chain(chain, snapshot=snapshot, app_name=target_app, pid=target_pid, window_title=target_win)
+                cls.execute_chain(
+                    chain,
+                    snapshot=snapshot,
+                    app_name=target_app,
+                    pid=target_pid,
+                    window_title=target_win,
+                    **cursor_kwargs,
+                )
             )
 
         # Closed-Loop Proprioception: sleep ~60ms, capture post snapshot, compute tactile_delta
@@ -2569,25 +2878,56 @@ class FovealVisionEngine:
 
         # Auto-Escalation on Click:
         # When AXPress was used and reported success, but post-click DOM verified == False,
-        # escalate to Quartz coordinate click at element center.
+        # only escalate to Quartz coordinate click when _can_use_global_cursor permits it.
+        # In background / zero-cursor mode (e.g. PostHog in Chrome while working in AGY),
+        # never hijack the physical cursor; allow a brief async settle check instead.
         if click_action and click_action.get("method") == "AXPress" and click_action.get("status") == "success":
             if not tactile_delta["verified"]:
-                cx, cy = click_action.get("center", [0.0, 0.0])
-                if (cx, cy) != (0.0, 0.0) and (cx != 0 or cy != 0):
-                    esc_res = cls.click_xy(cx, cy)
-                    click_action["escalated_to_cgevent"] = True
-                    click_action["summary"] += f" -> Escalated to Quartz CGEvent ({cx}, {cy})"
-                    actions_taken.append(esc_res)
-                    time.sleep(0.06)
-                    post_snap = cls.capture_snapshot(
-                        pid=target_pid,
-                        app_name=target_app,
-                        window_title_query=target_win,
-                        max_elements=max(60, len(snapshot.interactive_elements) + 30) if snapshot and snapshot.interactive_elements else None,
-                        filter_query=snapshot.filter_query if snapshot else None,
-                        record_telemetry=False,
+                matched_el = None
+                if snapshot and snapshot.interactive_elements and click_action.get("element_id"):
+                    matched_el = next(
+                        (e for e in snapshot.interactive_elements if e.id == click_action.get("element_id")),
+                        None,
                     )
-                    tactile_delta = cls.compute_tactile_delta(snapshot, post_snap)
+                can_cursor, esc_guard = cls._can_use_global_cursor(
+                    snapshot=snapshot,
+                    element=matched_el,
+                    pid=target_pid,
+                    allow_focus_steal=allow_focus_steal,
+                    no_cursor=no_cursor,
+                )
+                if can_cursor:
+                    cx, cy = click_action.get("center", [0.0, 0.0])
+                    if (cx, cy) != (0.0, 0.0) and (cx != 0 or cy != 0):
+                        esc_res = cls.click_xy(cx, cy)
+                        click_action["escalated_to_cgevent"] = True
+                        click_action["summary"] += f" -> Escalated to Quartz CGEvent ({cx}, {cy})"
+                        actions_taken.append(esc_res)
+                        time.sleep(0.06)
+                        post_snap = cls.capture_snapshot(
+                            pid=target_pid,
+                            app_name=target_app,
+                            window_title_query=target_win,
+                            max_elements=max(60, len(snapshot.interactive_elements) + 30) if snapshot and snapshot.interactive_elements else None,
+                            filter_query=snapshot.filter_query if snapshot else None,
+                            record_telemetry=False,
+                        )
+                        tactile_delta = cls.compute_tactile_delta(snapshot, post_snap)
+                else:
+                    time.sleep(0.10)
+                    if target_pid or target_app or target_win or snapshot:
+                        post_snap = cls.capture_snapshot(
+                            pid=target_pid,
+                            app_name=target_app,
+                            window_title_query=target_win,
+                            max_elements=max(60, len(snapshot.interactive_elements) + 30) if snapshot and snapshot.interactive_elements else None,
+                            filter_query=snapshot.filter_query if snapshot else None,
+                            record_telemetry=False,
+                        )
+                        tactile_delta = cls.compute_tactile_delta(snapshot, post_snap)
+                    click_action["escalated_to_cgevent"] = False
+                    click_action["escalation_blocked_zero_cursor"] = True
+                    click_action["hid_guard"] = esc_guard
 
         # Spatial Motor Cache update or invalidation
         if click and click_action:
@@ -2669,6 +3009,8 @@ class FovealVisionEngine:
         wait_reply: Optional[float] = None,
         read_last: bool = False,
         record_telemetry: bool = True,
+        allow_focus_steal: bool = False,
+        no_cursor: bool = False,
     ) -> FovealWindowSnapshot:
         """
         Capture the structured accessibility DOM of target application/window in <15ms.
@@ -3065,6 +3407,8 @@ class FovealVisionEngine:
                     app_name=resolved_app_name,
                     pid=app_pid,
                     window_title=window_title,
+                    allow_focus_steal=allow_focus_steal,
+                    no_cursor=no_cursor,
                 )
                 snap.tactile_delta = snap.actuation.get("tactile_delta")
                 snap.latency_ms = round((time.perf_counter() - t0) * 1000.0, 3)
@@ -3186,6 +3530,8 @@ def capture_foveal_snapshot(
     wait_reply: Optional[float] = None,
     read_last: bool = False,
     record_telemetry: bool = True,
+    allow_focus_steal: bool = False,
+    no_cursor: bool = False,
 ) -> FovealWindowSnapshot:
     """Helper entrypoint to capture window accessibility DOM and optionally actuate."""
     snap = FovealVisionEngine.capture_snapshot(
@@ -3211,6 +3557,8 @@ def capture_foveal_snapshot(
         wait_reply=wait_reply,
         read_last=read_last,
         record_telemetry=record_telemetry,
+        allow_focus_steal=allow_focus_steal,
+        no_cursor=no_cursor,
     )
     if record_telemetry:
         _record_foveal_shield_telemetry(snap)

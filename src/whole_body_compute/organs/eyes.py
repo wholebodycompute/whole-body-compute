@@ -79,6 +79,8 @@ class OrganEyes:
         filter_query: Optional[str] = None,
         include_floating: bool = False,
         include_status_bar: bool = False,
+        allow_focus_steal: bool = False,
+        no_cursor: bool = False,
     ) -> FovealWindowSnapshot:
         """Inspect and execute tactile actuation on target application."""
         return FovealVisionEngine.capture_snapshot(
@@ -103,6 +105,8 @@ class OrganEyes:
             submit=submit,
             wait_reply=wait_reply,
             read_last=read_last,
+            allow_focus_steal=allow_focus_steal,
+            no_cursor=no_cursor,
         )
 
     @classmethod
@@ -124,6 +128,8 @@ class OrganEyes:
         app_name: Optional[str] = None,
         pid: Optional[int] = None,
         window_title: Optional[str] = None,
+        allow_focus_steal: bool = False,
+        no_cursor: bool = False,
     ) -> Dict[str, Any]:
         """Perform direct tactile actuation without re-inspecting."""
         return FovealVisionEngine.actuate(
@@ -143,6 +149,8 @@ class OrganEyes:
             app_name=app_name,
             pid=pid,
             window_title=window_title,
+            allow_focus_steal=allow_focus_steal,
+            no_cursor=no_cursor,
         )
 
     @classmethod
@@ -278,6 +286,8 @@ def drive_app(
     filter_query: Optional[str] = None,
     include_floating: bool = False,
     include_status_bar: bool = False,
+    allow_focus_steal: bool = False,
+    no_cursor: bool = False,
 ) -> FovealWindowSnapshot:
     """Functional convenience to inspect and actuate an application."""
     return OrganEyes.drive(
@@ -302,6 +312,8 @@ def drive_app(
         filter_query=filter_query,
         include_floating=include_floating,
         include_status_bar=include_status_bar,
+        allow_focus_steal=allow_focus_steal,
+        no_cursor=no_cursor,
     )
 
 

@@ -846,6 +846,20 @@ def build_parser() -> argparse.ArgumentParser:
             p_org.add_argument("--submit", action="store_true", help="Send Return/Enter keystroke after clicking or typing")
             p_org.add_argument("--read-last", dest="read_last", action="store_true", help="Extract latest meaningful text blocks from window")
             p_org.add_argument("--wait-reply", dest="wait_reply", type=float, default=None, help="Wait up to TIMEOUT seconds for target app response stream to settle")
+            p_org.add_argument(
+                "--no-cursor",
+                "--background",
+                dest="no_cursor",
+                action="store_true",
+                help="Lock actuation to zero-cursor background mode (AXPress, AXValue, CGEventPostToPid, Chrome DOM; never move physical cursor)",
+            )
+            p_org.add_argument(
+                "--allow-cursor",
+                "--allow-focus-steal",
+                dest="allow_focus_steal",
+                action="store_true",
+                help="Allow physical Quartz cursor/focus fallback on background windows when human HID is idle",
+            )
             p_org.add_argument("--daemon", dest="daemon", action="store_true", help="Run warm Unix socket daemon (~/.whole_body_compute/foveal.sock) + default-on AmbientWorkflowObserver")
             p_org.add_argument("--no-ambient", dest="no_ambient", action="store_true", help="Disable passive AmbientWorkflowObserver when running `body eyes --daemon`")
         if organ_key in ("memory", "hippocampus"):

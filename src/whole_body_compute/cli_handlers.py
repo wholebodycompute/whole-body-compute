@@ -1043,9 +1043,13 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
                 "wait_reply": getattr(args, "wait_reply", None),
                 "read_last": getattr(args, "read_last", False),
             }
+            if getattr(args, "allow_focus_steal", False):
+                req_payload["allow_focus_steal"] = True
+            if getattr(args, "no_cursor", False):
+                req_payload["no_cursor"] = True
 
             socket_resp = send_foveal_socket_request(req_payload)
-            if socket_resp is not None:
+            if socket_resp is not None and socket_resp.get("status") != "error":
                 if getattr(args, "json", False):
                     socket_resp["organ_num"] = organ_num
                     socket_resp["name"] = organ_name
@@ -1061,6 +1065,12 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
                     elif socket_resp.get("last_message"):
                         print(f"Last Message: \"{socket_resp.get('last_message')}\"")
                 return 0
+
+            capture_kwargs = {}
+            if getattr(args, "allow_focus_steal", False):
+                capture_kwargs["allow_focus_steal"] = True
+            if getattr(args, "no_cursor", False):
+                capture_kwargs["no_cursor"] = True
 
             snap = FovealVisionEngine.capture_snapshot(
                 pid=getattr(args, "pid", None),
@@ -1084,6 +1094,7 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
                 submit=getattr(args, "submit", False),
                 wait_reply=getattr(args, "wait_reply", None),
                 read_last=getattr(args, "read_last", False),
+                **capture_kwargs,
             )
             if getattr(args, "json", False):
                 res = snap.to_dict()
