@@ -786,12 +786,29 @@ class FovealVisionEngine:
             return False, guard
 
         has_live_ax = cls._snapshot_has_live_ax(snapshot=snapshot, element=element)
-        if has_live_ax:
-            if not guard["is_target_frontmost"] and not guard["can_focus_steal"]:
-                return False, guard
-            if guard["human_active_recently"] and not allow_focus_steal:
-                return False, guard
+        if has_live_ax and not allow_focus_steal:
+            return False, guard
         return True, guard
+
+    @classmethod
+    def _is_background_chromium_tab(
+        cls,
+        snapshot: Optional[FovealWindowSnapshot] = None,
+        app_name: Optional[str] = None,
+        window_title: Optional[str] = None,
+    ) -> bool:
+        """
+        True when targeting a Chromium browser with an explicit `window_title` query
+        (e.g. 'PostHog') that is NOT in the active AXWindow title (e.g. 'Instagram'),
+        meaning the target page lives in an inactive background browser tab.
+        """
+        raw_app = app_name or (snapshot.app_name if snapshot else None)
+        if not cls._resolve_chromium_app_name(raw_app):
+            return False
+        req_title = (window_title or "").strip()
+        if not req_title or not snapshot or not snapshot.window_title:
+            return False
+        return req_title.lower() not in snapshot.window_title.lower()
 
     @classmethod
     def _resolve_chromium_app_name(cls, app_name: Optional[str]) -> Optional[str]:
@@ -880,7 +897,21 @@ class FovealVisionEngine:
             "}"
             "if(p.op === 'scroll'){"
             "  const dy = (p.direction === 'down' || p.direction === 'bottom') ? (p.direction === 'bottom' ? 2400 : p.amount * 120) : (p.direction === 'top' ? -2400 : -p.amount * 120);"
+            "  const prevY = window.scrollY;"
             "  window.scrollBy({top: dy, behavior: 'instant'});"
+            "  if(window.scrollY === prevY){"
+            "    let bestSc = null; let bestArea = 0;"
+            "    for(const c of document.querySelectorAll('main,section,div,[role=\"main\"]')){"
+            "      if(c.scrollHeight > c.clientHeight + 10){"
+            "        const oy = window.getComputedStyle(c).overflowY;"
+            "        if(oy === 'auto' || oy === 'scroll' || oy === 'overlay'){"
+            "          const a = c.clientWidth * c.clientHeight;"
+            "          if(a > bestArea){ bestArea = a; bestSc = c; }"
+            "        }"
+            "      }"
+            "    }"
+            "    if(bestSc){ bestSc.scrollTop += dy; }"
+            "  }"
             "  return 'scrolled_bg_dom';"
             "}"
             "let el = null;"
@@ -929,12 +960,11 @@ class FovealVisionEngine:
         )
         applescript = (
             "on run argv\n"
-            "    set browserApp to item 1 of argv\n"
             "    set titleQuery to item 2 of argv\n"
             "    set jsCode to item 3 of argv\n"
-            "    tell application browserApp\n"
-            "        if (count of windows) is 0 then return \"no_window\"\n"
-            "        if titleQuery is not \"\" then\n"
+            f'    tell application "{browser_app}"\n'
+            '        if (count of windows) is 0 then return "no_window"\n'
+            '        if titleQuery is not "" then\n'
             "            repeat with w in windows\n"
             "                repeat with t in tabs of w\n"
             "                    if ((title of t as text) contains titleQuery) or ((URL of t as text) contains titleQuery) then\n"
@@ -1087,12 +1117,40 @@ class FovealVisionEngine:
         snapshot: Optional[FovealWindowSnapshot] = None,
         allow_focus_steal: bool = False,
         no_cursor: bool = False,
+        app_name: Optional[str] = None,
+        window_title: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Click element by exact ID ('e1') or substring match against title/label/value/role.
         First attempts native AXPress action, then background Chromium DOM click if needed;
         falls back to Quartz CGEvent coordinate click only when safe under _can_use_global_cursor.
         """
+        eff_app = app_name or (snapshot.app_name if snapshot else None)
+        eff_win = window_title or (snapshot.window_title if snapshot else None)
+
+        # If targeting a hidden background browser tab, drive that tab's DOM directly without touching the active tab
+        if not isinstance(target, FovealUIElement) and cls._is_background_chromium_tab(
+            snapshot=snapshot, app_name=eff_app, window_title=window_title
+        ):
+            dom_res = cls._chrome_background_dom_actuate(
+                "click",
+                snapshot=snapshot,
+                app_name=eff_app,
+                window_title=window_title,
+                label_override=str(target).strip(),
+            )
+            if dom_res.get("ok"):
+                return {
+                    "status": "success",
+                    "method": "ChromeBackgroundDOM",
+                    "element_id": None,
+                    "role": "DOMElement",
+                    "label": str(target).strip(),
+                    "center": [0.0, 0.0],
+                    "cursor_moved": False,
+                    "summary": f"Clicked '{target}' in background {dom_res.get('browser', 'Chromium')} tab ({window_title}) via DOM",
+                }
+
         element: Optional[FovealUIElement] = None
         if isinstance(target, FovealUIElement):
             element = target
@@ -1113,6 +1171,25 @@ class FovealVisionEngine:
                         break
 
         if element is None:
+            if not isinstance(target, FovealUIElement) and cls._resolve_chromium_app_name(eff_app):
+                dom_res = cls._chrome_background_dom_actuate(
+                    "click",
+                    snapshot=snapshot,
+                    app_name=eff_app,
+                    window_title=eff_win,
+                    label_override=str(target).strip(),
+                )
+                if dom_res.get("ok"):
+                    return {
+                        "status": "success",
+                        "method": "ChromeBackgroundDOM",
+                        "element_id": None,
+                        "role": "DOMElement",
+                        "label": str(target).strip(),
+                        "center": [0.0, 0.0],
+                        "cursor_moved": False,
+                        "summary": f"Clicked '{target}' via background {dom_res.get('browser', 'Chromium')} DOM",
+                    }
             return {
                 "status": "error",
                 "method": "none",
@@ -1265,7 +1342,7 @@ class FovealVisionEngine:
         """
         target_pid = snapshot.pid if snapshot and snapshot.pid else pid
         target_app = snapshot.app_name if snapshot and snapshot.app_name else app_name
-        target_win = snapshot.window_title if snapshot and snapshot.window_title else window_title
+        target_win = window_title or (snapshot.window_title if snapshot and snapshot.window_title else None)
 
         current_snap = snapshot
         if current_snap is None and (target_pid or target_app or target_win):
@@ -1279,8 +1356,55 @@ class FovealVisionEngine:
             except Exception:
                 pass
 
+        if cls._is_background_chromium_tab(snapshot=current_snap, app_name=target_app, window_title=window_title):
+            dom_res = cls._chrome_background_dom_actuate(
+                "hover",
+                snapshot=current_snap,
+                app_name=target_app,
+                window_title=window_title,
+                label_override=str(target).strip(),
+            )
+            if dom_res.get("ok"):
+                return {
+                    "status": "success",
+                    "action": "hover",
+                    "method": "ChromeBackgroundDOM_hover",
+                    "cursor_moved": False,
+                    "target": str(target),
+                    "element_id": None,
+                    "role": "DOMElement",
+                    "label": str(target).strip(),
+                    "coordinates": [0.0, 0.0],
+                    "summary": f"Hovered over '{target}' in background {dom_res.get('browser', 'Chromium')} tab ({window_title})",
+                    "tactile_delta": {"verified": True, "delta_count": 0},
+                    "post_snapshot": None,
+                }
+
         cx, cy, elem = cls._resolve_target_coordinates(target, snapshot=current_snap)
         if cx is None or cy is None:
+            if cls._resolve_chromium_app_name(target_app):
+                dom_res = cls._chrome_background_dom_actuate(
+                    "hover",
+                    snapshot=current_snap,
+                    app_name=target_app,
+                    window_title=target_win,
+                    label_override=str(target).strip(),
+                )
+                if dom_res.get("ok"):
+                    return {
+                        "status": "success",
+                        "action": "hover",
+                        "method": "ChromeBackgroundDOM_hover",
+                        "cursor_moved": False,
+                        "target": str(target),
+                        "element_id": None,
+                        "role": "DOMElement",
+                        "label": str(target).strip(),
+                        "coordinates": [0.0, 0.0],
+                        "summary": f"Hovered over '{target}' via background {dom_res.get('browser', 'Chromium')} DOM",
+                        "tactile_delta": {"verified": True, "delta_count": 0},
+                        "post_snapshot": None,
+                    }
             return {
                 "status": "error",
                 "action": "hover",
@@ -1398,7 +1522,7 @@ class FovealVisionEngine:
         """
         target_pid = snapshot.pid if snapshot and snapshot.pid else pid
         target_app = snapshot.app_name if snapshot and snapshot.app_name else app_name
-        target_win = snapshot.window_title if snapshot and snapshot.window_title else window_title
+        target_win = window_title or (snapshot.window_title if snapshot and snapshot.window_title else None)
 
         current_snap = snapshot
         if current_snap is None and (target_pid or target_app or target_win):
@@ -1412,8 +1536,55 @@ class FovealVisionEngine:
             except Exception:
                 pass
 
+        if cls._is_background_chromium_tab(snapshot=current_snap, app_name=target_app, window_title=window_title):
+            dom_res = cls._chrome_background_dom_actuate(
+                "contextmenu",
+                snapshot=current_snap,
+                app_name=target_app,
+                window_title=window_title,
+                label_override=str(target).strip(),
+            )
+            if dom_res.get("ok"):
+                return {
+                    "status": "success",
+                    "action": "right_click",
+                    "method": "ChromeBackgroundDOM_contextmenu",
+                    "cursor_moved": False,
+                    "target": str(target),
+                    "element_id": None,
+                    "role": "DOMElement",
+                    "label": str(target).strip(),
+                    "coordinates": [0.0, 0.0],
+                    "summary": f"Right-clicked '{target}' in background {dom_res.get('browser', 'Chromium')} tab ({window_title})",
+                    "tactile_delta": {"verified": True, "delta_count": 0},
+                    "post_snapshot": None,
+                }
+
         cx, cy, elem = cls._resolve_target_coordinates(target, snapshot=current_snap)
         if cx is None or cy is None:
+            if cls._resolve_chromium_app_name(target_app):
+                dom_res = cls._chrome_background_dom_actuate(
+                    "contextmenu",
+                    snapshot=current_snap,
+                    app_name=target_app,
+                    window_title=target_win,
+                    label_override=str(target).strip(),
+                )
+                if dom_res.get("ok"):
+                    return {
+                        "status": "success",
+                        "action": "right_click",
+                        "method": "ChromeBackgroundDOM_contextmenu",
+                        "cursor_moved": False,
+                        "target": str(target),
+                        "element_id": None,
+                        "role": "DOMElement",
+                        "label": str(target).strip(),
+                        "coordinates": [0.0, 0.0],
+                        "summary": f"Right-clicked '{target}' via background {dom_res.get('browser', 'Chromium')} DOM",
+                        "tactile_delta": {"verified": True, "delta_count": 0},
+                        "post_snapshot": None,
+                    }
             return {
                 "status": "error",
                 "action": "right_click",
@@ -2152,6 +2323,8 @@ class FovealVisionEngine:
         snapshot: Optional[FovealWindowSnapshot] = None,
         allow_focus_steal: bool = False,
         no_cursor: bool = False,
+        app_name: Optional[str] = None,
+        window_title: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Scroll target window/view up/down/top/bottom via native AXScroll actions, background Chrome DOM,
@@ -2163,6 +2336,36 @@ class FovealVisionEngine:
         pid_key_ok = False
         quartz_ok = False
         ax_scroll_act = "AXScrollDownByPage" if d in ("down", "bottom") else "AXScrollUpByPage"
+
+        # If targeting a hidden background browser tab, scroll only that tab's DOM without scrolling the active tab
+        if cls._is_background_chromium_tab(snapshot=snapshot, app_name=app_name, window_title=window_title):
+            dom_res = cls._chrome_background_dom_actuate(
+                "scroll",
+                snapshot=snapshot,
+                app_name=app_name,
+                window_title=window_title,
+                direction=d,
+                amount=amount,
+            )
+            if dom_res.get("ok"):
+                return {
+                    "status": "success",
+                    "action": "scroll",
+                    "direction": d,
+                    "ax_scroll": False,
+                    "bg_dom_scroll": True,
+                    "quartz_scroll": False,
+                    "cursor_moved": False,
+                    "summary": f"Scrolled {d} in background {dom_res.get('browser', 'Chromium')} tab ({window_title})",
+                }
+            return {
+                "status": "error",
+                "action": "scroll",
+                "direction": d,
+                "cursor_moved": False,
+                "error": f"Background tab scroll failed: {dom_res.get('reason', 'unknown')}{dom_res.get('hint', '')}",
+                "summary": f"Failed scrolling background tab '{window_title}'",
+            }
 
         if snapshot:
             for el in snapshot.interactive_elements:
@@ -2733,7 +2936,10 @@ class FovealVisionEngine:
         actions_taken = []
         target_pid = snapshot.pid if snapshot and snapshot.pid else pid
         target_app = snapshot.app_name if snapshot and snapshot.app_name else app_name
-        target_win = snapshot.window_title if snapshot and snapshot.window_title else window_title
+        target_win = window_title or (snapshot.window_title if snapshot and snapshot.window_title else None)
+        is_bg_tab = bool(
+            window_title and cls._is_background_chromium_tab(snapshot=snapshot, app_name=target_app, window_title=window_title)
+        )
 
         cursor_kwargs: Dict[str, Any] = {}
         if allow_focus_steal:
@@ -2772,7 +2978,16 @@ class FovealVisionEngine:
         # 3. Element Click
         click_action = None
         if click:
-            click_action = cls.click_element(click, snapshot=snapshot, **cursor_kwargs)
+            if is_bg_tab:
+                click_action = cls.click_element(
+                    click,
+                    snapshot=snapshot,
+                    app_name=target_app,
+                    window_title=window_title,
+                    **cursor_kwargs,
+                )
+            else:
+                click_action = cls.click_element(click, snapshot=snapshot, **cursor_kwargs)
             actions_taken.append(click_action)
 
         # 4. Right-Click
@@ -2846,7 +3061,18 @@ class FovealVisionEngine:
 
         # 10. Scroll
         if scroll:
-            actions_taken.append(cls.scroll(scroll, snapshot=snapshot, **cursor_kwargs))
+            if is_bg_tab:
+                actions_taken.append(
+                    cls.scroll(
+                        scroll,
+                        snapshot=snapshot,
+                        app_name=target_app,
+                        window_title=window_title,
+                        **cursor_kwargs,
+                    )
+                )
+            else:
+                actions_taken.append(cls.scroll(scroll, snapshot=snapshot, **cursor_kwargs))
 
         # 11. Compound Macro Chain
         if chain:
@@ -3018,9 +3244,16 @@ class FovealVisionEngine:
         """
         t0 = time.perf_counter()
 
-        # Calibrated default max_elements: 10 if standard/unfiltered, 40 if target app/title/filter requested, 250 for read_last/wait_reply/paste_text/type_text/chain/attach
+        # Calibrated default max_elements: 10 if standard/unfiltered, 40 if target app/title/filter requested, 150 for click/hover/right_click, 250 for read_last/wait_reply/paste_text/type_text/chain/attach
         if max_elements is None:
-            max_elements = 250 if (read_last or wait_reply or paste_text or type_text or chain or attach) else (40 if (app_name or pid or window_title_query or filter_query or include_floating or include_status_bar) else 10)
+            if read_last or wait_reply or paste_text or type_text or chain or attach:
+                max_elements = 250
+            elif click or click_xy or hover or right_click:
+                max_elements = 150
+            elif app_name or pid or window_title_query or filter_query or include_floating or include_status_bar:
+                max_elements = 40
+            else:
+                max_elements = 10
         elif (read_last or wait_reply or paste_text or type_text or chain or attach) and max_elements < 250:
             max_elements = 250
 
@@ -3406,7 +3639,7 @@ class FovealVisionEngine:
                     snapshot=snap,
                     app_name=resolved_app_name,
                     pid=app_pid,
-                    window_title=window_title,
+                    window_title=window_title_query or window_title,
                     allow_focus_steal=allow_focus_steal,
                     no_cursor=no_cursor,
                 )

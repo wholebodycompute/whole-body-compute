@@ -278,3 +278,64 @@ def test_cli_no_cursor_flag_locks_zero_cursor_even_when_frontmost(monkeypatch: p
             assert rc == 0
             _, kwargs = mock_cap.call_args
             assert kwargs["no_cursor"] is True
+
+
+def test_background_chrome_tab_isolation_when_another_tab_is_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    When the user is actively on another Chrome tab (e.g. Instagram) and `body hands --title PostHog`
+    clicks/hovers/scrolls PostHog, it must drive ONLY the hidden PostHog tab via DOM and never touch
+    the active Instagram tab's AX elements or the physical cursor.
+    """
+    mock_quartz, mock_appkit = _mock_background_workspace(frontmost_pid=15741, human_idle_sec=5.0)
+    mock_as = MagicMock()
+    _install_hid_mocks(monkeypatch, mock_as, mock_quartz, mock_appkit)
+
+    ig_btn = FovealUIElement(
+        role="AXButton",
+        label="Filter",  # Same label exists on active Instagram tab - must NOT be AXPressed!
+        id="e10",
+        bbox=(500.0, 300.0, 80.0, 30.0),
+        raw_element=MagicMock(),
+    )
+    ig_web = FovealUIElement(
+        role="AXWebArea",
+        label="Create new post - Instagram",
+        id="e1",
+        bbox=(0.0, 80.0, 1440.0, 820.0),
+        raw_element=MagicMock(),
+    )
+    active_ig_snap = FovealWindowSnapshot(
+        app_name="Google Chrome",
+        bundle_id="com.google.Chrome",
+        pid=15741,
+        window_title="Create new post - Instagram - Google Chrome",
+        interactive_elements=[ig_web, ig_btn],
+    )
+
+    with patch.object(FovealVisionEngine, "capture_snapshot", return_value=active_ig_snap):
+        with patch("subprocess.run") as mock_subproc:
+            mock_subproc.return_value = MagicMock(returncode=0, stdout="clicked_bg_dom\n", stderr="")
+            res_click = FovealVisionEngine.actuate(
+                click="Filter",
+                snapshot=active_ig_snap,
+                app_name="Google Chrome",
+                window_title="PostHog",
+            )
+            assert res_click["status"] == "success"
+            assert res_click["actions"][0]["method"] == "ChromeBackgroundDOM"
+            assert res_click["actions"][0]["cursor_moved"] is False
+            assert not mock_as.AXUIElementPerformAction.called
+            assert not mock_quartz.CGEventPost.called
+            assert mock_subproc.call_args[0][0][3] == "PostHog"
+
+            mock_subproc.return_value = MagicMock(returncode=0, stdout="scrolled_bg_dom\n", stderr="")
+            res_scroll = FovealVisionEngine.actuate(
+                scroll="down",
+                snapshot=active_ig_snap,
+                app_name="Google Chrome",
+                window_title="PostHog",
+            )
+            assert res_scroll["status"] == "success"
+            assert res_scroll["actions"][0]["bg_dom_scroll"] is True
+            assert not mock_as.AXUIElementPerformAction.called
+            assert not mock_quartz.CGEventPost.called
