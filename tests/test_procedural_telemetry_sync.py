@@ -133,6 +133,8 @@ def test_flush_outbox_transmits_and_stamps_synced_at(tmp_path: Path, monkeypatch
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
     monkeypatch.delenv("BODY_TELEMETRY", raising=False)
     monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("WBC_TELEMETRY_DISABLED", raising=False)
 
     card1 = {"signature_hash": "card_one", "card_type": "compiler_ir_card", "recipe_id": "rec_one"}
     card2 = {"signature_hash": "card_two", "card_type": "router_habit_card", "intent_domain": "SHELL"}
@@ -331,6 +333,8 @@ def test_track_wbc_event_and_usage_stats_cli(
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
     monkeypatch.delenv("BODY_TELEMETRY", raising=False)
     monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("WBC_TELEMETRY_DISABLED", raising=False)
 
     assert DEFAULT_POSTHOG_API_KEY == "phc_D3TxQWXwnd9Z6wBBK3DpnsdKQAHdLpSSMxup4qL8djc2"
     assert get_usage_stats_path() == stats_file
