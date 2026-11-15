@@ -27,6 +27,7 @@ dist/
 *.db-wal
 *.jsonl
 .env
+.whole_body_compute/
 .voicefi/
 .agents/
 
@@ -44,6 +45,7 @@ legal/
 legal/*.md
 
 # Private credentials & runtime telemetry
+.whole_body_compute/license.json
 .voicefi/license.json
 .agents/session_telemetry.jsonl
 

@@ -21,6 +21,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
 logger = logging.getLogger(__name__)
 
 # Fallback types for PyObjC
@@ -115,14 +117,20 @@ def build_accessibility_grounding_prompt(snapshot: AccessibilitySnapshot) -> str
 
 class ScreenBridgeManager:
     """
-    Manages screen capture, accessibility grounding, and a local ring buffer (~/.voicefi/frames/).
+    Manages screen capture, accessibility grounding, and a local ring buffer (~/.whole_body_compute/frames/).
     Provides on-demand capture with caching, app-switch triggers, and sensitive field redaction.
     """
 
-    DEFAULT_DIR = Path.home() / ".voicefi" / "frames"
+    _INITIAL_DEFAULT_DIR = get_wbc_data_dir() / "frames"
+    DEFAULT_DIR = _INITIAL_DEFAULT_DIR
 
     def __init__(self, storage_dir: Optional[Path] = None, max_frames: int = 10):
-        self.storage_dir = Path(storage_dir) if storage_dir else self.DEFAULT_DIR
+        if storage_dir is not None:
+            self.storage_dir = Path(storage_dir)
+        elif self.DEFAULT_DIR != self._INITIAL_DEFAULT_DIR:
+            self.storage_dir = self.DEFAULT_DIR
+        else:
+            self.storage_dir = get_wbc_data_dir() / "frames"
         self.max_frames = max(3, max_frames)
         self._lock = threading.Lock()
         self._last_capsule: Optional[ScreenFrameCapsule] = None

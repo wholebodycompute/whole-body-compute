@@ -262,7 +262,7 @@ def inspect_shell_command_bloat(cmd_line: str) -> Dict[str, Any]:
         cmd_idx = 0
         while cmd_idx < len(tokens):
             tok = tokens[cmd_idx]
-            if "=" in tok and not tok.startswith("-") and not Path(tok).is_file():
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
                 cmd_idx += 1
                 continue
             if tok in ("sudo", "nohup", "time"):
@@ -277,16 +277,66 @@ def inspect_shell_command_bloat(cmd_line: str) -> Dict[str, Any]:
         base_cmd = Path(base_tok).name.lower()
         rest_tokens = tokens[cmd_idx + 1 :]
 
-        # 1. Pytest Test Floods without quiet flags
-        is_pytest_exec = is_strict_test and (
+        # 1. Pytest Test Floods without quiet flags (plus unbounded verbose `pytest -v/-vv` without file target in all sessions)
+        is_pytest_cmd = (
             base_cmd == "pytest"
             or (base_cmd.startswith("python") and len(rest_tokens) >= 2 and rest_tokens[0] == "-m" and rest_tokens[1] == "pytest")
             or (base_cmd in ("uv", "poetry") and len(rest_tokens) >= 2 and rest_tokens[0] == "run" and Path(rest_tokens[1]).name == "pytest")
         )
-        if is_pytest_exec:
-            has_quiet = any(t in ("-q", "--quiet") for t in rest_tokens)
-            has_help = any(t in ("-h", "--help", "-V", "--version") for t in rest_tokens)
-            if not has_quiet and not has_help:
+        if is_pytest_cmd and not has_bounding_filter:
+            pytest_args = (
+                rest_tokens[2:]
+                if (
+                    (base_cmd.startswith("python") and len(rest_tokens) >= 2 and rest_tokens[0] == "-m")
+                    or (base_cmd in ("uv", "poetry") and len(rest_tokens) >= 2 and rest_tokens[0] == "run")
+                )
+                else rest_tokens
+            )
+            has_quiet = any(t in ("-q", "--quiet") or (t.startswith("-") and not t.startswith("--") and "q" in t) for t in pytest_args)
+            has_help = any(t in ("-h", "--help", "-V", "--version", "--collect-only", "--co") for t in pytest_args)
+            has_verbose = any(
+                t == "--verbose"
+                or re.match(r"^-[vV]+$", t)
+                or (t.startswith("-") and not t.startswith("--") and "v" in t and len(t) <= 4)
+                for t in pytest_args
+            )
+            has_pytest_file_or_filter = False
+            skip_next = False
+            for idx_p, pt in enumerate(pytest_args):
+                if skip_next:
+                    skip_next = False
+                    continue
+                if pt in ("-k", "-m", "--maxfail", "-c", "-o", "--rootdir", "--confcutdir"):
+                    if pt in ("-k", "--maxfail"):
+                        has_pytest_file_or_filter = True
+                    skip_next = idx_p + 1 < len(pytest_args)
+                    continue
+                if pt.startswith(("-k=", "--maxfail=")) or pt in ("-x", "--exitfirst"):
+                    has_pytest_file_or_filter = True
+                    continue
+                if not pt.startswith("-"):
+                    if (
+                        "::" in pt
+                        or pt.endswith(".py")
+                        or "/" in pt
+                        or "\\" in pt
+                        or Path(pt).exists()
+                    ):
+                        has_pytest_file_or_filter = True
+                        break
+
+            is_unbounded_verbose_pytest = has_verbose and not has_pytest_file_or_filter
+            if (is_strict_test and not has_quiet and not has_help) or (is_unbounded_verbose_pytest and not has_quiet and not has_help):
+                cleaned_stage = re.sub(r"(?<=\s)(?:--verbose|-[vV]+)(?=\s|$)", "", first_stage)
+                cleaned_stage = re.sub(
+                    r"(?<=\s)-([A-Za-uw-z]+)[vV]+([A-Za-uw-z]*)(?=\s|$)",
+                    r"-\1\2",
+                    cleaned_stage,
+                )
+                cleaned_stage = re.sub(r"\s{2,}", " ", cleaned_stage).strip()
+                has_tb_flag = any(t.startswith("--tb=") or t == "--tb" for t in pytest_args)
+                suffix = "-q" if has_tb_flag else "-q --tb=short"
+                healed_pytest = f"{cleaned_stage} {suffix}"
                 return _build_healed_response(
                     category="test_flood",
                     target=first_stage,
@@ -297,7 +347,7 @@ def inspect_shell_command_bloat(cmd_line: str) -> Dict[str, Any]:
                         "👉 Action Required: Pass `-q --tb=short` to protect context (e.g. `pytest -q --tb=short` or `uv run pytest -q --tb=short`)."
                     ),
                     remedy="pytest -q --tb=short",
-                    first_healed=f"{first_stage} -q --tb=short",
+                    first_healed=healed_pytest,
                 )
 
         # 2. Directory Crawls (find, tree, ls -R)

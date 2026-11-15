@@ -108,7 +108,23 @@ def render_pro_upgrade_card(
 
 
 def cmd_immune(args: argparse.Namespace) -> int:
-    """Execute Organ 05 (Immune System) check with Context-Shield audit scorecard."""
+    """Execute Organ 05 (Immune System) check or `<5ms` Airlock Blob Vault lookup."""
+    blob_id = getattr(args, "blob", None)
+    is_json = getattr(args, "json", False)
+    if blob_id:
+        import sys
+        from whole_body_compute.organs.immune_vault import read_airlock_blob_slice
+
+        lines_spec = getattr(args, "lines", None)
+        res = read_airlock_blob_slice(blob_id=str(blob_id), lines_spec=lines_spec)
+        if is_json:
+            print(json.dumps(res, indent=2))
+        elif res.get("found"):
+            print(res["formatted"])
+        else:
+            print(f"❌ {res.get('error', 'Airlock blob not found')}", file=sys.stderr)
+        return 0 if res.get("found") else 1
+
     from whole_body_compute.organs.immune import (
         format_immune_scorecard_table,
         get_immune_pre_post_scorecard,
@@ -118,7 +134,6 @@ def cmd_immune(args: argparse.Namespace) -> int:
     window = getattr(args, "window", "all") or "all"
     show_tools = getattr(args, "tools", False)
     show_blocked = getattr(args, "blocked", False)
-    is_json = getattr(args, "json", False)
 
     sc = get_immune_pre_post_scorecard(
         limit=50,
@@ -598,7 +613,7 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
             )
         return 0
 
-    if cmd in ("license", "tier", "pricing", "upgrade", "plan"):
+    if cmd in ("license", "tier", "pricing", "upgrade", "plan", "activate"):
         from whole_body_compute.license import (
             POLAR_CHECKOUT_URLS,
             LicenseManager,
@@ -608,7 +623,7 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
 
         mgr = LicenseManager()
         set_t = getattr(args, "set_tier", None)
-        act_key = getattr(args, "activate_key", None)
+        act_key = getattr(args, "activate_key", None) or getattr(args, "license_key_pos", None)
         polar_org = getattr(args, "polar_org_id", None)
         deact = getattr(args, "deactivate", False)
         offline = getattr(args, "offline", False)

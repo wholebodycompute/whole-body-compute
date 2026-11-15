@@ -208,7 +208,7 @@ class LocalSymbolIndex:
                 )
                 """
             )
-            # Seamless schema auto-migration for existing ~/.voicefi/symbols.db files
+            # Seamless schema auto-migration for existing ~/.whole_body_compute/symbols.db files
             migrations = [
                 "ALTER TABLE file_meta ADD COLUMN size INTEGER DEFAULT 0",
                 "ALTER TABLE files_meta ADD COLUMN size INTEGER DEFAULT 0",

@@ -43,6 +43,20 @@ from whole_body_compute.doctor import (
 
 def main(argv: Optional[List[str]] = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    if (
+        len(raw_argv) >= 2
+        and raw_argv[0] == "immune"
+        and any(tok == "--blob" or tok.startswith("--blob=") for tok in raw_argv[1:])
+        and not any(tok in ("-h", "--help") for tok in raw_argv[1:])
+    ):
+        fast_p = argparse.ArgumentParser(prog="body immune", add_help=False)
+        fast_p.add_argument("--blob", dest="blob", default=None)
+        fast_p.add_argument("--lines", dest="lines", default=None)
+        fast_p.add_argument("--json", action="store_true")
+        known_args, unknown = fast_p.parse_known_args(raw_argv[1:])
+        if not unknown and known_args.blob:
+            return cmd_immune(known_args)
+
     parser = build_parser()
     args = parser.parse_args(argv)
     if "--json" in raw_argv:
@@ -63,7 +77,7 @@ def _dispatch_main(
     args: argparse.Namespace,
     parser: argparse.ArgumentParser,
 ) -> int:
-    if cmd != "immune-hook":
+    if cmd != "immune-hook" and not (cmd == "immune" and getattr(args, "blob", None)):
         try:
             from whole_body_compute.procedural_telemetry import (
                 maybe_emit_first_run_telemetry_notice,
@@ -159,6 +173,11 @@ def _dispatch_main(
 
     if cmd == "checkpoint":
         return cmd_checkpoint(args)
+
+    if cmd in ("meeting", "meetings", "calls"):
+        from whole_body_compute.audio.meeting_memory import run_meeting_cli
+
+        return run_meeting_cli(args)
 
     if cmd in ("import-screenpipe", "import_screenpipe"):
         from pathlib import Path

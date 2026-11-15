@@ -3,15 +3,18 @@
 **Cut agent token burn and latency with zero accuracy loss on SWE-bench Verified.**  
 Whole Body Compute makes AI computing simpler, faster, and local: giving Claude Code, Cursor, Windsurf, Cline, Goose, and Antigravity a `<3ms` AST context shield, native macOS vision, and on-device memory right on your Mac (with cross-platform Blood-Brain Barrier & FinOps audit support on Linux).
 
-[Open-Core Spec (`wholebodycompute.com/open-core`)](https://wholebodycompute.com/open-core) · [Zero-Install Spend Audit (`audit.py`)](https://wholebodycompute.com/audit.py) · [Commercial Platform (`wholebodycompute.com`)](https://wholebodycompute.com) · [Benchmarks (`benchmarks/`)](https://github.com/wholebodycompute/whole-body-compute/blob/main/benchmarks/README.md) · [Architecture Wiki](https://github.com/wholebodycompute/whole-body-compute/blob/main/docs/WIKI_AND_GLOSSARY.md)
+[Open-Core Spec (`wholebodycompute.com/open-core`)](https://wholebodycompute.com/open-core) · [Zero-Install Audit Source (`audit.py`)](https://wholebodycompute.com/audit.py) · [Commercial Platform (`wholebodycompute.com`)](https://wholebodycompute.com) · [Benchmarks (`benchmarks/`)](https://github.com/wholebodycompute/whole-body-compute/blob/main/benchmarks/README.md) · [Architecture Wiki](https://github.com/wholebodycompute/whole-body-compute/blob/main/docs/WIKI_AND_GLOSSARY.md)
 
 ---
 
 ## Quickstart
 
 ```bash
+# Step 0 (Optional, <1s, zero install): Audit your last 30 days of local agent token spend
+curl -sSL https://wholebodycompute.com/audit/readme | python3
+
 # Option 1a: 1-line installer (macOS, Linux & Windows WSL2 Ubuntu)
-curl -fsSL https://wholebodycompute.com/begin | sh
+curl -fsSL https://wholebodycompute.com/begin/readme | sh
 
 # Option 1b: 1-line installer (Windows PowerShell)
 irm https://wholebodycompute.com/begin.ps1 | iex
@@ -26,10 +29,10 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -e .
 body begin
 ```
 
-Or run a read-only 30-day token spend audit across your local agent logs with zero installation:
+Or inspect the standalone stdlib audit script directly before running (`https://wholebodycompute.com/audit.py`):
 
 ```bash
-curl -sSL https://wholebodycompute.com/audit.py | python3
+curl -sSL https://wholebodycompute.com/audit/readme | python3
 ```
 
 ---

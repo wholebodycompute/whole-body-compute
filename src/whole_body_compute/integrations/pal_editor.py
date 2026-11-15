@@ -67,6 +67,7 @@ from whole_body_compute.integrations.pal_editor_rules import (
     pal_log,
     parse_fast_path_edit_instruction,
     parse_spoken_number,
+    resolve_active_editing_journal,
     resolve_spoken_replacement,
 )
 
@@ -918,7 +919,7 @@ class PalEditSession:
     def remove_step(
         self, step_number: int, auto_reload_browser: bool = True
     ) -> List[PalEditRecord]:
-        """Called when the user clicks '×' on a step in the Granola panel."""
+        """Called when the user clicks '×' on a step in the Pal training panel."""
         with self._lock:
             target = next((r for r in self.records if r.step_number == step_number), None)
             if (
@@ -1424,7 +1425,8 @@ class PalEditSession:
 
     def _write_journal(self, active: bool = True) -> None:
         try:
-            ACTIVE_EDITING_JOURNAL.parent.mkdir(parents=True, exist_ok=True)
+            journal_path = resolve_active_editing_journal(ACTIVE_EDITING_JOURNAL)
+            journal_path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "active": active,
                 "pid": os.getpid(),
@@ -1433,24 +1435,26 @@ class PalEditSession:
                 "updated_at": time.time(),
                 "records": [r.to_public_dict() for r in self.records],
             }
-            ACTIVE_EDITING_JOURNAL.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            journal_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except Exception:
             pass
 
     @classmethod
     def _clear_journal(cls) -> None:
         try:
-            if ACTIVE_EDITING_JOURNAL.exists():
-                ACTIVE_EDITING_JOURNAL.unlink()
+            journal_path = resolve_active_editing_journal(ACTIVE_EDITING_JOURNAL)
+            if journal_path.exists():
+                journal_path.unlink()
         except Exception:
             pass
 
     @classmethod
     def load_journal(cls) -> Optional[Dict[str, Any]]:
         try:
-            if not ACTIVE_EDITING_JOURNAL.exists():
+            journal_path = resolve_active_editing_journal(ACTIVE_EDITING_JOURNAL)
+            if not journal_path.exists():
                 return None
-            data = json.loads(ACTIVE_EDITING_JOURNAL.read_text(encoding="utf-8"))
+            data = json.loads(journal_path.read_text(encoding="utf-8"))
             if not data.get("active"):
                 return None
             if time.time() - float(data.get("updated_at", 0)) > 3600:

@@ -32,13 +32,14 @@ from whole_body_compute.integrations.pal_workflow import (
     PalWorkflowRecipe,
 )
 from whole_body_compute.license import POLAR_CHECKOUT_URLS, LicenseManager
+from whole_body_compute.procedural_telemetry import get_wbc_data_dir
 
 
 def _get_default_skill_export_ledger_path() -> Path:
     env_p = os.environ.get("WBC_SKILL_EXPORT_LEDGER_PATH")
     if env_p:
         return Path(env_p).expanduser()
-    return (Path.home() / ".voicefi" / "skill_export_ledger.json").expanduser()
+    return (get_wbc_data_dir() / "skill_export_ledger.json").expanduser()
 
 
 def _slugify_skill_name(name: str) -> str:

@@ -2,7 +2,6 @@
 # Whole Body Compute - 60-Second Sovereign Agent Runtime Installer (PowerShell)
 # Hosted at:
 #   irm https://wholebodycompute.com/begin.ps1 | iex
-#   irm https://wholebodycompute.org/begin.ps1 | iex
 # ==============================================================================
 $ErrorActionPreference = "Stop"
 

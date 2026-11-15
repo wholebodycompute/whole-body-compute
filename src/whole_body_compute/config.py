@@ -114,7 +114,7 @@ class TTSConfig(BaseModel):
     rate: Optional[int] = 200
     volume: float = 1.0
     streaming: bool = True
-    cache_dir: str = "~/.voicefi/cache/audio"
+    cache_dir: str = "~/.whole_body_compute/cache/audio"
     elevenlabs_api_key: Optional[str] = ""
     elevenlabs_voice_id: Optional[str] = "21m00Tcm4TlvDq8ikWAM"
     gemini_api_key: Optional[str] = ""
@@ -724,15 +724,19 @@ class ProActiveFeedbackLoopConfig(BaseModel):
 
 
 class ProActiveMeetingAssistantConfig(BaseModel):
-    enabled: bool = False
+    enabled: bool = True
+    auto_capture_on_call: bool = True
+    capture_system_audio: bool = True
+    min_active_seconds: float = 2.5
+    cooldown_seconds: float = 8.0
     auto_notes: bool = True
     auto_dispatch_subagents: bool = True
     auto_execute_actions: bool = True
     sync_linear: bool = True
     post_slack: bool = False
     default_slack_channel: str = "#general"
-    notes_dir: str = "~/.voicefi/meetings"
-    granola_formatting: bool = True
+    notes_dir: str = "~/.whole_body_compute/meetings"
+    structured_formatting: bool = True
     energy_threshold: float = 0.005
     silence_duration: float = 1.2
     max_utterance_seconds: float = 15.0
@@ -789,7 +793,7 @@ class LocalModelConfig(BaseModel):
     intent_routing: bool = False  # Opt-in: offline 'Hey Viv' intent classification & agent router
     airgapped_memos: bool = False  # Opt-in: 100% private local vault memo & meeting structuring
     measure_latency: bool = (
-        True  # Real-time TTFB, throughput, and duration tracking to ~/.voicefi/benchmarks.json
+        True  # Real-time TTFB, throughput, and duration tracking to ~/.whole_body_compute/benchmarks.json
     )
 
 
@@ -1040,22 +1044,31 @@ VoiceFiConfig = VoiceFiConfig
 
 
 def get_default_config_path() -> Path:
-    """Return the default configuration path (~/.voicefi/config.yaml)."""
-    return Path.home() / ".voicefi" / "config.yaml"
+    """Return the default configuration path (~/.whole_body_compute/config.yaml)."""
+    from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
+    return get_wbc_data_dir() / "config.yaml"
 
 
 def find_config_path(custom_path: Optional[str] = None) -> Optional[Path]:
-    """Find the configuration file by checking candidate paths."""
+    """Find the configuration file by checking WBC config first, with read-only VoiceFi fallback."""
     if custom_path and Path(custom_path).is_file():
         return Path(custom_path)
 
-    env_path = os.getenv("VOICEFI_CONFIG")
-    if env_path and Path(env_path).is_file():
-        return Path(env_path)
+    for env_key in ("WBC_CONFIG", "VOICEFI_CONFIG"):
+        env_path = os.getenv(env_key)
+        if env_path and Path(env_path).is_file():
+            return Path(env_path)
 
     home_path = get_default_config_path()
     if home_path.is_file():
         return home_path
+
+    # Cross-product read-only fallback to standalone VoiceFi config if present
+    if "WBC_DATA_DIR" not in os.environ:
+        voicefi_path = Path.home() / ".voicefi" / "config.yaml"
+        if voicefi_path.is_file():
+            return voicefi_path
 
     local_path = Path("config.yaml")
     if local_path.is_file():
@@ -1092,8 +1105,12 @@ def load_config(custom_path: Optional[str] = None) -> VoiceFiConfig:
 
 
 def save_config(config: VoiceFiConfig, target_path: Optional[Union[Path, str]] = None) -> Path:
-    """Save configuration to the designated YAML file."""
-    dest = Path(target_path) if target_path else (find_config_path() or get_default_config_path())
+    """Save configuration to the designated YAML file without clobbering standalone ~/.voicefi/config.yaml."""
+    if target_path:
+        dest = Path(target_path)
+    else:
+        env_cfg = os.getenv("WBC_CONFIG") or os.getenv("VOICEFI_CONFIG")
+        dest = Path(env_cfg) if env_cfg else get_default_config_path()
     dest.parent.mkdir(parents=True, exist_ok=True)
     with open(dest, "w", encoding="utf-8") as f:
         yaml.safe_dump(config.model_dump(), f, default_flow_style=False, sort_keys=False)
@@ -1119,9 +1136,13 @@ def resolve_gemini_api_key(config: Optional[VoiceFiConfig] = None) -> str:
     if config is not None or "PYTEST_CURRENT_TEST" in os.environ:
         return ""
 
+    from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
     candidate_envs = [
         Path.cwd() / ".env",
+        get_wbc_data_dir() / ".env",
         Path.home() / ".voicefi" / ".env",
+        Path.home() / "Projects" / "Whole Body Compute" / ".env",
         Path.home() / "Projects" / "VoiceFi" / ".env",
     ]
     for env_path in candidate_envs:
@@ -1158,9 +1179,13 @@ def resolve_openai_api_key(config: Optional[VoiceFiConfig] = None) -> str:
     if config is not None or "PYTEST_CURRENT_TEST" in os.environ:
         return ""
 
+    from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
     candidate_envs = [
         Path.cwd() / ".env",
+        get_wbc_data_dir() / ".env",
         Path.home() / ".voicefi" / ".env",
+        Path.home() / "Projects" / "Whole Body Compute" / ".env",
         Path.home() / "Projects" / "VoiceFi" / ".env",
     ]
     for env_path in candidate_envs:
@@ -1197,9 +1222,13 @@ def resolve_xai_api_key(config: Optional[VoiceFiConfig] = None) -> str:
     if config is not None or "PYTEST_CURRENT_TEST" in os.environ:
         return ""
 
+    from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
     candidate_envs = [
         Path.cwd() / ".env",
+        get_wbc_data_dir() / ".env",
         Path.home() / ".voicefi" / ".env",
+        Path.home() / "Projects" / "Whole Body Compute" / ".env",
         Path.home() / "Projects" / "VoiceFi" / ".env",
     ]
     for env_path in candidate_envs:

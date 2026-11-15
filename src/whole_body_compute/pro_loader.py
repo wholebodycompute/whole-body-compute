@@ -166,7 +166,7 @@ def _get_user_pro_site_packages() -> Path:
 
         return (get_wbc_data_dir() / "pro_site_packages").expanduser().resolve()
     except (ImportError, OSError, ValueError, RuntimeError):
-        return (Path.home() / ".voicefi" / "pro_site_packages").expanduser().resolve()
+        return (Path.home() / ".whole_body_compute" / "pro_site_packages").expanduser().resolve()
 
 
 def _ensure_pro_install_paths() -> None:

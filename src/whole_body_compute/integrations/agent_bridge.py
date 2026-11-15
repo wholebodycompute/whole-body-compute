@@ -7,7 +7,7 @@ all agent dispatches (Antigravity ↔ Claude Code ↔ Goose ↔ Codex ↔ Peer M
 Ensures bidirectional crumbs exist in:
 1. The target agent's received payload (structured breadcrumb header and reply footer).
 2. The source agent's response / CLI output (structured return receipt).
-3. The persistent bridge ledger (`~/.voicefi/agent_bridge_crumbs.json`) so either
+3. The persistent bridge ledger (`~/.whole_body_compute/agent_bridge_crumbs.json`) so either
    agent can discover and inspect linked conversations from either side.
 """
 
@@ -28,9 +28,48 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-DEFAULT_BRIDGE_CRUMBS_FILE = Path.home() / ".voicefi" / "agent_bridge_crumbs.json"
-DEFAULT_CONV_TITLES_FILE = Path.home() / ".voicefi" / "conv_titles.json"
-DEFAULT_SESSION_COOKIE_FILE = Path.home() / ".voicefi" / "active_session.json"
+from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
+_INITIAL_BRIDGE_CRUMBS_FILE = get_wbc_data_dir() / "agent_bridge_crumbs.json"
+DEFAULT_BRIDGE_CRUMBS_FILE = _INITIAL_BRIDGE_CRUMBS_FILE
+_INITIAL_CONV_TITLES_FILE = get_wbc_data_dir() / "conv_titles.json"
+DEFAULT_CONV_TITLES_FILE = _INITIAL_CONV_TITLES_FILE
+_INITIAL_SESSION_COOKIE_FILE = get_wbc_data_dir() / "active_session.json"
+DEFAULT_SESSION_COOKIE_FILE = _INITIAL_SESSION_COOKIE_FILE
+
+
+def _resolve_bridge_crumbs_file(crumbs_file: Optional[Path] = None) -> Path:
+    if crumbs_file is not None:
+        return crumbs_file
+    if DEFAULT_BRIDGE_CRUMBS_FILE != _INITIAL_BRIDGE_CRUMBS_FILE:
+        return DEFAULT_BRIDGE_CRUMBS_FILE
+    return get_wbc_data_dir() / "agent_bridge_crumbs.json"
+
+
+def _resolve_conv_titles_file(titles_file: Optional[Path] = None) -> Path:
+    if titles_file is not None:
+        return titles_file
+    if DEFAULT_CONV_TITLES_FILE != _INITIAL_CONV_TITLES_FILE:
+        return DEFAULT_CONV_TITLES_FILE
+    primary = get_wbc_data_dir() / "conv_titles.json"
+    if not primary.is_file() and "WBC_DATA_DIR" not in os.environ:
+        legacy = Path.home() / ".voicefi" / "conv_titles.json"
+        if legacy.is_file():
+            return legacy
+    return primary
+
+
+def _resolve_session_cookie_file(cookie_file: Optional[Path] = None) -> Path:
+    if cookie_file is not None:
+        return cookie_file
+    if DEFAULT_SESSION_COOKIE_FILE != _INITIAL_SESSION_COOKIE_FILE:
+        return DEFAULT_SESSION_COOKIE_FILE
+    primary = get_wbc_data_dir() / "active_session.json"
+    if not primary.is_file() and "WBC_DATA_DIR" not in os.environ:
+        legacy = Path.home() / ".voicefi" / "active_session.json"
+        if legacy.is_file():
+            return legacy
+    return primary
 
 _CRUMBS_LOCK = threading.RLock()
 
@@ -77,8 +116,8 @@ class AgentBridgeCrumb:
 
 
 def _load_known_conv_titles(titles_file: Optional[Path] = None) -> Dict[str, str]:
-    """Load persistent conv_id -> title mapping from ~/.voicefi/conv_titles.json."""
-    p = titles_file or DEFAULT_CONV_TITLES_FILE
+    """Load persistent conv_id -> title mapping from ~/.whole_body_compute/conv_titles.json."""
+    p = _resolve_conv_titles_file(titles_file)
     try:
         if p.is_file():
             data = json.loads(p.read_text(encoding="utf-8"))
@@ -91,7 +130,7 @@ def _load_known_conv_titles(titles_file: Optional[Path] = None) -> Dict[str, str
 
 def _load_active_session_cookie(cookie_file: Optional[Path] = None) -> Dict[str, Any]:
     """Load session cookie if present."""
-    p = cookie_file or DEFAULT_SESSION_COOKIE_FILE
+    p = _resolve_session_cookie_file(cookie_file)
     try:
         if p.is_file():
             data = json.loads(p.read_text(encoding="utf-8"))
@@ -231,7 +270,7 @@ def record_bridge_crumb(
     Captures both source (id/name) and target (id/name) so either agent
     can inspect linked conversations from either side.
     """
-    p_file = crumbs_file or DEFAULT_BRIDGE_CRUMBS_FILE
+    p_file = _resolve_bridge_crumbs_file(crumbs_file)
     src_id, src_name = resolve_source_conversation(
         source_engine=source_engine,
         from_conv_id=source_conv_id,
@@ -312,7 +351,7 @@ def get_latest_bridge_crumbs(
     crumbs_file: Optional[Path] = None,
 ) -> List[AgentBridgeCrumb]:
     """Retrieve the most recent cross-agent bridge crumbs."""
-    p_file = crumbs_file or DEFAULT_BRIDGE_CRUMBS_FILE
+    p_file = _resolve_bridge_crumbs_file(crumbs_file)
     if not p_file.is_file():
         return []
 
@@ -383,7 +422,7 @@ def format_breadcrumb_receipt(crumb: AgentBridgeCrumb) -> str:
         f"🌉 Cross-Agent Bridge Dispatch:\n"
         f"  • Source: {crumb.source_engine.capitalize()} (\"{crumb.source_conv_name}\" / {crumb.source_conv_id})\n"
         f"  • Target: {crumb.target_engine.capitalize()} (\"{crumb.target_conv_name}\" / {crumb.target_conv_id})\n"
-        f"  • Ledger: ~/.voicefi/agent_bridge_crumbs.json\n"
+        f"  • Ledger: ~/.whole_body_compute/agent_bridge_crumbs.json\n"
         f"  • Reply:  {crumb.reply_command}"
     )
 

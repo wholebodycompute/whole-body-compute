@@ -33,6 +33,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field
 
 from whole_body_compute.audio.cognitive_safety import AcousticCognitiveSafetyClassifier
+from whole_body_compute.procedural_telemetry import get_wbc_data_dir
 from whole_body_compute.integrations.app_focus import AppFocusRegistry
 from whole_body_compute.integrations.pal_workflow import (
     ActionType,
@@ -63,7 +64,7 @@ def resolve_default_candidates_dir() -> Path:
     for parent in Path(__file__).resolve().parents:
         if (parent / "pyproject.toml").is_file() and (parent / "recipes" / "candidates").is_dir():
             return parent / "recipes" / "candidates"
-    return Path.home() / ".whole_body_compute" / "recipes" / "candidates"
+    return get_wbc_data_dir() / "recipes" / "candidates"
 
 
 def resolve_ambient_events_log_path() -> Path:
@@ -71,10 +72,7 @@ def resolve_ambient_events_log_path() -> Path:
     env_path = os.environ.get("WBC_AMBIENT_EVENTS_PATH", "").strip()
     if env_path:
         return Path(env_path).expanduser()
-    wbc_data = os.environ.get("WBC_DATA_DIR", "").strip()
-    if wbc_data:
-        return Path(wbc_data).expanduser() / "ambient_transitions.jsonl"
-    return Path.home() / ".voicefi" / "ambient_transitions.jsonl"
+    return get_wbc_data_dir() / "ambient_transitions.jsonl"
 
 
 def is_ambient_discovery_enabled() -> bool:

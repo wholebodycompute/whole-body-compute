@@ -291,7 +291,7 @@ def _window_to_days(window: str, default_days: int = 1) -> int:
 
 def _query_analytics_db_hybrid_stats(days: int = 1) -> Dict[str, Any]:
     """
-    Query ~/.voicefi/analytics.db directly (with optional voicefi.analytics.queries fallback)
+    Query ~/.whole_body_compute/analytics.db directly (with optional voicefi.analytics.queries fallback)
     for hybrid orchestration and speed-talking velocity stats over the given days window.
     """
     out: Dict[str, Any] = {
@@ -313,8 +313,8 @@ def _query_analytics_db_hybrid_stats(days: int = 1) -> Dict[str, Any]:
         "mcp_events_count": 0,
     }
 
-    # Try voicefi.analytics.queries first if installed (skip when explicit custom VOICEFI_ANALYTICS_DB is set)
-    if "VOICEFI_ANALYTICS_DB" not in os.environ:
+    # Try voicefi.analytics.queries first if installed (skip when explicit custom DB/WBC_DATA_DIR is set)
+    if not any(k in os.environ for k in ("VOICEFI_ANALYTICS_DB", "WBC_ANALYTICS_DB", "WBC_DATA_DIR")):
         try:
             from voicefi.analytics.queries import get_hybrid_orchestration_analytics
 
@@ -341,7 +341,9 @@ def _query_analytics_db_hybrid_stats(days: int = 1) -> Dict[str, Any]:
         except Exception:
             pass
 
-    adb_path = Path(os.environ.get("VOICEFI_ANALYTICS_DB", str(Path.home() / ".voicefi" / "analytics.db")))
+    from whole_body_compute.local.telemetry import get_analytics_db_path
+
+    adb_path = get_analytics_db_path()
     if not adb_path.is_file():
         return out
 
@@ -1158,8 +1160,10 @@ class CanonicalMetricsEngine:
         promotion_status = "PROMOTED"
 
         try:
-            train_path = Path.home() / ".whole_body_compute" / "training_data" / "pal_spoken_processes.jsonl"
-            if not train_path.is_file():
+            from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
+            train_path = get_wbc_data_dir() / "training_data" / "pal_spoken_processes.jsonl"
+            if not train_path.is_file() and "WBC_DATA_DIR" not in os.environ:
                 train_path = Path.home() / ".voicefi" / "training_data" / "pal_spoken_processes.jsonl"
             if train_path.is_file():
                 golden_turns = sum(

@@ -128,7 +128,7 @@ case "$WBC_AIRLOCK_MODE" in
       case "$PAYLOAD" in
         *'"'[rR][eE][aA][dD]'_'[fF][iI][lL][eE]'"'*|*'"'[vV][iI][eE][wW]'_'[fF][iI][lL][eE]'"'*|*'"'[rR][eE][aA][dD]'"'*)
           case "$PAYLOAD" in
-            *'.'[eE][nN][vV]*|*'.'[pP][eE][mM]*|*'.'[kK][eE][yY]*|*[iI][dD]'_'[rR][sS][aA]*|*[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]*|*[sS][eE][cC][rR][eE][tT]*|*'.'[lL][oO][gG]*|*'.'[jJ][sS][oO][nN][lL]*|*'/'[rR][eE][cC][eE][iI][pP][tT][sS]'/'*|*[rR][eE][cC][eE][iI][pP][tT][sS]'/'*|*'/'[lL][oO][gG][sS]'/'*|*[lL][oO][gG][sS]'/'*|*[tT][rR][aA][cC][eE][bB][aA][cC][kK]*)
+            *'.'[eE][nN][vV]*|*'.'[pP][eE][mM]*|*'.'[kK][eE][yY]*|*[iI][dD]'_'[rR][sS][aA]*|*[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]*|*[sS][eE][cC][rR][eE][tT]*|*'.'[lL][oO][gG]*|*'.'[jJ][sS][oO][nN][lL]*|*'/'[rR][eE][cC][eE][iI][pP][tT][sS]'/'*|*[rR][eE][cC][eE][iI][pP][tT][sS]'/'*|*'/'[lL][oO][gG][sS]'/'*|*[lL][oO][gG][sS]'/'*|*[tT][rR][aA][cC][eE][bB][aA][cC][kK]*|*'[sS][kK][iI][lL][lL].[mM][dD]'*)
               ;;
             *)
               START_LINE=""
@@ -407,7 +407,7 @@ elif [ "$PHASE" != "pre" ]; then
 else
   PAYLOAD_LOWER="$(printf '%s' "$PAYLOAD" | tr '[:upper:]' '[:lower:]')"
   case "$PAYLOAD_LOWER" in
-    *"body-immune-hook"*|*"body-immune-watchdog"*|*".py\""*|*".ts\""*|*".tsx\""*|*".js\""*|*".jsx\""*|*".mjs\""*|*".cjs\""*|*".rs\""*|*".go\""*|*".java\""*|*".kt\""*|*".kts\""*|*"hooks.json"*|*"mcp_config.json"*|*"eval_models.py"*|*"evaluate.py"*|*"eval_localbench.py"*|*"benchmark_report.md"*|*"curl"*|*"wget"*|*"nc "*|*"ncat"*|*"netcat"*|*"scp"*|*"sftp"*|*"rsync"*|*"ssh"*|*"sudo"*|*"chmod"*|*"rm -rf"*|*"rm -fr"*|*"mkfs"*|*"/dev/tcp"*|*"bash -i"*|*"pty.spawn"*|*".env"*|*".pem"*|*".key"*|*"id_rsa"*|*"credential"*|*"secret"*|*"sk-ant-"*|*"sk-proj-"*|*"sk_live_"*|*"rk_live_"*|*"ghp_"*|*"github_pat_"*|*"xoxb-"*|*"xoxp-"*|*"akia"*|*"/etc/shadow"*|*"/etc/master.passwd"*|*'"manage_task"'*|*"sleep "*|*"receipts/"*|*"logs/"*|*".log"*|*".err"*|*".trace"*|*'"read"'*|*'"read_file"'*|*'"view_file"'*|*'"notebookread"'*|*'"developer__text_editor"'*|*'"beforereadfile"'*|*'"pre_read_code"'*)
+    *"body-immune-hook"*|*"body-immune-watchdog"*|*"pytest -v"*|*"pytest --verbose"*|*".py\""*|*".ts\""*|*".tsx\""*|*".js\""*|*".jsx\""*|*".mjs\""*|*".cjs\""*|*".rs\""*|*".go\""*|*".java\""*|*".kt\""*|*".kts\""*|*"hooks.json"*|*"mcp_config.json"*|*"eval_models.py"*|*"evaluate.py"*|*"eval_localbench.py"*|*"benchmark_report.md"*|*"curl"*|*"wget"*|*"nc "*|*"ncat"*|*"netcat"*|*"scp"*|*"sftp"*|*"rsync"*|*"ssh"*|*"sudo"*|*"chmod"*|*"rm -rf"*|*"rm -fr"*|*"mkfs"*|*"/dev/tcp"*|*"bash -i"*|*"pty.spawn"*|*".env"*|*".pem"*|*".key"*|*"id_rsa"*|*"credential"*|*"secret"*|*"sk-ant-"*|*"sk-proj-"*|*"sk_live_"*|*"rk_live_"*|*"ghp_"*|*"github_pat_"*|*"xoxb-"*|*"xoxp-"*|*"akia"*|*"/etc/shadow"*|*"/etc/master.passwd"*|*'"manage_task"'*|*"sleep "*|*"receipts/"*|*"logs/"*|*".log"*|*".err"*|*".trace"*|*'"read"'*|*'"read_file"'*|*'"view_file"'*|*'"notebookread"'*|*'"developer__text_editor"'*|*'"beforereadfile"'*|*'"pre_read_code"'*)
       IS_SLOW=1
       ;;
     *'"task"'*|*'"agent"'*|*'stepidx":1'[5-9][0-9]*|*'stepidx":'[2-9][0-9][0-9]*|*'stepidx":'[1-9][0-9][0-9][0-9]*|*'stepidx": 1'[5-9][0-9]*|*'stepidx": '[2-9][0-9][0-9]*|*'stepidx": '[1-9][0-9][0-9][0-9]*|*'step_idx":1'[5-9][0-9]*|*'step_idx":'[2-9][0-9][0-9]*|*'step_idx":'[1-9][0-9][0-9][0-9]*|*'step_idx": 1'[5-9][0-9]*|*'step_idx": '[2-9][0-9][0-9]*|*'step_idx": '[1-9][0-9][0-9][0-9]*)

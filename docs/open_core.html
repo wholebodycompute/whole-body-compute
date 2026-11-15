@@ -738,7 +738,7 @@
           <div class="terminal-body">
             <span class="terminal-prompt">$</span>
             <code class="terminal-cmd" id="install-cmd">curl -fsSL https://wholebodycompute.com/begin | sh</code>
-            <button type="button" class="terminal-copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('install-cmd').innerText); this.innerText='Copied ✓'; setTimeout(()=>this.innerText='Copy', 1800);">Copy</button>
+            <button type="button" class="terminal-copy-btn" onclick="copyOpenCoreCmd('begin', this)">Copy</button>
           </div>
           <div class="terminal-sub">
             <span>Or source install: <code>uv tool install whole-body-compute &amp;&amp; body begin</code></span>
@@ -755,7 +755,7 @@
           <div class="terminal-body">
             <span class="terminal-prompt">$</span>
             <code class="terminal-cmd" id="audit-cmd">curl -sSL https://wholebodycompute.com/audit.py | python3</code>
-            <button type="button" class="terminal-copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('audit-cmd').innerText); this.innerText='Copied ✓'; setTimeout(()=>this.innerText='Copy', 1800);">Copy</button>
+            <button type="button" class="terminal-copy-btn" onclick="copyOpenCoreCmd('audit', this)">Copy</button>
           </div>
           <div class="terminal-sub">
             <span>Zero pip installs. Scans local Claude Code, Antigravity &amp; Cursor logs offline.</span>
@@ -937,5 +937,68 @@
       </div>
     </div>
   </footer>
+
+  <script>
+    function resolveOpenCoreChannelSlug() {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const raw = (params.get("utm_source") || params.get("s") || "").trim().toLowerCase();
+        if (/^[a-z0-9][a-z0-9_.-]{0,39}$/.test(raw)) return raw;
+      } catch (_) {}
+      return "open-core";
+    }
+
+    function emitOpenCoreFunnelEvent(eventName, extraProps) {
+      try {
+        if (navigator.doNotTrack === "1" || navigator.globalPrivacyControl) return;
+        let visitorId = localStorage.getItem("wbc_anon_vid");
+        if (!visitorId) {
+          visitorId = "web_" + Math.random().toString(16).slice(2, 10) + Date.now().toString(16).slice(-6);
+          localStorage.setItem("wbc_anon_vid", visitorId);
+        }
+        const body = JSON.stringify({
+          api_key: "phc_D3TxQWXwnd9Z6wBBK3DpnsdKQAHdLpSSMxup4qL8djc2",
+          event: eventName,
+          distinct_id: visitorId,
+          properties: Object.assign({
+            product: "whole_body_compute",
+            source: "web_open_core",
+            surface: "open_core_hub",
+            host: window.location.hostname,
+            pathname: window.location.pathname,
+            $current_url: window.location.href,
+            $referrer: document.referrer || undefined
+          }, extraProps || {})
+        });
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon("https://us.i.posthog.com/capture/", new Blob([body], { type: "application/json" }));
+        } else {
+          fetch("https://us.i.posthog.com/capture/", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: body,
+            keepalive: true
+          }).catch(function () {});
+        }
+      } catch (_) {}
+    }
+
+    function copyOpenCoreCmd(kind, btn) {
+      const slug = resolveOpenCoreChannelSlug();
+      const cmd = kind === "audit"
+        ? "curl -sSL https://wholebodycompute.com/audit/" + slug + " | python3"
+        : "curl -fsSL https://wholebodycompute.com/begin/" + slug + " | sh";
+      emitOpenCoreFunnelEvent("wbc_web_install_copied", {
+        command_tab: kind === "audit" ? "open_core_audit" : "open_core_begin",
+        acquisition_source: slug
+      });
+      navigator.clipboard.writeText(cmd).then(function () {
+        if (btn) {
+          btn.innerText = "Copied ✓";
+          setTimeout(function () { btn.innerText = "Copy"; }, 1800);
+        }
+      });
+    }
+  </script>
 </body>
 </html>

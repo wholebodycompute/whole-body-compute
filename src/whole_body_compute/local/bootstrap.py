@@ -36,11 +36,27 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("whole_body_compute.local.bootstrap")
 
+from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
 FOVEAL_MEMORY_DEFAULT_URL = "http://127.0.0.1:9382"
 FOVEAL_MEMORY_DEFAULT_DB = Path.home() / ".whole_body" / "foveal_memory.sqlite"
-DOT_MEMORY_DEFAULT_DB = Path.home() / ".voicefi" / "dot_memory.db"
-LOCAL_COMPUTE_RECEIPT_FILE = Path.home() / ".voicefi" / ".local_compute_bootstrapped.json"
+_INITIAL_DOT_MEMORY_DEFAULT_DB = get_wbc_data_dir() / "dot_memory.db"
+DOT_MEMORY_DEFAULT_DB = _INITIAL_DOT_MEMORY_DEFAULT_DB
+_INITIAL_LOCAL_COMPUTE_RECEIPT_FILE = get_wbc_data_dir() / ".local_compute_bootstrapped.json"
+LOCAL_COMPUTE_RECEIPT_FILE = _INITIAL_LOCAL_COMPUTE_RECEIPT_FILE
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
+
+
+def _resolve_dot_memory_default_db() -> Path:
+    if DOT_MEMORY_DEFAULT_DB != _INITIAL_DOT_MEMORY_DEFAULT_DB:
+        return DOT_MEMORY_DEFAULT_DB
+    return get_wbc_data_dir() / "dot_memory.db"
+
+
+def _resolve_local_compute_receipt_file() -> Path:
+    if LOCAL_COMPUTE_RECEIPT_FILE != _INITIAL_LOCAL_COMPUTE_RECEIPT_FILE:
+        return LOCAL_COMPUTE_RECEIPT_FILE
+    return get_wbc_data_dir() / ".local_compute_bootstrapped.json"
 
 OLLAMA_CHAT_URL = "http://127.0.0.1:11434/api/chat"
 MLX_9379_CHAT_URL = "http://127.0.0.1:9379/v1/chat/completions"
@@ -123,7 +139,7 @@ def resolve_voicefi_coder_mlx_dir() -> Optional[Path]:
     """
     Resolve the `voicefi-coder-mlx` (839 MB 4-bit MLX) directory across:
       1. PyInstaller frozen bundle (`sys._MEIPASS` / `Contents/Resources`)
-      2. `~/.voicefi/models/voicefi-coder-mlx`
+      2. `~/.whole_body_compute/models/voicefi-coder-mlx` (or `~/.voicefi/models/voicefi-coder-mlx` fallback)
       3. `~/Projects/Local Models/distillation/fused_model` (or `WBC_FUSED_MODEL_DIR`)
     """
     candidates: List[Path] = []
@@ -149,6 +165,7 @@ def resolve_voicefi_coder_mlx_dir() -> Optional[Path]:
 
     candidates.extend(
         [
+            get_wbc_data_dir() / "models" / "voicefi-coder-mlx",
             Path.home() / ".voicefi" / "models" / "voicefi-coder-mlx",
             Path.home() / "Projects" / "Local Models" / "distillation" / "fused_model",
         ]
@@ -403,7 +420,7 @@ def check_organ_status() -> List[OrganHealth]:
                 organ="2. Mouth",
                 name="Kokoro-82M Neural TTS",
                 status="warning",
-                details="Model files missing in ~/.voicefi/models/kokoro. macOS say fallback active.",
+                details="Model files missing in ~/.whole_body_compute/models/kokoro (or ~/.voicefi/models/kokoro). macOS say fallback active.",
             )
         )
 
@@ -603,10 +620,10 @@ def install_foveal_memory_launch_agent(port: int = 9382) -> Tuple[bool, Path]:
 
 
 def init_dot_memory_db() -> Path:
-    """Initialize ~/.voicefi/dot_memory.db SQLite database with WAL mode and initial tables."""
+    """Initialize ~/.whole_body_compute/dot_memory.db SQLite database with WAL mode and initial tables."""
     from whole_body_compute.local.dot_memory import MemoryStore
 
-    store = MemoryStore(db_path=DOT_MEMORY_DEFAULT_DB, auto_seed=True)
+    store = MemoryStore(db_path=_resolve_dot_memory_default_db(), auto_seed=True)
     return store.db_path
 
 
@@ -726,7 +743,7 @@ def run_sovereign_bootstrap(
         print("📦 [1/4] Initializing Sovereign Episodic & Workflow Storage...")
     dot_db = init_dot_memory_db()
     FOVEAL_MEMORY_DEFAULT_DB.parent.mkdir(parents=True, exist_ok=True)
-    workflows_scripts_dir = Path.home() / ".voicefi" / "workflows" / "scripts"
+    workflows_scripts_dir = get_wbc_data_dir() / "workflows" / "scripts"
     workflows_scripts_dir.mkdir(parents=True, exist_ok=True)
     if not quiet:
         print(f"  ✅ DotMemory WAL SQLite:  {dot_db}")
@@ -830,7 +847,7 @@ def ensure_dmg_local_compute_bootstrapped_async(
             # 1. Always ensure local storage & zero-egress Foveal Memory (:9382) are active
             init_dot_memory_db()
             FOVEAL_MEMORY_DEFAULT_DB.parent.mkdir(parents=True, exist_ok=True)
-            (Path.home() / ".voicefi" / "workflows" / "scripts").mkdir(parents=True, exist_ok=True)
+            (get_wbc_data_dir() / "workflows" / "scripts").mkdir(parents=True, exist_ok=True)
 
             if not is_foveal_memory_running():
                 started = start_builtin_foveal_memory_daemon()
@@ -844,10 +861,11 @@ def ensure_dmg_local_compute_bootstrapped_async(
             hw = get_hardware_profile()
             target_profile = hw.recommended_tier
             manifest = get_tier_manifest(target_profile)
+            receipt_file = _resolve_local_compute_receipt_file()
 
-            if not force and LOCAL_COMPUTE_RECEIPT_FILE.is_file():
+            if not force and receipt_file.is_file():
                 try:
-                    receipt = json.loads(LOCAL_COMPUTE_RECEIPT_FILE.read_text(encoding="utf-8"))
+                    receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
                     if receipt.get("hardware_profile") == target_profile and receipt.get("completed"):
                         if on_complete:
                             on_complete({"status": "already_bootstrapped", "hardware_profile": target_profile})
@@ -859,7 +877,7 @@ def ensure_dmg_local_compute_bootstrapped_async(
                 from whole_body_compute.ui.notifications import show_notification
 
                 show_notification(
-                    "VoiceFi Local Compute 🧠",
+                    "Whole Body Compute 🧠",
                     f"Optimizing for {hw.chip_name} ({hw.total_ram_gb:.0f}GB RAM)",
                     f"Downloading local models ({manifest['name']}) in the background...",
                 )
@@ -873,8 +891,8 @@ def ensure_dmg_local_compute_bootstrapped_async(
             )
 
             if all_ok:
-                LOCAL_COMPUTE_RECEIPT_FILE.parent.mkdir(parents=True, exist_ok=True)
-                LOCAL_COMPUTE_RECEIPT_FILE.write_text(
+                receipt_file.parent.mkdir(parents=True, exist_ok=True)
+                receipt_file.write_text(
                     json.dumps(
                         {
                             "completed": True,

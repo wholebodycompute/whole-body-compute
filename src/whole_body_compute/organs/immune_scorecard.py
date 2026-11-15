@@ -308,7 +308,7 @@ def get_immune_pre_post_scorecard(
     conv_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Compute empirical Pre/Post Immune Gate & Context-Shield metrics from `~/.voicefi/immune_audit.jsonl`.
+    Compute empirical Pre/Post Immune Gate & Context-Shield metrics from `~/.whole_body_compute/immune_audit.jsonl`.
     """
     log_path = _get_audit_log_path()
     pre_events: List[Dict[str, Any]] = []

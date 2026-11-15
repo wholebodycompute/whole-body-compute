@@ -230,8 +230,8 @@ class ActiveListeningEngine:
     @classmethod
     def inject_dot_preferences(cls, prompt: str, top_k: int = 3) -> str:
         """
-        Phase 13.1 — Prepend personal facts, consolidated habits, and LGTM edit lessons
-        from `~/.voicefi/dot_memory.db` to an actionable prompt when relevant.
+        Phase 13.1 - Prepend personal facts, consolidated habits, and LGTM edit lessons
+        from `~/.whole_body_compute/dot_memory.db` to an actionable prompt when relevant.
         """
         if not prompt or not prompt.strip():
             return prompt

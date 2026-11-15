@@ -1260,10 +1260,13 @@ class UnifiedDynamicIslandHUD:
             from pathlib import Path
             from AppKit import NSImage, NSWorkspace
 
+            from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
             hud_file = Path(__file__).resolve()
             asset_dirs = [
                 hud_file.parent.parent / "assets",
                 hud_file.parent.parent.parent.parent / "assets",
+                get_wbc_data_dir() / "assets",
                 Path.home() / ".voicefi" / "assets",
             ]
 
@@ -3859,9 +3862,9 @@ class UnifiedDynamicIslandHUD:
                 pass
             if self._current_state == "training":
                 try:
-                    from whole_body_compute.ui.training_panel import GranolaTrainingPanel
+                    from whole_body_compute.ui.training_panel import PalTrainingPanel
 
-                    GranolaTrainingPanel.get_instance().update_audio_level(energy, prob, spk)
+                    PalTrainingPanel.get_instance().update_audio_level(energy, prob, spk)
                 except Exception:
                     pass
 

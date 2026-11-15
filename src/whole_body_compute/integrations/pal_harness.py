@@ -102,7 +102,7 @@ class PalHarness:
         """
         If called from an ephemeral CLI / agent subprocess while the persistent VoiceFi
         Tray daemon (port 5141) is running, proxy the training command to the daemon so
-        the Quartz Event Tap, HUD, and Granola Training Panel stay alive across turns.
+        the Quartz Event Tap, HUD, and Pal Training Panel stay alive across turns.
         """
         if cls._IN_DAEMON_PROCESS or cls._is_test_env():
             return None
@@ -194,9 +194,9 @@ class PalHarness:
             except Exception:
                 pass
             try:
-                from whole_body_compute.ui.training_panel import GranolaTrainingPanel
+                from whole_body_compute.ui.training_panel import PalTrainingPanel
 
-                GranolaTrainingPanel.get_instance().add_or_update_step(
+                PalTrainingPanel.get_instance().add_or_update_step(
                     step_number=step.step_number,
                     action=step.action,
                     spoken_summary=step.spoken_summary,
@@ -226,9 +226,9 @@ class PalHarness:
         except Exception:
             pass
         try:
-            from whole_body_compute.ui.training_panel import GranolaTrainingPanel
+            from whole_body_compute.ui.training_panel import PalTrainingPanel
 
-            GranolaTrainingPanel.get_instance().show_training(workflow_name)
+            PalTrainingPanel.get_instance().show_training(workflow_name)
         except Exception:
             pass
         try:
@@ -292,9 +292,9 @@ class PalHarness:
         except Exception:
             pass
         try:
-            from whole_body_compute.ui.training_panel import GranolaTrainingPanel
+            from whole_body_compute.ui.training_panel import PalTrainingPanel
 
-            GranolaTrainingPanel.get_instance().hide()
+            PalTrainingPanel.get_instance().hide()
         except Exception:
             pass
         try:
@@ -317,7 +317,7 @@ class PalHarness:
             command="stop training",
             action_type="training_stop",
             details=(
-                f"Compiled '{recipe.name}' with {step_count} steps to ~/.voicefi/workflows/{recipe.id}.yaml"
+                f"Compiled '{recipe.name}' with {step_count} steps to ~/.whole_body_compute/workflows/{recipe.id}.yaml"
                 + (f" ({badge})" if badge else "")
             ),
             spoken_summary=f"Saved workflow {recipe.name} with {step_count} steps. You can run it anytime by saying 'Hey Pal, {recipe.name}'.",
@@ -351,9 +351,9 @@ class PalHarness:
             )
         trainer.cancel()
         try:
-            from whole_body_compute.ui.training_panel import GranolaTrainingPanel
+            from whole_body_compute.ui.training_panel import PalTrainingPanel
 
-            GranolaTrainingPanel.get_instance().hide()
+            PalTrainingPanel.get_instance().hide()
         except Exception:
             pass
         try:
@@ -382,9 +382,9 @@ class PalHarness:
         if cls._ACTIVE_TRAINER is not None:
             cls._ACTIVE_TRAINER.record_voice_note(text)
             try:
-                from whole_body_compute.ui.training_panel import GranolaTrainingPanel
+                from whole_body_compute.ui.training_panel import PalTrainingPanel
 
-                GranolaTrainingPanel.get_instance().record_voice_note(text)
+                PalTrainingPanel.get_instance().record_voice_note(text)
             except Exception:
                 pass
 
@@ -485,9 +485,9 @@ class PalHarness:
             except Exception:
                 pass
             try:
-                from whole_body_compute.ui.training_panel import GranolaTrainingPanel
+                from whole_body_compute.ui.training_panel import PalTrainingPanel
 
-                GranolaTrainingPanel.get_instance().add_or_update_step(
+                PalTrainingPanel.get_instance().add_or_update_step(
                     step_number=rec.step_number,
                     action=rec.action,
                     spoken_summary=rec.spoken_summary,
@@ -504,9 +504,9 @@ class PalHarness:
 
         cls._ACTIVE_EDITOR = PalEditSession(session_name=session_name, on_step=_wrapped_on_step)
         try:
-            from whole_body_compute.ui.training_panel import GranolaTrainingPanel
+            from whole_body_compute.ui.training_panel import PalTrainingPanel
 
-            GranolaTrainingPanel.get_instance().show_edit_mode(session_name)
+            PalTrainingPanel.get_instance().show_edit_mode(session_name)
         except Exception:
             pass
         cls._ACTIVE_EDITOR.start()
@@ -581,9 +581,9 @@ class PalHarness:
         except Exception:
             pass
         try:
-            from whole_body_compute.ui.training_panel import GranolaTrainingPanel
+            from whole_body_compute.ui.training_panel import PalTrainingPanel
 
-            GranolaTrainingPanel.get_instance().hide()
+            PalTrainingPanel.get_instance().hide()
         except Exception:
             pass
         try:
@@ -691,9 +691,9 @@ class PalHarness:
             )
 
         try:
-            from whole_body_compute.ui.training_panel import GranolaTrainingPanel
+            from whole_body_compute.ui.training_panel import PalTrainingPanel
 
-            GranolaTrainingPanel.get_instance().add_or_update_step(
+            PalTrainingPanel.get_instance().add_or_update_step(
                 step_number=undone.step_number,
                 action="undo",
                 spoken_summary=undone.spoken_summary,

@@ -155,9 +155,11 @@ class AntibodyRegistry:
             pass
 
     def _save(self) -> None:
-        # Avoid polluting the production ~/.voicefi/antibodies.json during pytest runs
-        # unless VOICEFI_ANTIBODY_PATH is explicitly pointed at a test file.
-        if os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get("VOICEFI_ANTIBODY_PATH"):
+        # Avoid polluting the production ~/.whole_body_compute/antibodies.json during pytest runs
+        # unless WBC_ANTIBODY_PATH / VOICEFI_ANTIBODY_PATH is explicitly pointed at a test file.
+        if os.environ.get("PYTEST_CURRENT_TEST") and not (
+            os.environ.get("VOICEFI_ANTIBODY_PATH") or os.environ.get("WBC_ANTIBODY_PATH")
+        ):
             return
         try:
             import tempfile

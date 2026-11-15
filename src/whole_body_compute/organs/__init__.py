@@ -30,6 +30,13 @@ from whole_body_compute.organs.immune import (
     sanitize_untrusted_screen_text,
     slice_post_tool_output_buffer,
 )
+from whole_body_compute.organs.immune_vault import (
+    format_airlock_receipt,
+    get_airlock_vault_dir,
+    prune_airlock_vault,
+    read_airlock_blob_slice,
+    store_airlock_blob,
+)
 from whole_body_compute.local.supervisor import (
     SensoryCephalicReflex,
     default_sensory_reflex,
@@ -65,6 +72,11 @@ __all__ = [
     "VascularTrafficMonitor",
     "sanitize_untrusted_screen_text",
     "slice_post_tool_output_buffer",
+    "format_airlock_receipt",
+    "get_airlock_vault_dir",
+    "prune_airlock_vault",
+    "read_airlock_blob_slice",
+    "store_airlock_blob",
     "SensoryCephalicReflex",
     "default_sensory_reflex",
     "trigger_cephalic_prewarm",

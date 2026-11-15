@@ -394,7 +394,7 @@ def save_meeting_note(
     today: Optional[datetime.date] = None,
     config: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Save a Granola-style structured meeting note into the configured meetings folder."""
+    """Save a structured meeting note into the configured meetings folder."""
     vault = vault_path or get_primary_vault(config)
     if not vault or not vault.is_dir():
         return {"status": "error", "error": "No Obsidian vault found"}
@@ -419,7 +419,7 @@ def save_meeting_note(
     time_str = now.strftime("%-I:%M %p")
     note_stem = meeting_file.stem
     backlink_entry = (
-        f"\n### 🎙️ {time_str} - Meeting: {clean_title}\n- [[{note_stem}]]: Granola Meeting Notes\n"
+        f"\n### 🎙️ {time_str} - Meeting: {clean_title}\n- [[{note_stem}]]: Structured Meeting Notes\n"
     )
 
     if not daily_note.is_file():

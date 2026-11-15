@@ -372,13 +372,18 @@ def find_smart_turn_model(auto_download: bool = False) -> Optional[Path]:
     """
     Locate Pipecat's `smart-turn-v3.2-cpu.onnx` (8.3 MB) model on disk.
     Checks:
-      1. ~/.voicefi/models/smart-turn-v3.2-cpu.onnx
-      2. ~/.voicefi/assets/smart-turn-v3.2-cpu.onnx
-      3. Bundled package assets (src/voicefi/assets/ or PyInstaller frozen bundle)
+      1. ~/.whole_body_compute/models/smart-turn-v3.2-cpu.onnx (and ~/.voicefi fallback)
+      2. ~/.whole_body_compute/assets/smart-turn-v3.2-cpu.onnx (and ~/.voicefi fallback)
+      3. Bundled package assets (src/whole_body_compute/assets/ or PyInstaller frozen bundle)
       4. Local Hugging Face Hub cache (models--pipecat-ai--smart-turn-v3)
       5. Optional download via huggingface_hub if auto_download=True
     """
+    from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
+    wbc_dir = get_wbc_data_dir()
     candidates = [
+        wbc_dir / "models" / "smart-turn-v3.2-cpu.onnx",
+        wbc_dir / "assets" / "smart-turn-v3.2-cpu.onnx",
         Path.home() / ".voicefi" / "models" / "smart-turn-v3.2-cpu.onnx",
         Path.home() / ".voicefi" / "assets" / "smart-turn-v3.2-cpu.onnx",
         Path(__file__).resolve().parent.parent / "assets" / "smart-turn-v3.2-cpu.onnx",

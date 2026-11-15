@@ -19,27 +19,40 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
 logger = logging.getLogger("whole_body_compute.pal_editor")
-PAL_LOG_DIR = Path.home() / ".voicefi" / "logs"
-PAL_LOG_FILE = PAL_LOG_DIR / "pal_editor.log"
+_INITIAL_PAL_LOG_DIR = get_wbc_data_dir() / "logs"
+PAL_LOG_DIR = _INITIAL_PAL_LOG_DIR
+_INITIAL_PAL_LOG_FILE = PAL_LOG_DIR / "pal_editor.log"
+PAL_LOG_FILE = _INITIAL_PAL_LOG_FILE
+
+
+def _resolve_pal_log_file() -> Path:
+    if PAL_LOG_FILE != _INITIAL_PAL_LOG_FILE:
+        return PAL_LOG_FILE
+    if PAL_LOG_DIR != _INITIAL_PAL_LOG_DIR:
+        return PAL_LOG_DIR / "pal_editor.log"
+    return get_wbc_data_dir() / "logs" / "pal_editor.log"
 
 
 def pal_log(message: str, level: str = "info") -> None:
-    """Write structured, high-visibility log messages to stderr (/tmp/voicefi.log) and ~/.voicefi/logs/pal_editor.log."""
+    """Write structured, high-visibility log messages to stderr and ~/.whole_body_compute/logs/pal_editor.log."""
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     formatted = f"[{timestamp}] [PalEditor] {message}"
 
-    # 1. Output to sys.stderr so LaunchAgent streams it to /tmp/voicefi.log
+    # 1. Output to sys.stderr so LaunchAgent streams it to daemon logs
     try:
         sys.stderr.write(formatted + "\n")
         sys.stderr.flush()
     except Exception:
         pass
 
-    # 2. Append to dedicated log file ~/.voicefi/logs/pal_editor.log
+    # 2. Append to dedicated log file ~/.whole_body_compute/logs/pal_editor.log
     try:
-        PAL_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(PAL_LOG_FILE, "a", encoding="utf-8") as f:
+        log_file = _resolve_pal_log_file()
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_file, "a", encoding="utf-8") as f:
             f.write(formatted + "\n")
     except Exception:
         pass
@@ -52,7 +65,16 @@ def pal_log(message: str, level: str = "info") -> None:
         pass
 
 
-ACTIVE_EDITING_JOURNAL = Path.home() / ".voicefi" / "active_editing.json"
+_INITIAL_ACTIVE_EDITING_JOURNAL = get_wbc_data_dir() / "active_editing.json"
+ACTIVE_EDITING_JOURNAL = _INITIAL_ACTIVE_EDITING_JOURNAL
+
+
+def resolve_active_editing_journal(override: Optional[Path] = None) -> Path:
+    if override is not None and override != _INITIAL_ACTIVE_EDITING_JOURNAL:
+        return override
+    if ACTIVE_EDITING_JOURNAL != _INITIAL_ACTIVE_EDITING_JOURNAL:
+        return ACTIVE_EDITING_JOURNAL
+    return get_wbc_data_dir() / "active_editing.json"
 
 # Default local project roots searched when mapping a browser tab to a local source file
 DEFAULT_WORKSPACE_ROOTS: Tuple[Path, ...] = (

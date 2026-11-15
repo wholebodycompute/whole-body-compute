@@ -32,6 +32,7 @@ from whole_body_compute.integrations.pal_workflow import (
     ParameterDefinition,
     WorkflowStep,
 )
+from whole_body_compute.procedural_telemetry import get_wbc_data_dir
 
 # Standard Carbon virtual keycodes for macOS hotkey normalization
 VK_MAP = {
@@ -159,7 +160,7 @@ class PalTeachRecorder:
     def set_ignore_rect(
         self, x: float, y: float, width: float, height: float
     ) -> None:
-        """Register a screen bounding box (e.g. Granola Training Card) where clicks should not be recorded as steps."""
+        """Register a screen bounding box (e.g. Pal Training Card) where clicks should not be recorded as steps."""
         with self._lock:
             self._ignore_rects = [(float(x), float(y), float(width), float(height))]
 
@@ -750,7 +751,14 @@ class PalTeachRecorder:
                 break
 
 
-ACTIVE_TRAINING_JOURNAL = Path.home() / ".voicefi" / "active_training.json"
+_INITIAL_ACTIVE_TRAINING_JOURNAL = get_wbc_data_dir() / "active_training.json"
+ACTIVE_TRAINING_JOURNAL = _INITIAL_ACTIVE_TRAINING_JOURNAL
+
+
+def _resolve_active_training_journal() -> Path:
+    if ACTIVE_TRAINING_JOURNAL != _INITIAL_ACTIVE_TRAINING_JOURNAL:
+        return ACTIVE_TRAINING_JOURNAL
+    return get_wbc_data_dir() / "active_training.json"
 
 
 class PalTrainer:
@@ -793,9 +801,10 @@ class PalTrainer:
         return self.recorder.is_auth_paused()
 
     def _write_journal(self, active: bool = True) -> None:
-        """Persist live training session state to ~/.voicefi/active_training.json for cross-process resilience."""
+        """Persist live training session state to ~/.whole_body_compute/active_training.json for cross-process resilience."""
         try:
-            ACTIVE_TRAINING_JOURNAL.parent.mkdir(parents=True, exist_ok=True)
+            journal_path = _resolve_active_training_journal()
+            journal_path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "active": active,
                 "auth_paused": self.recorder.is_auth_paused(),
@@ -807,24 +816,25 @@ class PalTrainer:
                 "voice_notes": list(getattr(self.recorder, "voice_notes", [])),
                 "steps": [asdict(s) for s in getattr(self.recorder, "steps", [])],
             }
-            tmp_path = ACTIVE_TRAINING_JOURNAL.with_suffix(".tmp")
+            tmp_path = journal_path.with_suffix(".tmp")
             tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            tmp_path.replace(ACTIVE_TRAINING_JOURNAL)
+            tmp_path.replace(journal_path)
         except Exception:
             pass
 
     @classmethod
     def clear_journal(cls) -> None:
         try:
-            ACTIVE_TRAINING_JOURNAL.unlink(missing_ok=True)
+            _resolve_active_training_journal().unlink(missing_ok=True)
         except Exception:
             pass
 
     @classmethod
     def load_journal(cls) -> Optional[Dict[str, Any]]:
         try:
-            if ACTIVE_TRAINING_JOURNAL.is_file():
-                data = json.loads(ACTIVE_TRAINING_JOURNAL.read_text(encoding="utf-8"))
+            journal_path = _resolve_active_training_journal()
+            if journal_path.is_file():
+                data = json.loads(journal_path.read_text(encoding="utf-8"))
                 if isinstance(data, dict) and data.get("active"):
                     return data
         except Exception:
@@ -932,7 +942,7 @@ class PalTrainer:
     def finish(self, save_dir: Optional[Path] = None, optimize: bool = True) -> PalWorkflowRecipe:
         """
         Stop recording, denoise the action stream, compile to a PalWorkflowRecipe,
-        save to ~/.voicefi/workflows/<slug>.yaml, and hot-reload into the registry.
+        save to ~/.whole_body_compute/workflows/<slug>.yaml, and hot-reload into the registry.
         If optimize=True, attempts to promote brittle UI sequences into headless API/CLI steps.
         """
         raw_steps = self.recorder.stop()
@@ -1151,7 +1161,7 @@ class PalTrainer:
                 ) or has_synthesized_api_node:
                     promoted_recipe = comp_recipe
                     # Persist any synthesized Tier-1 Python script to disk
-                    target_base = save_dir or (Path.home() / ".voicefi" / "workflows")
+                    target_base = save_dir or (get_wbc_data_dir() / "workflows")
                     scripts_dir = target_base / "scripts"
                     for n in ir_prog.nodes:
                         syn_code = (n.inputs or {}).get("synthesized_script")
@@ -1186,7 +1196,7 @@ class PalTrainer:
             )
 
         # Save to disk
-        target_dir = save_dir or (Path.home() / ".voicefi" / "workflows")
+        target_dir = save_dir or (get_wbc_data_dir() / "workflows")
         target_dir.mkdir(parents=True, exist_ok=True)
         file_path = target_dir / f"{self.workflow_slug}.yaml"
 
@@ -1232,9 +1242,9 @@ class PalTrainer:
         target_dir: Path,
     ) -> Tuple[Path, Path]:
         """
-        1. Export a headless Goose YAML recipe (`~/.voicefi/goose_recipes/<slug>.yaml`) so Goose
+        1. Export a headless Goose YAML recipe (`~/.whole_body_compute/goose_recipes/<slug>.yaml`) so Goose
            can replay the demonstrated process via MCP without moving the mouse or stealing window focus.
-        2. Append a fine-tuning example (`~/.voicefi/training_data/pal_spoken_processes.jsonl`) pairing
+        2. Append a fine-tuning example (`~/.whole_body_compute/training_data/pal_spoken_processes.jsonl`) pairing
            the user's spoken process narration + Foveal Vision episodic OCR with the compiled step plan for local models.
         """
         from whole_body_compute.integrations.foveal_memory import (

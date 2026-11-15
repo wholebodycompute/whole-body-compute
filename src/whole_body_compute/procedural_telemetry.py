@@ -2302,12 +2302,13 @@ def fetch_posthog_cloud_funnel_summary(
         }
 
     ext_pred = (
-        "distinct_id != '257d2d48b088ef95' "
+        "distinct_id NOT IN ('257d2d48b088ef95', 'fdfc39c286f5e2cb') "
         "AND distinct_id NOT LIKE 'edge_wholebodycompute%' "
         "AND coalesce(toString(person.properties.$internal_or_test_user), 'false') != 'true' "
         "AND coalesce(toString(properties.is_internal_dev), 'false') != 'true' "
         "AND coalesce(toString(properties.is_internal), 'false') != 'true' "
         "AND coalesce(toString(properties.utm_source), '') != 'wbc_canary' "
+        "AND coalesce(toString(properties.acquisition_source), '') != 'wbc_canary' "
         "AND coalesce(toString(properties.is_bot), 'false') != 'true'"
     )
     sql = f"""
@@ -2325,7 +2326,10 @@ def fetch_posthog_cloud_funnel_summary(
             countIf(event = 'wbc_license_activation_failed' AND ({ext_pred})) AS ext_license_failures,
             countIf(event = 'wbc_web_install_copied' AND ({ext_pred})) AS ext_web_install_copies,
             countIf(event = 'wbc_edge_hub_fetch' AND ({ext_pred})) AS ext_hub_fetches,
-            countIf(event = 'wbc_quota_bypass_detected' AND ({ext_pred})) AS ext_quota_bypasses
+            countIf(event = 'wbc_quota_bypass_detected' AND ({ext_pred})) AS ext_quota_bypasses,
+            count(DISTINCT if(event = 'wbc_audit_completed' AND ({ext_pred}), distinct_id, NULL)) AS ext_audits_completed,
+            count(DISTINCT if(event = 'wbc_audit_completed' AND ({ext_pred}) AND toFloatOrZero(toString(properties.conversations_scanned)) > 0, distinct_id, NULL)) AS ext_qualified_audits,
+            count(DISTINCT if(event = 'wbc_audit_completed' AND ({ext_pred}) AND toFloatOrZero(toString(properties.conversations_scanned)) = 0, distinct_id, NULL)) AS ext_empty_audits
         FROM events
     """
     url = f"https://us.posthog.com/api/projects/{project_id}/query/"
@@ -2345,7 +2349,7 @@ def fetch_posthog_cloud_funnel_summary(
             payload = json.loads(resp.read().decode("utf-8"))
         rows = payload.get("results") or []
         row = list(rows[0]) if rows else []
-        while len(row) < 14:
+        while len(row) < 17:
             row.append(0)
         return {
             "status": "ok",
@@ -2364,6 +2368,9 @@ def fetch_posthog_cloud_funnel_summary(
             "ext_web_install_copies": int(row[11] or 0),
             "ext_hub_fetches": int(row[12] or 0),
             "ext_quota_bypasses": int(row[13] or 0),
+            "ext_audits_completed": int(row[14] or 0),
+            "ext_qualified_audits": int(row[15] or 0),
+            "ext_empty_audits": int(row[16] or 0),
         }
     except Exception as exc:
         return {"status": "error", "reason": str(exc)}
@@ -2549,6 +2556,8 @@ def format_usage_stats_table(report: dict[str, Any]) -> str:
                     f"{cloud.get('ext_web_install_copies', 0):,} install copies",
                     f"      • CLI & Hub Fetches:          {cloud.get('ext_cli_begin_fetches', 0):,} `/begin.sh` • {cloud.get('ext_cli_audit_fetches', 0):,} `/audit.py` • "
                     f"{cloud.get('ext_hub_fetches', 0):,} `/hub`",
+                    f"      • Audits Completed (Primary): {cloud.get('ext_qualified_audits', 0):,} qualified (convs > 0) / "
+                    f"{cloud.get('ext_audits_completed', 0):,} total ({cloud.get('ext_empty_audits', 0):,} empty)",
                     f"      • Active Product Cohorts:     {cloud.get('ext_product_cohorts', 0):,} external cohort(s) | "
                     f"Limit Hits: {cloud.get('ext_cohorts_hitting_limits', 0):,} cohort(s) ({cloud.get('ext_quota_events', 0):,} quota, {cloud.get('ext_quota_bypasses', 0):,} bypass)",
                     f"      • Upgrade Conversion Funnel:  {cloud.get('ext_pricing_intents', 0):,} pricing views -> "

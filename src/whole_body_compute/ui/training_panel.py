@@ -1,8 +1,8 @@
 """
-Granola-Style Floating Training Notepad & Live Step Feed Card for VoiceFi Pal Teach Mode.
+Sovereign Floating Training Notepad & Live Step Feed Card for Whole Body Compute Pal Teach Mode.
 
 Renders a sleek, native macOS frosted-glass floating notepad card anchored in the top-right
-corner (just below the menu bar, like Granola) whenever Pal Teach Mode ("watch me do this" /
+corner (just below the menu bar) whenever Pal Teach Mode ("watch me do this" /
 "start training") is active.
 
 Key UX Elements:
@@ -102,14 +102,14 @@ ACTION_ICONS: Dict[str, str] = {
 
 
 try:
-    GranolaHeaderPulseView = objc.lookUpClass("GranolaHeaderPulseView")
+    PalHeaderPulseView = objc.lookUpClass("PalHeaderPulseView")
 except objc.nosuchclass_error:
 
-    class GranolaHeaderPulseView(NSView):
+    class PalHeaderPulseView(NSView):
         """Renders the pulsing crimson recording indicator and 5-bar mini audio waveform."""
 
         def initWithFrame_(self, frame: NSRect):
-            self = objc.super(GranolaHeaderPulseView, self).initWithFrame_(frame)
+            self = objc.super(PalHeaderPulseView, self).initWithFrame_(frame)
             if self is not None:
                 self._phase = 0.0
                 self._levels = [0.25, 0.45, 0.35, 0.55, 0.25]
@@ -199,16 +199,16 @@ except objc.nosuchclass_error:
 
 
 try:
-    GranolaPillButtonView = objc.lookUpClass("GranolaPillButtonView")
+    PalPillButtonView = objc.lookUpClass("PalPillButtonView")
 except objc.nosuchclass_error:
 
-    class GranolaPillButtonView(NSView):
+    class PalPillButtonView(NSView):
         """Clean custom-drawn pill button for Save Workflow, Cancel, and Step Delete."""
 
         def initWithFrame_title_style_callback_(
             self, frame: NSRect, title: str, style: str, callback: Callable[[], None]
         ):
-            self = objc.super(GranolaPillButtonView, self).initWithFrame_(frame)
+            self = objc.super(PalPillButtonView, self).initWithFrame_(frame)
             if self is not None:
                 self._title = title
                 self._style = style  # "primary", "secondary", "delete", "add_note"
@@ -264,7 +264,7 @@ except objc.nosuchclass_error:
             )
 
             if self._style == "primary":
-                # Granola Emerald / Forest Green accent button
+                # Emerald / Forest Green accent button
                 if self._hovered:
                     NSColor.colorWithCalibratedRed_green_blue_alpha_(
                         0.16, 0.80, 0.46, 1.0
@@ -318,11 +318,11 @@ except objc.nosuchclass_error:
 
 
 try:
-    GranolaStepRowView = objc.lookUpClass("GranolaStepRowView")
+    PalStepRowView = objc.lookUpClass("PalStepRowView")
 except objc.nosuchclass_error:
 
-    class GranolaStepRowView(NSView):
-        """Renders a single clean Granola-style step card with number pill, action summary, voice note, and delete button."""
+    class PalStepRowView(NSView):
+        """Renders a single clean Sovereign step card with number pill, action summary, voice note, and delete button."""
 
         def initWithFrame_step_isLatest_onDelete_(
             self,
@@ -331,7 +331,7 @@ except objc.nosuchclass_error:
             is_latest: bool,
             on_delete: Callable[[int], None],
         ):
-            self = objc.super(GranolaStepRowView, self).initWithFrame_(frame)
+            self = objc.super(PalStepRowView, self).initWithFrame_(frame)
             if self is not None:
                 self._step = step_data
                 self._is_latest = is_latest
@@ -414,7 +414,7 @@ except objc.nosuchclass_error:
             self.addSubview_(act_lbl)
 
             # 3. Delete (×) Button on the right
-            del_btn = GranolaPillButtonView.alloc().initWithFrame_title_style_callback_(
+            del_btn = PalPillButtonView.alloc().initWithFrame_title_style_callback_(
                 NSRect(NSPoint(w - 26.0, top_y - 1.0), NSSize(18.0, 18.0)),
                 "×",
                 "delete",
@@ -501,16 +501,16 @@ except objc.nosuchclass_error:
 
 
 try:
-    GranolaTitleFieldDelegate = objc.lookUpClass("GranolaTitleFieldDelegate")
+    PalTitleFieldDelegate = objc.lookUpClass("PalTitleFieldDelegate")
 except objc.nosuchclass_error:
 
-    class GranolaTitleFieldDelegate(objc.lookUpClass("NSObject")):
+    class PalTitleFieldDelegate(objc.lookUpClass("NSObject")):
         """Delegate for the editable workflow title field."""
 
         def initWithCallback_panel_(
             self, on_rename: Callable[[str], None], panel: Any
         ):
-            self = objc.super(GranolaTitleFieldDelegate, self).init()
+            self = objc.super(PalTitleFieldDelegate, self).init()
             if self is not None:
                 self._on_rename = on_rename
                 self._panel = panel
@@ -540,14 +540,14 @@ except objc.nosuchclass_error:
 
 
 try:
-    GranolaWindowMoveDelegate = objc.lookUpClass("GranolaWindowMoveDelegate")
+    PalWindowMoveDelegate = objc.lookUpClass("PalWindowMoveDelegate")
 except objc.nosuchclass_error:
 
-    class GranolaWindowMoveDelegate(objc.lookUpClass("NSObject")):
-        """Updates the self-click exclusion rectangle whenever the user drags the Granola card."""
+    class PalWindowMoveDelegate(objc.lookUpClass("NSObject")):
+        """Updates the self-click exclusion rectangle whenever the user drags the Pal training card."""
 
-        def initWithPanel_(self, card: "GranolaTrainingPanel"):
-            self = objc.super(GranolaWindowMoveDelegate, self).init()
+        def initWithPanel_(self, card: "PalTrainingPanel"):
+            self = objc.super(PalWindowMoveDelegate, self).init()
             if self is not None:
                 self._card = card
             return self
@@ -557,21 +557,21 @@ except objc.nosuchclass_error:
                 self._card._sync_ignore_rect()
 
 
-class GranolaTrainingPanel:
+class PalTrainingPanel:
     """
-    Granola-style floating training notepad card anchored in the top-right corner of the screen.
+    Sovereign floating training notepad card anchored in the top-right corner of the screen.
     Displays live captured OS steps, inline spoken voice annotations, editable workflow title,
     live elapsed timer, reactive waveform, and interactive Save / Cancel controls.
     """
 
-    _INSTANCE: Optional["GranolaTrainingPanel"] = None
+    _INSTANCE: Optional["PalTrainingPanel"] = None
     _LOCK = threading.Lock()
 
     CARD_WIDTH = 356.0
     CARD_HEIGHT = 340.0
 
     @classmethod
-    def get_instance(cls) -> "GranolaTrainingPanel":
+    def get_instance(cls) -> "PalTrainingPanel":
         with cls._LOCK:
             if cls._INSTANCE is None:
                 cls._INSTANCE = cls()
@@ -662,7 +662,7 @@ class GranolaTrainingPanel:
                 | NSWindowCollectionBehaviorFullScreenAuxiliary
             )
 
-            self._win_delegate = GranolaWindowMoveDelegate.alloc().initWithPanel_(self)
+            self._win_delegate = PalWindowMoveDelegate.alloc().initWithPanel_(self)
             self._panel.setDelegate_(self._win_delegate)
 
             w = self.CARD_WIDTH
@@ -696,9 +696,9 @@ class GranolaTrainingPanel:
             self._effect_view.setState_(1)
             self._root_view.addSubview_(self._effect_view)
 
-            # --- 1. Top Status Bar (Granola Recording Pill + Timer + Waveform) ---
+            # --- 1. Top Status Bar (Pal Recording Pill + Timer + Waveform) ---
             top_bar_y = h - 34.0
-            self._pulse_view = GranolaHeaderPulseView.alloc().initWithFrame_(
+            self._pulse_view = PalHeaderPulseView.alloc().initWithFrame_(
                 NSRect(NSPoint(14.0, top_bar_y), NSSize(w - 28.0, 22.0))
             )
             self._root_view.addSubview_(self._pulse_view)
@@ -752,7 +752,7 @@ class GranolaTrainingPanel:
             self._title_field.setSelectable_(True)
             self._title_field.setFocusRingType_(1)  # NSFocusRingTypeNone
             self._title_field.setToolTip_("Click to rename workflow")
-            self._title_delegate = GranolaTitleFieldDelegate.alloc().initWithCallback_panel_(
+            self._title_delegate = PalTitleFieldDelegate.alloc().initWithCallback_panel_(
                 self._on_user_renamed_workflow, self._panel
             )
             self._title_field.setDelegate_(self._title_delegate)
@@ -808,7 +808,7 @@ class GranolaTrainingPanel:
             )
             self._root_view.addSubview_(div_bot)
 
-            self._cancel_btn = GranolaPillButtonView.alloc().initWithFrame_title_style_callback_(
+            self._cancel_btn = PalPillButtonView.alloc().initWithFrame_title_style_callback_(
                 NSRect(NSPoint(14.0, 11.0), NSSize(80.0, 26.0)),
                 "Cancel",
                 "secondary",
@@ -833,7 +833,7 @@ class GranolaTrainingPanel:
             self._hint_lbl.setSelectable_(False)
             self._root_view.addSubview_(self._hint_lbl)
 
-            self._new_change_btn = GranolaPillButtonView.alloc().initWithFrame_title_style_callback_(
+            self._new_change_btn = PalPillButtonView.alloc().initWithFrame_title_style_callback_(
                 NSRect(NSPoint(100.0, 11.0), NSSize(122.0, 26.0)),
                 "+ New Change (↵)",
                 "secondary",
@@ -842,7 +842,7 @@ class GranolaTrainingPanel:
             self._new_change_btn.setHidden_(True)
             self._root_view.addSubview_(self._new_change_btn)
 
-            self._save_btn = GranolaPillButtonView.alloc().initWithFrame_title_style_callback_(
+            self._save_btn = PalPillButtonView.alloc().initWithFrame_title_style_callback_(
                 NSRect(NSPoint(w - 126.0, 11.0), NSSize(112.0, 26.0)),
                 "✓ Save Workflow",
                 "primary",
@@ -854,7 +854,7 @@ class GranolaTrainingPanel:
             self._panel.orderOut_(None)
             self._rebuild_feed_ui()
         except Exception as e:
-            print(f"[GranolaTrainingPanel] Init error: {e}")
+            print(f"[PalTrainingPanel] Init error: {e}")
 
     # ------------------------------------------------------------------
     # Self-Click Exclusion (Quartz Top-Left Screen Coordinates)
@@ -928,7 +928,7 @@ class GranolaTrainingPanel:
                     )
 
         if total == 0:
-            # Render clean Granola-style empty notepad state
+            # Render clean Sovereign empty notepad state
             empty_box = NSView.alloc().initWithFrame_(
                 NSRect(NSPoint(0.0, 12.0), NSSize(fw, fh - 24.0))
             )
@@ -1041,7 +1041,7 @@ class GranolaTrainingPanel:
             cursor_y -= row_h
             if cursor_y < -4.0:
                 break
-            row_view = GranolaStepRowView.alloc().initWithFrame_step_isLatest_onDelete_(
+            row_view = PalStepRowView.alloc().initWithFrame_step_isLatest_onDelete_(
                 NSRect(NSPoint(0.0, max(0.0, cursor_y)), NSSize(fw, row_h)),
                 s,
                 is_latest,
@@ -1165,7 +1165,7 @@ class GranolaTrainingPanel:
     # ------------------------------------------------------------------
 
     def show_training(self, workflow_name: str) -> None:
-        """Open the Granola-style training notepad card in the top-right corner."""
+        """Open the Sovereign training notepad card in the top-right corner."""
         self._mode = "training"
         self._workflow_name = (workflow_name or "Untitled Workflow").strip().title()
         self._start_time = time.time()
@@ -1211,7 +1211,7 @@ class GranolaTrainingPanel:
             AppHelper.callAfter(_present)
 
     def show_edit_mode(self, session_name: str = "Live Website Edit") -> None:
-        """Open the Granola-style notepad card in Pal Edit Mode ('Select & Speak')."""
+        """Open the Sovereign notepad card in Pal Edit Mode ('Select & Speak')."""
         self._mode = "editing"
         self._workflow_name = f"✏️ {(session_name or 'Live Website Edit').strip()}"
         self._start_time = time.time()
@@ -1266,7 +1266,7 @@ class GranolaTrainingPanel:
         app_name: str = "",
         voice_note: Optional[str] = None,
     ) -> None:
-        """Append a newly captured step (or update existing step) in the live Granola feed."""
+        """Append a newly captured step (or update existing step) in the live Pal step feed."""
         self._pending_voice_note = None
         entry = {
             "step_number": int(step_number),
@@ -1339,7 +1339,7 @@ class GranolaTrainingPanel:
             AppHelper.callAfter(_do)
 
     def hide(self) -> None:
-        """Close the Granola training notepad card."""
+        """Close the Pal training notepad card."""
         self._is_visible = False
         self._stop_tick_loop()
         if is_headless():
@@ -1402,7 +1402,7 @@ class GranolaTrainingPanel:
 
 def _run_standalone_preview() -> None:
     """
-    Launch the real native macOS GranolaTrainingPanel on screen with sample steps and voice notes
+    Launch the real native macOS PalTrainingPanel on screen with sample steps and voice notes
     so the user can inspect and iterate on the exact Cocoa UI design live.
     """
     from AppKit import NSApplicationActivationPolicyAccessory
@@ -1411,7 +1411,7 @@ def _run_standalone_preview() -> None:
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
-    panel = GranolaTrainingPanel.get_instance()
+    panel = PalTrainingPanel.get_instance()
     panel.show_training("Client Report Upload")
 
     # Populate realistic sample steps after a brief beat so the user sees the live feed populate

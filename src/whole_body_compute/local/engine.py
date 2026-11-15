@@ -1174,7 +1174,7 @@ class LocalModelEngine:
     ) -> Tuple[str, Optional[Any]]:
         """
         Distill agent turn output into a punchy spoken soundbite or telegraphic summary.
-        Measures TTFB and throughput and appends to ~/.voicefi/benchmarks.json if measure=True.
+        Measures TTFB and throughput and appends to ~/.whole_body_compute/benchmarks.json if measure=True.
         """
         import time
         from whole_body_compute.local.benchmark import record_inference_metrics

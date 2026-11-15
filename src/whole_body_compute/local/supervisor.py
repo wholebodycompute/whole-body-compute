@@ -2046,7 +2046,18 @@ class ThermalSupervisor:
                 is_autonomic = any(tok in cmd for tok in ("voicefi tray", "mlx_metal_worker"))
                 is_other_dev = (
                     any(tok in cmd for tok in ("vifi", "voicefi", "python", "uv"))
-                    and not any(tok in cmd for tok in ("mlx_lm.server", "llama-server", "ollama", "telemetry_server"))
+                    and not any(
+                        tok in cmd
+                        for tok in (
+                            "mlx_lm.server",
+                            "llama-server",
+                            "ollama",
+                            "telemetry_server",
+                            "foveal_memory",
+                            "foveal-vision-mcp",
+                            "foveal_vision",
+                        )
+                    )
                 )
 
                 is_runaway = False
@@ -3240,7 +3251,7 @@ class BrowserVagusBrake:
     browser automation sessions, aborts pending form actions/clicks, and signals browser workers.
     """
 
-    DEFAULT_STATE_PATH = Path.home() / ".voicefi" / "vagus_browser_state.json"
+    DEFAULT_STATE_PATH = Path.home() / ".whole_body_compute" / "vagus_browser_state.json"
 
     # Conversational negation patterns that cancel an apparent abort
     NEGATION_RE = re.compile(
@@ -3254,7 +3265,12 @@ class BrowserVagusBrake:
     )
 
     def __init__(self, state_path: Optional[Path] = None) -> None:
-        self.state_path = state_path or self.DEFAULT_STATE_PATH
+        if state_path is not None:
+            self.state_path = Path(state_path)
+        else:
+            from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
+            self.state_path = get_wbc_data_dir() / "vagus_browser_state.json"
         self._lock = threading.Lock()
         self._tripped: bool = False
         self._trip_reason: str = ""

@@ -3,7 +3,7 @@ macOS LaunchAgent & Background Daemon Manager (`body daemon`) for Whole Body Com
 
 Works out-of-the-box in both Open-Core Community (`brew install whole-body-compute` /
 `uv tool install whole-body-compute`) and Pro/Team/Enterprise installations:
-  1. `com.wholebodycompute.foveal` - Community & Pro: Warm Unix socket Foveal DOM daemon (`~/.voicefi/foveal.sock`)
+  1. `com.wholebodycompute.foveal` - Community & Pro: Warm Unix socket Foveal DOM daemon (`~/.whole_body_compute/foveal.sock`)
   2. `com.wholebodycompute.foveal-memory` - Community & Pro: Sovereign Foveal Memory HTTP `:9382` bridge
   3. `com.wholebodycompute.remsleep` - Pro/Team: 03:30 AM Nocturnal REM Sleep & LoRA Distillation
   4. `com.wholebodycompute.telemetry` - Pro/Team: Live Biometric Telemetry HUD & WebSocket `:9381`
@@ -55,10 +55,9 @@ def resolve_daemon_logs_dir(override_dir: Optional[Path | str] = None) -> Path:
     env_dir = os.environ.get("WBC_DAEMON_LOG_DIR", "").strip()
     if env_dir:
         return Path(env_dir).expanduser().resolve()
-    wbc_data = os.environ.get("WBC_DATA_DIR", "").strip()
-    if wbc_data:
-        return (Path(wbc_data).expanduser() / "logs").resolve()
-    return (Path.home() / ".voicefi" / "logs").resolve()
+    from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
+    return (get_wbc_data_dir() / "logs").resolve()
 
 
 def _is_temp_path(path_str: str) -> bool:

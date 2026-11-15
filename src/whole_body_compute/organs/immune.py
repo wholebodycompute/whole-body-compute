@@ -4,7 +4,7 @@ Blood-Brain Barrier (Organ 05) — Adaptive Immune System, Epithelial Screen Fil
 Extends Whole Body Compute's innate APFS Copy-on-Write shadow sandbox and 3-Stage AST SecGate with:
   1. Adaptive Antibody Registry (`AntibodyRegistry`):
      Captures blocked AST, shell, and prompt-injection antigens, persists signatures to
-     `~/.voicefi/antibodies.json` (and Hippocampus `MemoryStore`), consolidates them during
+     `~/.whole_body_compute/antibodies.json` (and Hippocampus `MemoryStore`), consolidates them during
      Nocturnal REM Sleep, and neutralizes repeat threats in <1ms prior to execution.
   2. Epithelial Screen Filter (`EpithelialScreenFilter` / `sanitize_untrusted_screen_text`):
      Screens untrusted OCR, audio transcript, and Foveal AX DOM text for indirect prompt
@@ -1482,7 +1482,7 @@ def _get_truncation_cascade_offenders(db_path: Optional[Path | str] = None) -> D
     """
     Fast (<5ms) SQLite lookup for active truncation cascade offenders.
     Checks WBC_TRUNCATION_OFFENDERS_JSON env override first for deterministic testing.
-    Then inspects ~/.voicefi/dot_memory.db table cognitive_telemetry_events for the
+    Then inspects ~/.whole_body_compute/dot_memory.db table cognitive_telemetry_events for the
     latest row where primary_cause == 'TRUNCATION_CASCADE' or any tool in
     top_bloat_tools_json has truncated >= 2.
     Returns mapping of tool_name -> {truncated, est_kb, primary_cause}.
@@ -1505,10 +1505,10 @@ def _get_truncation_cascade_offenders(db_path: Optional[Path | str] = None) -> D
     if db_path is not None:
         target_db = Path(db_path)
     else:
-        env_db = os.environ.get("WBC_DOT_MEMORY_PATH")
-        if not env_db and os.environ.get("PYTEST_CURRENT_TEST"):
+        env_db = os.environ.get("WBC_DOT_MEMORY_PATH") or os.environ.get("VOICEFI_DOT_MEMORY_DB")
+        if not os.environ.get("WBC_DOT_MEMORY_PATH") and os.environ.get("PYTEST_CURRENT_TEST"):
             return {}
-        target_db = Path(env_db) if env_db else Path.home() / ".voicefi" / "dot_memory.db"
+        target_db = Path(env_db).expanduser() if env_db else (_get_wbc_data_dir() / "dot_memory.db")
 
     if not target_db.is_file():
         return {}
@@ -2918,7 +2918,7 @@ def run_ide_pre_tool_hook(
                     healed_cmd_candidate = bloat_res.get("auto_heal_cmd") or bloat_res.get("auto_healed_cmd")
                     strict_shell_block = os.environ.get("WBC_STRICT_SHELL_BLOAT_BLOCK", "0") == "1"
                     auto_heal_shell_enabled = (
-                        is_strict_test
+                        (is_strict_test or bloat_res.get("category") == "test_flood")
                         and os.environ.get("VOICEFI_AUTO_HEAL_SHELL", "1") == "1"
                         and not strict_shell_block
                     )
@@ -4484,7 +4484,7 @@ def run_ide_post_tool_hook(
     Measures post-action tactile file delta, scans tool output for accidental secret leaks,
     auto-slices oversized outputs elastically across Green/Yellow/Red homeostatic regimes
     from browser DOM, search, SQL, and resource tools, and pairs with the `PreToolUse` record
-    in `~/.voicefi/immune_audit.jsonl`.
+    in `~/.whole_body_compute/immune_audit.jsonl`.
     """
     t0 = time.perf_counter()
     if (
@@ -4760,6 +4760,10 @@ def run_ide_post_tool_hook(
         out_dict["formatDetected"] = post_slice_info["format_detected"]
         out_dict["directTokensSaved"] = post_slice_info["direct_tokens_saved"]
         out_dict["quadraticTokensSaved"] = post_slice_info["quadratic_tokens_saved"]
+        if post_slice_info.get("airlock_blob_id"):
+            out_dict["airlockBlobId"] = post_slice_info["airlock_blob_id"]
+            out_dict["airlock_blob_id"] = post_slice_info["airlock_blob_id"]
+            out_dict["airlockReceipt"] = post_slice_info.get("airlock_receipt", "")
         try:
             from whole_body_compute.shield import get_harness_file_token_ceiling, record_shield_event
 
@@ -5363,7 +5367,7 @@ def cli_hook_main(argv: Optional[List[str]] = None) -> int:
                         if isinstance(crash_cue, str) and crash_cue.strip():
                             _stash_preinv_context(post_conv_id, crash_cue.strip())
                     filtered_post: Dict[str, Any] = {"injectSteps": res_obj.get("injectSteps", [])}
-                    for keep_k in ("toolResponse", "scrubbed", "postOutputSliced", "formatDetected"):
+                    for keep_k in ("toolResponse", "scrubbed", "postOutputSliced", "formatDetected", "airlockBlobId"):
                         if keep_k in res_obj:
                             filtered_post[keep_k] = res_obj[keep_k]
                     res_obj = filtered_post

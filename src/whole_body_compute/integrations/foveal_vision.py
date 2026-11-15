@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
 logger = logging.getLogger("whole_body_compute.integrations.foveal_vision")
 
 # Virtual keycode mapping for macOS Quartz (US layout)
@@ -62,7 +64,17 @@ IGNORE_TEXT_SUBROLES: Set[str] = {
     "AXCloseButton", "AXMinimizeButton", "AXFullScreenButton", "AXZoomButton"
 }
 
-FOVEAL_SOCKET_PATH = os.path.expanduser("~/.voicefi/foveal.sock")
+_INITIAL_FOVEAL_SOCKET_PATH = str(get_wbc_data_dir() / "foveal.sock")
+FOVEAL_SOCKET_PATH = _INITIAL_FOVEAL_SOCKET_PATH
+
+
+def _resolve_foveal_socket_path() -> str:
+    if FOVEAL_SOCKET_PATH != _INITIAL_FOVEAL_SOCKET_PATH:
+        return FOVEAL_SOCKET_PATH
+    env_sock = os.environ.get("WBC_FOVEAL_SOCKET_PATH", "").strip()
+    if env_sock:
+        return os.path.expanduser(env_sock)
+    return str(get_wbc_data_dir() / "foveal.sock")
 
 
 class SpatialMotorCache:
@@ -71,27 +83,42 @@ class SpatialMotorCache:
     Persists element center coordinates keyed by f"{app_name}:{window_bbox}:{label.lower()}".
     """
 
-    _cache_file: str = os.path.expanduser("~/.voicefi/foveal_motor_cache.json")
+    _initial_cache_file: str = str(get_wbc_data_dir() / "foveal_motor_cache.json")
+    _cache_file: str = _initial_cache_file
     _memory: Dict[str, Dict[str, Any]] = {}
     _loaded: bool = False
+    _loaded_path: Optional[str] = None
+
+    @classmethod
+    def _resolve_cache_file(cls) -> str:
+        if cls._cache_file != cls._initial_cache_file:
+            return cls._cache_file
+        env_cache = os.environ.get("WBC_FOVEAL_MOTOR_CACHE", "").strip()
+        if env_cache:
+            return os.path.expanduser(env_cache)
+        return str(get_wbc_data_dir() / "foveal_motor_cache.json")
 
     @classmethod
     def _ensure_loaded(cls) -> None:
-        if cls._loaded:
+        target_file = cls._resolve_cache_file()
+        if cls._loaded and cls._loaded_path == target_file:
             return
         cls._loaded = True
+        cls._loaded_path = target_file
+        cls._memory = {}
         try:
-            if os.path.exists(cls._cache_file):
-                with open(cls._cache_file, "r", encoding="utf-8") as f:
+            if os.path.exists(target_file):
+                with open(target_file, "r", encoding="utf-8") as f:
                     cls._memory = json.load(f)
         except Exception as exc:
             logger.debug("Failed loading SpatialMotorCache: %s", exc)
 
     @classmethod
     def _save(cls) -> None:
+        target_file = cls._resolve_cache_file()
         try:
-            os.makedirs(os.path.dirname(cls._cache_file), exist_ok=True)
-            with open(cls._cache_file, "w", encoding="utf-8") as f:
+            os.makedirs(os.path.dirname(target_file), exist_ok=True)
+            with open(target_file, "w", encoding="utf-8") as f:
                 json.dump(cls._memory, f, indent=2)
         except Exception as exc:
             logger.debug("Failed saving SpatialMotorCache: %s", exc)
@@ -607,7 +634,7 @@ class FovealVisionEngine:
                         if ch not in all_candidates:
                             all_candidates.append(ch)
 
-            # Auto-fallback when AXWindows is empty or yields 0 candidates (e.g. Granola, Control Center, menu bar apps)
+            # Auto-fallback when AXWindows is empty or yields 0 candidates (e.g. Control Center, menu bar apps)
             if not all_candidates:
                 if extras_menu_bar and extras_menu_bar not in all_candidates:
                     all_candidates.append(extras_menu_bar)
@@ -3552,7 +3579,7 @@ class FovealVisionEngine:
                     if not cls._is_empty_or_only_window_controls(interactive_elems):
                         break
 
-            # Auto-fallback if interactive_elems is still empty (e.g. Granola, Control Center, menu bar extras)
+            # Auto-fallback if interactive_elems is still empty (e.g. Control Center, menu bar extras)
             if not interactive_elems:
                 fallback_wins = []
                 extras_mb = cls._get_ax_attribute(ax_app, "AXExtrasMenuBar")
@@ -3799,13 +3826,25 @@ def capture_foveal_snapshot(
 
 
 def send_foveal_socket_request(payload: Dict[str, Any], timeout_sec: float = 2.0) -> Optional[Dict[str, Any]]:
-    """Try forwarding request to ~/.voicefi/foveal.sock for sub-5ms zero-coldstart execution."""
-    if not os.path.exists(FOVEAL_SOCKET_PATH):
-        return None
+    """Try forwarding request to ~/.whole_body_compute/foveal.sock for sub-5ms zero-coldstart execution."""
+    sock_path = _resolve_foveal_socket_path()
+    if not os.path.exists(sock_path):
+        if (
+            FOVEAL_SOCKET_PATH == _INITIAL_FOVEAL_SOCKET_PATH
+            and "WBC_DATA_DIR" not in os.environ
+            and "WBC_FOVEAL_SOCKET_PATH" not in os.environ
+        ):
+            legacy_sock = os.path.expanduser("~/.voicefi/foveal.sock")
+            if os.path.exists(legacy_sock):
+                sock_path = legacy_sock
+            else:
+                return None
+        else:
+            return None
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(timeout_sec)
-        s.connect(FOVEAL_SOCKET_PATH)
+        s.connect(sock_path)
         data = json.dumps(payload).encode("utf-8")
         s.sendall(data + b"\n")
         resp_bytes = b""
@@ -3824,13 +3863,18 @@ def send_foveal_socket_request(payload: Dict[str, Any], timeout_sec: float = 2.0
 
 
 def run_foveal_daemon(
-    socket_path: str = FOVEAL_SOCKET_PATH,
+    socket_path: Optional[str] = None,
     enable_ambient_discovery: Optional[bool] = None,
 ) -> None:
     """
     Run persistent Unix socket daemon for zero-coldstart foveal vision (<5ms)
     plus default-on passive `AmbientWorkflowObserver` workflow discovery.
     """
+    socket_path = (
+        socket_path
+        if (socket_path and socket_path != _INITIAL_FOVEAL_SOCKET_PATH)
+        else _resolve_foveal_socket_path()
+    )
     os.makedirs(os.path.dirname(socket_path), exist_ok=True)
     if os.path.exists(socket_path):
         try:

@@ -306,6 +306,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_daemon.add_argument("--dry-run", action="store_true", help="Preview LaunchAgent plist creation/removal without invoking launchctl")
     p_daemon.add_argument("--json", action="store_true", help="Output structured JSON")
 
+    # body meeting [status|start|stop|list|show|self-test] [target]
+    p_mtg = subparsers.add_parser(
+        "meeting",
+        aliases=["meetings", "calls"],
+        help="Inspect or control automatic call & microphone meeting text capture (~/.whole_body_compute/meetings & dot_memory.db)",
+    )
+    p_mtg.add_argument(
+        "action",
+        nargs="?",
+        default="status",
+        choices=["status", "start", "stop", "list", "show", "self-test", "test"],
+        help="Meeting memory action (default: status)",
+    )
+    p_mtg.add_argument(
+        "target",
+        nargs="?",
+        default="latest",
+        help="Target meeting ('latest', filename, or search query) when using `body meeting show`",
+    )
+    p_mtg.add_argument("--title", default=None, help="Optional title when manually starting a meeting session")
+    p_mtg.add_argument("--target", dest="target_flag", default=None, help="Target meeting filename or query for `show`")
+    p_mtg.add_argument("--json", action="store_true", help="Output structured JSON")
+
     # body hud (aliases: dashboard) # [direct-edit]
     p_tel = subparsers.add_parser(
         "hud",
@@ -962,6 +985,20 @@ def build_parser() -> argparse.ArgumentParser:
                 "--blocked",
                 action="store_true",
                 help="Show top blocked files / commands and their reasons",
+            )
+            p_org.add_argument(
+                "--blob",
+                dest="blob",
+                metavar="BLOB_ID",
+                default=None,
+                help="Recover lossless secret-redacted raw lines from the Airlock Blob Vault by SHA-256 prefix",
+            )
+            p_org.add_argument(
+                "--lines",
+                dest="lines",
+                metavar="START:END",
+                default=None,
+                help="1-indexed inclusive line range for --blob recovery (e.g. 120:180; default: 1:160)",
             )
 
     return parser

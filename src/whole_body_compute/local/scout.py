@@ -208,8 +208,24 @@ class ReconScout:
         max_bytes: int = 500_000,
     ) -> tuple[str, int, bool]:
         """Read target file content safely up to max_bytes (reading head+tail if file exceeds max_bytes)."""
-        path = Path(os.path.expanduser(str(target_path)))
+        expanded_str = os.path.expanduser(str(target_path))
+        path = Path(expanded_str)
         if not path.exists():
+            import glob as _glob
+
+            if _glob.has_magic(expanded_str):
+                matched = sorted(Path(m) for m in _glob.glob(expanded_str) if Path(m).is_file())
+                if matched:
+                    parts: List[str] = []
+                    total_sz = 0
+                    any_trunc = False
+                    per_file_budget = max(4096, max_bytes // len(matched))
+                    for mp in matched:
+                        sub_txt, sub_sz, sub_tr = self.read_target_content(mp, max_bytes=per_file_budget)
+                        parts.append(f"=== {mp} ===\n{sub_txt}")
+                        total_sz += sub_sz
+                        any_trunc = any_trunc or sub_tr
+                    return "\n\n".join(parts), total_sz, any_trunc
             raise FileNotFoundError(f"Target path does not exist: {path}")
 
         if path.is_file():

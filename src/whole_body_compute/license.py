@@ -359,7 +359,7 @@ TIER_CATALOG: Dict[str, Dict[str, Any]] = {
         "free_skill_export_limit": 1,
         "em_dash_auto_heal_limit": None,
         "features": [
-            "Unlimited `body audit-spend` 30-day FinOps receipts (`https://wholebodycompute.org/audit.py` / `https://wholebodycompute.com/audit.py`)",
+            "Unlimited `body audit-spend` 30-day FinOps receipts (`https://wholebodycompute.com/audit.py`)",
             "Unlimited `body begin` & `body doctor` 5-organ vitals",
             "Unlimited The Eyes (`body eyes` <5ms Foveal AXUIElement DOM Vision) & The Hands (`body hands` deterministic `ax_act` & <50ms Tactile sensor) (100% Free Forever)",
             "1 Free Teach-by-Showing Portable Skill Export (`body skills export` + unlimited free Dry-Run Previews)",
@@ -1275,7 +1275,7 @@ def format_license_and_pricing_card(
             "  🛒 Upgrade Checkout: Pro ($29): https://wholebodycompute.com/checkout/pro • Team ($79): https://wholebodycompute.com/checkout/team",
             "  🚀 1-Click Browser:  `body upgrade --open` (or `--open team`) -> then `body license --activate <POLAR_KEY>`",
             "  💡 Eyes & Hands: 100% Free Forever | Revert to Free: `body license --deactivate` | Reinstall: `body license --reinstall-wheel`",
-            "  🌐 Web & ROI Calculator: https://wholebodycompute.com  •  https://wholebodycompute.com/roi  •  https://wholebodycompute.org/audit.py",
+            "  🌐 Web & ROI Calculator: https://wholebodycompute.com  •  https://wholebodycompute.com/roi  •  https://wholebodycompute.com/audit.py",
             f"  📜 Patent Notice: {PATENT_NOTICES}",
             "",
         ]

@@ -37,8 +37,8 @@ from whole_body_compute.procedural_telemetry import (
 )
 from whole_body_compute.redaction import redact_secrets
 
-DEFAULT_HUB_INDEX_URL = "https://hub.wholebodycompute.org/index.json"
-FALLBACK_HUB_INDEX_URL = "https://wholebodycompute.org/hub/index.json"
+DEFAULT_HUB_INDEX_URL = "https://wholebodycompute.com/hub/index.json"
+FALLBACK_HUB_INDEX_URL = "https://hub.wholebodycompute.org/index.json"
 
 RECIPE_SIGNING_DOMAIN = "WBC-PAL-WORKFLOW-V1"
 INDEX_SIGNING_DOMAIN = "WBC-HUB-INDEX-V1"
@@ -1794,7 +1794,7 @@ class HubClient:
 
             if upload:
                 target_reg = registry_url or os.environ.get(
-                    "WBC_HUB_PUBLISH_URL", "https://hub.wholebodycompute.org/v1/publish"
+                    "WBC_HUB_PUBLISH_URL", "https://wholebodycompute.com/v1/publish"
                 )
                 if target_reg.startswith("http://") and not _is_loopback_url(target_reg):
                     raise RecipeVerificationError("Refusing to upload over plain HTTP to non-loopback host")

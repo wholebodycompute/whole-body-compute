@@ -426,7 +426,7 @@ class SpaceSaver:
             return {"success": False, "error": f"File not found: {target}"}
 
         orig_size = target.stat().st_size
-        tmp_output = target.parent / f".voicefi_tmp_{target.stem}.mp4"
+        tmp_output = target.parent / f".wbc_tmp_{target.stem}.mp4"
         final_output = target.parent / f"{target.stem}.mp4"
 
         # Check if already HEVC
@@ -455,8 +455,9 @@ class SpaceSaver:
         transcode_ok = False
         tmp_output.unlink(missing_ok=True)
         try:
-            for stale in target.parent.glob(f".voicefi_tmp_{target.stem}*"):
-                stale.unlink(missing_ok=True)
+            for prefix in (f".wbc_tmp_{target.stem}*", f".voicefi_tmp_{target.stem}*"):
+                for stale in target.parent.glob(prefix):
+                    stale.unlink(missing_ok=True)
         except Exception:
             pass
 

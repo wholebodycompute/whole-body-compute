@@ -13,11 +13,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from whole_body_compute.local.engine import LocalModelEngine, detect_hardware_backend
+from whole_body_compute.procedural_telemetry import get_wbc_data_dir
 
 logger = logging.getLogger("whole_body_compute.local.benchmark")
 
-DEFAULT_BENCHMARK_FILE = Path(os.path.expanduser("~/.voicefi/benchmarks.json"))
-DEFAULT_TOT_BENCHMARK_FILE = Path(os.path.expanduser("~/.voicefi/tot_benchmarks.json"))
+_INITIAL_BENCHMARK_FILE = get_wbc_data_dir() / "benchmarks.json"
+DEFAULT_BENCHMARK_FILE = _INITIAL_BENCHMARK_FILE
+_INITIAL_TOT_BENCHMARK_FILE = get_wbc_data_dir() / "tot_benchmarks.json"
+DEFAULT_TOT_BENCHMARK_FILE = _INITIAL_TOT_BENCHMARK_FILE
 
 
 @dataclass
@@ -172,9 +175,9 @@ def record_inference_metrics(
     tok_per_sec: float,
     cost_usd: float = 0.0,
     notes: str = "",
-    db_path: Path = DEFAULT_BENCHMARK_FILE,
+    db_path: Optional[Path] = None,
 ) -> BenchmarkResult:
-    """Record an inference benchmark run and append to ~/.voicefi/benchmarks.json."""
+    """Record an inference benchmark run and append to ~/.whole_body_compute/benchmarks.json."""
     runner = LocalBenchmarkRunner(db_path=db_path)
     res = BenchmarkResult(
         test_name=test_name,
@@ -202,13 +205,23 @@ class LocalBenchmarkRunner:
     def __init__(
         self,
         engine: Optional[LocalModelEngine] = None,
-        db_path: Path = DEFAULT_BENCHMARK_FILE,
-        tot_db_path: Path = DEFAULT_TOT_BENCHMARK_FILE,
+        db_path: Optional[Path] = None,
+        tot_db_path: Optional[Path] = None,
     ):
         self.engine = engine or LocalModelEngine()
-        self.db_path = db_path
+        if db_path is not None:
+            self.db_path = Path(db_path)
+        elif DEFAULT_BENCHMARK_FILE != _INITIAL_BENCHMARK_FILE:
+            self.db_path = Path(DEFAULT_BENCHMARK_FILE)
+        else:
+            self.db_path = get_wbc_data_dir() / "benchmarks.json"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.tot_db_path = tot_db_path
+        if tot_db_path is not None:
+            self.tot_db_path = Path(tot_db_path)
+        elif DEFAULT_TOT_BENCHMARK_FILE != _INITIAL_TOT_BENCHMARK_FILE:
+            self.tot_db_path = Path(DEFAULT_TOT_BENCHMARK_FILE)
+        else:
+            self.tot_db_path = get_wbc_data_dir() / "tot_benchmarks.json"
         self.tot_db_path.parent.mkdir(parents=True, exist_ok=True)
 
     def load_history(self) -> List[Dict[str, Any]]:

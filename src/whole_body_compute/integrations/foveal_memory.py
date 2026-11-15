@@ -976,6 +976,23 @@ class _FovealMemoryHTTPHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/meeting/status":
+            from whole_body_compute.audio.meeting_memory import (
+                _GLOBAL_WATCHER,
+                detect_call_or_mic_trigger,
+                list_saved_meetings,
+            )
+
+            status_payload = (
+                _GLOBAL_WATCHER.status_dict()
+                if _GLOBAL_WATCHER is not None
+                else {"watcher_running": False, "state": "standby"}
+            )
+            status_payload["live_trigger"] = detect_call_or_mic_trigger()
+            status_payload["recent_meetings"] = list_saved_meetings(limit=5)
+            self._send_json(200, status_payload)
+            return
+
         self._send_json(404, {"error": f"Unknown path: {parsed.path}"})
 
     def do_POST(self) -> None:
@@ -1006,6 +1023,50 @@ class _FovealMemoryHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, "audio_id": aid})
             return
 
+        if parsed.path == "/meeting/start":
+            from whole_body_compute.audio.meeting_memory import get_or_start_global_meeting_watcher
+
+            watcher = get_or_start_global_meeting_watcher(foveal_db_path=self.db_path)
+            if watcher is None:
+                self._send_json(503, {"ok": False, "error": "Meeting watcher disabled"})
+                return
+            sess = watcher.start_session_now(
+                app_name=str(body.get("app_name") or "Manual Meeting"),
+                title=body.get("title"),
+                reason="manual_start",
+                manual=True,
+            )
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "session_id": sess.session_id,
+                    "title": sess.title,
+                    "app_name": sess.app_name,
+                },
+            )
+            return
+
+        if parsed.path == "/meeting/stop":
+            from whole_body_compute.audio.meeting_memory import _GLOBAL_WATCHER
+
+            if _GLOBAL_WATCHER is None:
+                self._send_json(200, {"ok": True, "stopped": False, "message": "No active watcher"})
+                return
+            done = _GLOBAL_WATCHER.stop_session_now()
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "stopped": done is not None,
+                    "title": done.title if done else "",
+                    "markdown_path": done.markdown_path if done else "",
+                    "utterance_count": len(done.utterances) if done else 0,
+                    "dot_memory_ids": done.dot_memory_ids if done else [],
+                },
+            )
+            return
+
         self._send_json(404, {"error": f"Unknown POST path: {parsed.path}"})
 
 
@@ -1025,6 +1086,12 @@ def serve_local_foveal_http(
     server = ThreadingHTTPServer((host, port), BoundHandler)
 
     if poll_windows:
+        try:
+            from whole_body_compute.audio.meeting_memory import get_or_start_global_meeting_watcher
+
+            get_or_start_global_meeting_watcher(foveal_db_path=resolved_db)
+        except Exception as exc:
+            logger.debug("AutoMeetingMemoryWatcher init skipped: %s", exc)
         def _window_poller() -> None:
             last_seen: Dict[str, str] = {}
             last_window_sig: Tuple[str, str] = ("", "")
@@ -2145,11 +2212,25 @@ def main() -> int:
         return 0 if res.get("status") in ("migrated", "skipped") else 1
 
     if args.serve_http:
+        import signal as _signal
+
         server = serve_local_foveal_http(host=args.host, port=args.port, db_path=db_path)
+
+        def _handle_sigterm(signum: int, frame: Any) -> None:
+            try:
+                from whole_body_compute.audio.meeting_memory import _GLOBAL_WATCHER
+
+                if _GLOBAL_WATCHER is not None:
+                    _GLOBAL_WATCHER.flush_for_daemon_reload()
+            except Exception:
+                pass
+            raise SystemExit(0)
+
+        _signal.signal(_signal.SIGTERM, _handle_sigterm)
         print(f"[FovealMemoryLocal] Listening on http://{args.host}:{args.port} (db: {db_path})", flush=True)
         try:
             server.serve_forever()
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, SystemExit):
             server.server_close()
         return 0
 

@@ -3,7 +3,6 @@
 # Whole Body Compute - 60-Second Sovereign Agent Runtime Installer
 # Hosted at:
 #   curl -fsSL https://wholebodycompute.com/begin | sh
-#   curl -fsSL https://wholebodycompute.org/begin | sh
 # ==============================================================================
 set -e
 

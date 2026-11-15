@@ -4,7 +4,7 @@ Whole Body Compute - Organ 05 Blood-Brain Barrier Shield Installer & Live Saving
 
 Provides:
 1. `ShieldTelemetryLedger` & `record_shield_event`:
-   Sub-2ms, thread-safe SQLite WAL telemetry ledger (`~/.voicefi/dot_memory.db` table
+   Sub-2ms, thread-safe SQLite WAL telemetry ledger (`~/.whole_body_compute/dot_memory.db` table
    `shield_savings_ledger`, or custom path via `WBC_SHIELD_DB_PATH`) tracking every
    PreToolUse AST symbol slice, Local Metal ReconScout compression, Foveal episodic memory local
    digest, vascular block, and PostToolUse secret redaction across all bots.

@@ -7,7 +7,7 @@ proactive morning/channel briefing on Local Metal (:9380 gemma4-26b / :9379 voic
 1. 👁️ Pillar 1 - The Eyes (Organ 07): Recent Foveal episodic OCR & Foveal AXUIElement focus,
    with optional `--channel <name>` filtering and mandatory `redact_secrets` scrubbing.
 2. 🧠 Pillar 2 - The Hippocampus (Organ 08): Recent high-salience facts/habits from
-   `~/.voicefi/dot_memory.db` + auto-learned `PalWorkflow` candidates (`PalWorkflowRegistry`).
+   `~/.whole_body_compute/dot_memory.db` + auto-learned `PalWorkflow` candidates (`PalWorkflowRegistry`).
 3. 🦴 Pillar 3 - Workspace & Git State (Organ 09): Live Git branch, porcelain delta count,
    modified/untracked file summary, latest commit, and active pipelines (`.agents/ACTIVE_PIPELINES.md`).
 4. 💰 Pillar 4 - FinOps & Organ Vitals (`body report`): 24h tokens & USD saved at $0.00 Local Metal,
@@ -566,10 +566,14 @@ class SovereignDuetBriefingEngine:
         dot_db_path: Optional[Path] = None,
         screenpipe_db_path: Optional[Path] = None,
     ) -> None:
+        from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
         self.workspace_root = Path(workspace_root or os.getcwd()).resolve()
         self.dot_db_path = Path(
             dot_db_path
-            or os.environ.get("VOICEFI_DOT_MEMORY_DB", str(Path.home() / ".voicefi" / "dot_memory.db"))
+            or os.environ.get("WBC_DOT_MEMORY_PATH")
+            or os.environ.get("VOICEFI_DOT_MEMORY_DB")
+            or (get_wbc_data_dir() / "dot_memory.db")
         )
         foveal_default = Path.home() / ".whole_body" / "foveal_memory.sqlite"
         self.screenpipe_db_path = Path(
@@ -780,13 +784,14 @@ class SovereignDuetBriefingEngine:
         suggestions_override: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
-        Query recent high-salience facts/habits from `~/.voicefi/dot_memory.db`
+        Query recent high-salience facts/habits from `~/.whole_body_compute/dot_memory.db`
         and auto-learned `PalWorkflow` candidates via `PalWorkflowRegistry.get_auto_learned_suggestions()`.
         """
         from whole_body_compute.integrations.pal_workflow import PalWorkflowRegistry
 
         terms = _channel_terms(channel)
         recent_memories: List[Dict[str, Any]] = []
+        recent_meetings: List[Dict[str, Any]] = []
         total_active_memories = 0
         seen_display_Summaries: set[str] = set()
 
@@ -840,6 +845,26 @@ class SovereignDuetBriefingEngine:
                                     "raw_fact": fact_s[:260],
                                     "salience": round(float(r["salience"] or 1.0), 3),
                                     "channel_score": score,
+                                }
+                            )
+
+                    meeting_rows = conn.execute(
+                        """
+                        SELECT id, fact, tags
+                        FROM memories
+                        WHERE COALESCE(archived, 0) = 0 AND category = 'meeting'
+                        ORDER BY id DESC
+                        LIMIT 3
+                        """
+                    ).fetchall()
+                    for mr in meeting_rows:
+                        m_fact = _clean_memory_fact_for_display(str(mr["fact"] or ""), "meeting")
+                        if m_fact:
+                            recent_meetings.append(
+                                {
+                                    "id": int(mr["id"]),
+                                    "fact": m_fact[:260],
+                                    "tags": redact_secrets(str(mr["tags"] or "")),
                                 }
                             )
             except Exception as exc:
@@ -898,6 +923,7 @@ class SovereignDuetBriefingEngine:
             "dot_memory_db_exists": self.dot_db_path.is_file(),
             "total_active_memories": total_active_memories,
             "recent_memories": recent_memories[:5],
+            "recent_meetings": recent_meetings[:3],
             "auto_learned_suggestions_count": len(raw_suggestions),
             "staged_candidates_count": len(staged_candidates),
             "staged_candidates": staged_candidates,
@@ -1898,6 +1924,8 @@ def format_briefing_terminal(briefing: Dict[str, Any]) -> str:
     )
     for mem in (hippo.get("recent_memories") or [])[:2]:
         lines.append(f"     • [{mem.get('category', 'fact')}] {mem.get('fact', '')[:105]}")
+    for mtg in (hippo.get("recent_meetings") or [])[:2]:
+        lines.append(f"     • 🎙️ [Meeting] {mtg.get('fact', '')[:105]}")
     for cand in (hippo.get("staged_candidates") or [])[:2]:
         lines.append(
             f"     • [Staged Candidate] {cand.get('id')}: {cand.get('title')} "

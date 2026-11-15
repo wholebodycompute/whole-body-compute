@@ -411,9 +411,9 @@
       color: var(--ink);
     }
 
-    /* Zero-Install Audit Micro-Line below Hero Buttons */
+    /* Zero-Install Audit Micro-Line directly beneath Terminal Box */
     .hero-zero-install {
-      margin-top: 16px;
+      margin: -4px 0 18px 0;
       display: inline-flex;
       flex-wrap: wrap;
       align-items: center;
@@ -1157,8 +1157,8 @@
           </div>
           <div class="term-tabs">
             <button type="button" class="term-tab active" id="tab-begin" onclick="setTab('begin')">install</button>
-            <button type="button" class="term-tab" id="tab-uv" onclick="setTab('uv')">uv / pipx</button>
             <button type="button" class="term-tab" id="tab-audit" onclick="setTab('audit')">audit spend</button>
+            <button type="button" class="term-tab" id="tab-uv" onclick="setTab('uv')">uv / pipx</button>
             <button type="button" class="term-tab" id="tab-commit" onclick="setTab('commit')">$0 commit</button>
             <button type="button" class="term-tab" id="tab-handoff" onclick="setTab('handoff')">fresh chat</button>
             <button type="button" class="term-tab" id="tab-candidates" onclick="setTab('candidates')">muscle memory</button>
@@ -1175,6 +1175,15 @@
         </div>
       </div>
 
+      <p class="hero-zero-install">
+        <span><strong>Want your 30-day numbers first?</strong> Read-only audit across Claude Code, Cursor &amp; Antigravity (zero installs):</span>
+        <button type="button" class="zero-audit-pill" id="zeroAuditPill" onclick="copyZeroInstallAudit()" title="100% Python 3 stdlib - zero pip installs or downloads">
+          <span>$ curl -sSL <span class="pill-cmd">https://wholebodycompute.com/audit.py</span> | python3</span>
+          <span class="pill-badge" id="zeroAuditBadge">Copy</span>
+        </button>
+        <a href="audit.py" target="_blank" rel="noopener" class="roi-inline-link" onclick="try{window.posthog&&window.posthog.capture('wbc_audit_source_inspected',{surface:'hero'});}catch(e){}">Inspect source &nearr;</a>
+      </p>
+
       <div class="hero-actions">
         <a href="#pricing" class="btn-primary">
           <span>Get Pro</span>
@@ -1183,16 +1192,6 @@
           <span>Open-Core Spec &amp; CLI &rarr;</span>
         </a>
       </div>
-
-      <p class="hero-zero-install">
-        <span><strong>Don&rsquo;t want to install anything yet?</strong> Audit your local agent spend &amp; see how much you&rsquo;ll save with zero downloads:</span>
-        <button type="button" class="zero-audit-pill" id="zeroAuditPill" onclick="copyZeroInstallAudit()" title="100% Python 3 stdlib - zero pip installs or downloads">
-          <span>$ curl -sSL <span class="pill-cmd">https://wholebodycompute.com/audit.py</span> | python3</span>
-          <span class="pill-badge" id="zeroAuditBadge">Copy</span>
-        </button>
-        <!-- POST-LAUNCH REVISIT: Re-enable href="finops_roi_calculator.html" on .roi-inline-link once finalized -->
-        <span>or try the <span class="roi-inline-link">Web ROI Calculator (Coming Soon)</span></span>
-      </p>
     </section>
 
     <!-- Section 1: SWE-bench_Verified Benchmarks -->
@@ -1575,16 +1574,43 @@
       } catch (_) {}
     }
 
+    function resolveWebChannelSlug(fallbackSlug) {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const raw = (params.get("utm_source") || params.get("s") || "").trim().toLowerCase();
+        if (/^[a-z0-9][a-z0-9_.-]{0,39}$/.test(raw)) return raw;
+      } catch (_) {}
+      return fallbackSlug;
+    }
+
+    function buildAttributedCmd(tabKey, fallbackSlug) {
+      const slug = resolveWebChannelSlug(fallbackSlug);
+      if (tabKey === "audit") {
+        return "curl -sSL https://wholebodycompute.com/audit/" + slug + " | python3";
+      }
+      if (tabKey === "begin") {
+        return "curl -fsSL https://wholebodycompute.com/begin/" + slug + " | sh";
+      }
+      return TERM_CMDS[tabKey] ? TERM_CMDS[tabKey].raw : "";
+    }
+
     function trackCheckoutClick(tier) {
       emitWebFunnelEvent("wbc_checkout_clicked", {
         tier: tier,
-        surface: "web_pricing_card"
+        surface: "web_pricing_card",
+        acquisition_source: resolveWebChannelSlug("web")
       });
     }
 
     function copyCurrentCmd() {
-      emitWebFunnelEvent("wbc_web_install_copied", { command_tab: activeKey });
-      navigator.clipboard.writeText(TERM_CMDS[activeKey].raw).then(() => {
+      const slug = resolveWebChannelSlug("web");
+      emitWebFunnelEvent("wbc_web_install_copied", {
+        command_tab: activeKey,
+        surface: "web_hero_terminal",
+        acquisition_source: slug
+      });
+      const cmdToCopy = buildAttributedCmd(activeKey, "web");
+      navigator.clipboard.writeText(cmdToCopy).then(() => {
         const btn = document.getElementById("copyBtn");
         const copyText = document.getElementById("copyText");
         if (btn) btn.classList.add("copied");
@@ -1598,8 +1624,14 @@
 
     function copyZeroInstallAudit() {
       setTab("audit");
-      emitWebFunnelEvent("wbc_web_install_copied", { command_tab: "zero_audit_pill" });
-      navigator.clipboard.writeText(TERM_CMDS.audit.raw).then(() => {
+      const slug = resolveWebChannelSlug("web");
+      emitWebFunnelEvent("wbc_web_install_copied", {
+        command_tab: "zero_audit_pill",
+        surface: "web_hero_pill",
+        acquisition_source: slug
+      });
+      const cmdToCopy = buildAttributedCmd("audit", "web");
+      navigator.clipboard.writeText(cmdToCopy).then(() => {
         const pill = document.getElementById("zeroAuditPill");
         const badge = document.getElementById("zeroAuditBadge");
         if (pill) pill.classList.add("copied");

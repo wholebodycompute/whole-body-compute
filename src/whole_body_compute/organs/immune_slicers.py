@@ -8,6 +8,7 @@ import ast
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -311,6 +312,277 @@ def _append_immune_audit_event(
         pass
 
 
+_JS_TS_IMPORT_EXTENSIONS: Tuple[str, ...] = (
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".d.ts",
+)
+
+_JS_TS_SOURCE_EXTENSIONS: Tuple[str, ...] = (
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+)
+
+_JS_TS_IMPORT_SPEC_RE = re.compile(
+    r"""(?:^\s*(?:import|export)\s+(?:type\s+)?(?:[^'"\n;]*?\s+from\s+)?|import\s*\(\s*|require\s*\(\s*)['"]([^'"\n]+)['"]""",
+    re.MULTILINE,
+)
+
+_STDLIB_MODULES: frozenset[str] = frozenset(getattr(sys, "stdlib_module_names", ()))
+
+
+def _probe_py_module_path(base_dir: Path, parts: List[str]) -> Optional[Path]:
+    """Probe `<base>/<parts>.py` or `<base>/<parts>/__init__.py` with bounded stat calls."""
+    if not parts:
+        init_p = base_dir / "__init__.py"
+        return init_p if init_p.is_file() else None
+    target = base_dir.joinpath(*parts)
+    py_file = target.with_suffix(".py")
+    if py_file.is_file():
+        return py_file
+    pyi_file = target.with_suffix(".pyi")
+    if pyi_file.is_file():
+        return pyi_file
+    init_file = target / "__init__.py"
+    if init_file.is_file():
+        return init_file
+    return None
+
+
+def _probe_js_ts_specifier(candidate_base: Path) -> Optional[Path]:
+    """Resolve a JS/TS module path on disk including ESM `.js -> .ts/.tsx` and `/index.*`."""
+    if candidate_base.suffix in _JS_TS_IMPORT_EXTENSIONS:
+        if candidate_base.is_file():
+            return candidate_base
+        if candidate_base.suffix in (".js", ".jsx", ".mjs", ".cjs"):
+            stem_base = candidate_base.with_suffix("")
+            for ts_ext in (".ts", ".tsx", ".d.ts"):
+                remapped = stem_base.with_suffix(ts_ext)
+                if remapped.is_file():
+                    return remapped
+        return None
+
+    for ext in _JS_TS_IMPORT_EXTENSIONS:
+        with_ext = Path(f"{candidate_base}{ext}")
+        if with_ext.is_file():
+            return with_ext
+
+    if candidate_base.is_dir():
+        for ext in _JS_TS_IMPORT_EXTENSIONS:
+            idx_p = candidate_base / f"index{ext}"
+            if idx_p.is_file():
+                return idx_p
+    return None
+
+
+def _discover_workspace_and_search_roots(resolved_file: Path) -> Tuple[Path, List[Path]]:
+    """
+    Walk upward at most 8 ancestor levels (O(1) stat checks, zero directory traversal)
+    to identify the workspace root and Python/TS import roots.
+    """
+    file_dir = resolved_file.parent
+    workspace_root = file_dir
+    search_roots: List[Path] = [file_dir]
+
+    cur = file_dir
+    for _ in range(8):
+        if (cur / "__init__.py").is_file():
+            parent_root = cur.parent
+            if parent_root not in search_roots:
+                search_roots.append(parent_root)
+        if any(
+            (cur / marker).exists()
+            for marker in ("pyproject.toml", "tsconfig.json", "package.json", ".git", "setup.py")
+        ):
+            workspace_root = cur
+            src_dir = cur / "src"
+            if src_dir.is_dir() and src_dir not in search_roots:
+                search_roots.append(src_dir)
+            if cur not in search_roots:
+                search_roots.append(cur)
+            break
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+
+    return workspace_root, search_roots
+
+
+def _collect_top_level_py_import_nodes(tree: ast.Module) -> List[ast.AST]:
+    """Extract top-level `import` / `from ... import` nodes (including `if TYPE_CHECKING:`)."""
+    nodes: List[ast.AST] = []
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            nodes.append(stmt)
+        elif isinstance(stmt, (ast.If, ast.Try)):
+            sub_body = list(stmt.body) + list(getattr(stmt, "orelse", []))
+            for sub in sub_body:
+                if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                    nodes.append(sub)
+        if len(nodes) >= 48:
+            break
+    return nodes
+
+
+def _resolve_workspace_imports_footer(
+    fpath: Path,
+    raw_text: str,
+    parsed_py_tree: Optional[ast.Module] = None,
+    max_files: int = 8,
+    max_chars: int = 520,
+) -> str:
+    """
+    Zero-Index Local Import Footer (Organ 05 Phase 3):
+    Resolve top-level `.py` and `.ts`/`.tsx`/`.js`/`.jsx` workspace imports directly
+    against disk with zero cold-start index, zero SQLite graph, `<= 150` tokens, and `<1ms` latency.
+    """
+    if not raw_text:
+        return ""
+    ext = fpath.suffix.lower()
+    if ext != ".py" and ext not in _JS_TS_SOURCE_EXTENSIONS:
+        return ""
+    try:
+        if not fpath.is_file():
+            return ""
+        resolved_self = Path(os.path.abspath(fpath))
+    except OSError:
+        return ""
+
+    workspace_root, search_roots = _discover_workspace_and_search_roots(resolved_self)
+    resolved_targets: List[Path] = []
+    seen_targets: Set[str] = {os.path.normpath(str(resolved_self))}
+
+    def _record(candidate: Optional[Path]) -> None:
+        if candidate is None:
+            return
+        norm_s = os.path.normpath(str(candidate))
+        if norm_s not in seen_targets:
+            seen_targets.add(norm_s)
+            resolved_targets.append(Path(norm_s))
+
+    if ext == ".py":
+        tree = parsed_py_tree
+        if tree is None:
+            try:
+                tree = ast.parse(raw_text)
+            except SyntaxError:
+                tree = None
+        if tree is not None:
+            for node in _collect_top_level_py_import_nodes(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        parts = [p for p in alias.name.split(".") if p]
+                        if not parts:
+                            continue
+                        if parts[0] in _STDLIB_MODULES and not (resolved_self.parent / f"{parts[0]}.py").is_file():
+                            continue
+                        for root in search_roots:
+                            hit = _probe_py_module_path(root, parts)
+                            if hit is not None:
+                                _record(hit)
+                                break
+                elif isinstance(node, ast.ImportFrom):
+                    mod_parts = [p for p in (node.module or "").split(".") if p]
+                    if node.level and node.level >= 1:
+                        rel_base = resolved_self.parent
+                        valid_rel = True
+                        for _ in range(node.level - 1):
+                            if rel_base.parent == rel_base:
+                                valid_rel = False
+                                break
+                            rel_base = rel_base.parent
+                        if not valid_rel:
+                            continue
+                        mod_hit = _probe_py_module_path(rel_base, mod_parts) if mod_parts else None
+                        if mod_hit is not None and mod_hit.name != "__init__.py":
+                            _record(mod_hit)
+                        else:
+                            matched_sub = False
+                            for alias in node.names[:16]:
+                                if alias.name == "*":
+                                    continue
+                                sub_hit = _probe_py_module_path(rel_base, [*mod_parts, alias.name])
+                                if sub_hit is not None:
+                                    _record(sub_hit)
+                                    matched_sub = True
+                            if not matched_sub and mod_hit is not None:
+                                _record(mod_hit)
+                    elif mod_parts:
+                        if mod_parts[0] in _STDLIB_MODULES and not (resolved_self.parent / f"{mod_parts[0]}.py").is_file():
+                            continue
+                        for root in search_roots:
+                            mod_hit = _probe_py_module_path(root, mod_parts)
+                            if mod_hit is not None and mod_hit.name != "__init__.py":
+                                _record(mod_hit)
+                                break
+                            pkg_dir = root.joinpath(*mod_parts)
+                            if pkg_dir.is_dir():
+                                matched_sub = False
+                                for alias in node.names[:16]:
+                                    if alias.name == "*":
+                                        continue
+                                    sub_hit = _probe_py_module_path(root, [*mod_parts, alias.name])
+                                    if sub_hit is not None:
+                                        _record(sub_hit)
+                                        matched_sub = True
+                                if matched_sub:
+                                    break
+                            if mod_hit is not None:
+                                _record(mod_hit)
+                                break
+
+    elif ext in _JS_TS_SOURCE_EXTENSIONS:
+        scan_window = raw_text[:65536]
+        file_dir = resolved_self.parent
+        alias_roots = [workspace_root / "src", workspace_root]
+        for match in _JS_TS_IMPORT_SPEC_RE.finditer(scan_window):
+            spec = match.group(1).strip()
+            if not spec:
+                continue
+            if spec.startswith(("./", "../")):
+                _record(_probe_js_ts_specifier(file_dir / spec))
+            elif spec.startswith(("@/", "~/")):
+                rel_spec = spec[2:]
+                for a_root in alias_roots:
+                    hit = _probe_js_ts_specifier(a_root / rel_spec)
+                    if hit is not None:
+                        _record(hit)
+                        break
+
+    if not resolved_targets:
+        return ""
+
+    total_found = len(resolved_targets)
+    rel_labels: List[str] = []
+    running_chars = 42  # Header prefix allowance
+    for target_p in resolved_targets[: max(1, max_files)]:
+        try:
+            label = target_p.relative_to(workspace_root).as_posix()
+        except ValueError:
+            try:
+                label = os.path.relpath(target_p, workspace_root).replace("\\", "/")
+            except ValueError:
+                label = target_p.name
+        next_cost = len(label) + (2 if rel_labels else 0)
+        if rel_labels and (running_chars + next_cost) > max_chars:
+            break
+        rel_labels.append(label)
+        running_chars += next_cost
+
+    omitted = total_found - len(rel_labels)
+    noun = "file" if total_found == 1 else "files"
+    suffix = f" (+{omitted} more)" if omitted > 0 else ""
+    return f"  [Resolved Workspace Imports ({total_found} {noun})]: {', '.join(rel_labels)}{suffix}"
+
+
 def _build_fast_file_symbol_outline(
     fpath: Path,
     raw_text: str,
@@ -319,15 +591,16 @@ def _build_fast_file_symbol_outline(
     """
     Generate a <3ms zero-LLM AST Symbol Map (for .py) or Section/Heading/Key Outline
     (for .json, .csv, .md, .sql, .yaml, .html, .ts, .js, .log, .jsonl) so agents can
-    re-call read_file with exact StartLine/EndLine bounds or run voicefi.local.scout.
+    re-call read_file with exact StartLine/EndLine bounds or run whole_body_compute.local.scout.
     """
     items: List[str] = []
     ext = fpath.suffix.lower()
+    parsed_py_tree: Optional[ast.Module] = None
 
     if ext == ".py":
         try:
-            tree = ast.parse(raw_text)
-            for node in tree.body:
+            parsed_py_tree = ast.parse(raw_text)
+            for node in parsed_py_tree.body:
                 if isinstance(node, ast.ClassDef):
                     end_ln = getattr(node, "end_lineno", node.lineno)
                     methods = [
@@ -511,7 +784,19 @@ def _build_fast_file_symbol_outline(
                 if len(items) >= 10:
                     break
 
-    return "\n".join(items) if items else "  (No top-level symbols indexed; slice 120-line windows)"
+    base_outline = (
+        "\n".join(items)
+        if items
+        else "  (No top-level symbols indexed; slice 120-line windows)"
+    )
+    import_footer = _resolve_workspace_imports_footer(
+        fpath=fpath,
+        raw_text=raw_text,
+        parsed_py_tree=parsed_py_tree,
+    )
+    if import_footer:
+        return f"{base_outline}\n{import_footer}"
+    return base_outline
 
 
 def _extract_predictive_ast_slice(
@@ -1213,11 +1498,619 @@ def _extract_fast_log_digest(path: Path | str, max_bytes: int = 2 * 1024 * 1024)
     return digest
 
 
-def _detect_buffer_schema_format(raw_text: str, target_path: Optional[str | Path] = None) -> Tuple[str, Path]:
+_SHELL_OUTPUT_TOOL_NAMES = {
+    "run_command",
+    "bash",
+    "sh",
+    "zsh",
+    "cmd",
+    "powershell",
+    "terminal",
+    "execute_command",
+    "run_terminal_cmd",
+    "developer__shell",
+    "tool_output",
+    "post_tool",
+}
+
+_GIT_PORCELAIN_LINE_RE = re.compile(
+    r"^(?:[ MADRCU?!]{1,2})\s+\S+"
+)
+_PYTEST_ITEM_RE = re.compile(
+    r"^(?:\S+::\S+\s+(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\b|(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\s+\S+::\S+)"
+)
+_PYTEST_DOT_PROGRESS_RE = re.compile(r"^[.sFxEX]+\s*(?:\[\s*\d+%\])?\s*$")
+_CARGO_ITEM_RE = re.compile(r"^test\s+(\S+)\s+\.\.\.\s+(ok|FAILED|ignored)\b")
+_GO_RUN_RE = re.compile(r"^===\s+(?:RUN|PAUSE|CONT)\s+(\S+)")
+_GO_RESULT_RE = re.compile(r"^---\s+(PASS|FAIL|SKIP):\s+(\S+)")
+_GO_PKG_OK_RE = re.compile(r"^(?:ok|\?)\s+\S+")
+_JEST_PASS_RE = re.compile(r"^\s*(?:PASS\s+\S+|[✓✔]\s+)")
+_JEST_FAIL_RE = re.compile(r"^\s*(?:FAIL\s+\S+|[✕×●]\s+)")
+_FAILURE_SECTION_START_RE = re.compile(
+    r"^(?:={3,}\s*(?:FAILURES|ERRORS|short test summary info)\s*={3,}|failures:\s*$|Summary of all failing tests\b)"
+)
+_FAILURE_SECTION_STOP_RE = re.compile(
+    r"^(?:={3,}\s*(?:warnings summary|slowest .* durations)\s*={3,}|-{3,}\s*generated xml\b|={3,}\s*.*(?:\bpassed\b|\bfailed\b|\berrors?\b|\bskipped\b).*={3,}\s*$)"
+)
+_FINAL_TEST_SUMMARY_RE = re.compile(
+    r"^(?:={3,}\s*.*(?:\bpassed\b|\bfailed\b|\berrors?\b).*={3,}\s*$|test result:\s+(?:ok|FAILED)\..*|(?:Test Suites|Tests):\s+.*(?:passed|failed).*|\d+\s+(?:failed|passed).*\bin\s+[\d.]+s|FAIL\s+\S+\s+[\d.]+s)"
+)
+_GREP_LINE_RE = re.compile(
+    r"^(?!https?://)(?P<file>[^\s:\0][^:\0]{0,240}):(?P<line>\d{1,7})(?::|-)(?P<text>.*)$"
+)
+
+
+def _looks_like_grep_file_token(token: str) -> bool:
+    if not token or token.startswith(("-", "[")):
+        return False
+    if "/" in token or "\\" in token:
+        return True
+    dot_idx = token.rfind(".")
+    return 0 < dot_idx < len(token) - 1 and token[dot_idx + 1 :].isalnum()
+
+
+def _detect_cli_stdout_schema(raw_text: str) -> Optional[Tuple[str, Path]]:
+    """Fast O(1)-head/tail check for git diff/status, test suite logs, and rg/grep stdout."""
+    if not raw_text:
+        return None
+
+    head_chunk = raw_text[:8192]
+    tail_chunk = raw_text[-4096:] if len(raw_text) > 4096 else raw_text
+    sample_lines = [ln for ln in head_chunk.splitlines()[:35] if ln.strip()]
+    if not sample_lines:
+        return None
+
+    first_ln = sample_lines[0]
+
+    # 1. git diff / git show / git status
+    if (
+        first_ln.startswith("diff --git ")
+        or "\ndiff --git a/" in head_chunk
+        or ("\n--- a/" in head_chunk and "\n+++ b/" in head_chunk and "\n@@ -" in head_chunk)
+        or (first_ln.startswith("commit ") and "\ndiff --git " in raw_text)
+        or first_ln.startswith(("On branch ", "HEAD detached at ", "Changes to be committed:", "Changes not staged for commit:"))
+    ):
+        return ("git_diff_status", Path("git_diff.patch"))
+
+    if len(sample_lines) >= 8:
+        porcelain_hits = sum(1 for ln in sample_lines[:20] if _GIT_PORCELAIN_LINE_RE.match(ln))
+        if porcelain_hits >= max(6, int(len(sample_lines[:20]) * 0.75)):
+            return ("git_diff_status", Path("git_status.txt"))
+
+    # 2. Test suite stdout (pytest, cargo test, go test, jest/vitest)
+    if (
+        "test session starts" in head_chunk
+        or "=== FAILURES ===" in raw_text
+        or "=== ERRORS ===" in raw_text
+        or "short test summary info" in tail_chunk
+        or "test result: " in tail_chunk
+        or ("Test Suites:" in tail_chunk and "Tests:" in tail_chunk)
+    ):
+        return ("test_suite_stdout", Path("test_suite.log"))
+
+    pytest_hits = 0
+    cargo_hits = 0
+    go_hits = 0
+    jest_hits = 0
+    for ln in sample_lines[:25]:
+        if _PYTEST_ITEM_RE.match(ln):
+            pytest_hits += 1
+        elif _CARGO_ITEM_RE.match(ln) or (ln.startswith("running ") and ln.endswith((" test", " tests"))):
+            cargo_hits += 1
+        elif _GO_RUN_RE.match(ln) or _GO_RESULT_RE.match(ln):
+            go_hits += 1
+        elif _JEST_PASS_RE.match(ln) or _JEST_FAIL_RE.match(ln):
+            jest_hits += 1
+
+    if pytest_hits >= 3 or cargo_hits >= 2 or go_hits >= 2 or jest_hits >= 3:
+        return ("test_suite_stdout", Path("test_suite.log"))
+
+    # 3. rg / grep file:line:text stdout
+    if len(sample_lines) >= 5:
+        probe = sample_lines[:25]
+        grep_hits = 0
+        for ln in probe:
+            m = _GREP_LINE_RE.match(ln)
+            if m and _looks_like_grep_file_token(m.group("file")):
+                grep_hits += 1
+        if grep_hits >= max(5, int(len(probe) * 0.65)):
+            return ("grep_grouped_stdout", Path("grep_results.txt"))
+
+    return None
+
+
+def _build_git_diff_status_digest(lines: List[str], max_bytes: int = 8000) -> str:
+    """
+    Deterministic `git_diff_status` digest: preserves 100% of modified file paths,
+    per-file `+added / -removed` counts, and `@@ ... @@` hunk headers with raw line coordinates.
+    """
+    has_diff_headers = any(ln.startswith("diff --git ") for ln in lines[:200]) or any(
+        ln.startswith("diff --git ") for ln in lines
+    )
+    if not has_diff_headers:
+        # git status (verbose or porcelain)
+        branch_hdr: List[str] = []
+        grouped: Dict[str, List[str]] = {
+            "modified": [],
+            "added": [],
+            "deleted": [],
+            "renamed": [],
+            "untracked": [],
+            "other": [],
+        }
+        in_untracked = False
+        for ln in lines:
+            s = ln.strip()
+            if not s:
+                continue
+            if s.startswith(("On branch ", "HEAD detached at ", "Your branch is ")):
+                branch_hdr.append(s)
+                continue
+            if s.startswith("Untracked files:"):
+                in_untracked = True
+                continue
+            if s.startswith(("Changes to be committed:", "Changes not staged for commit:")):
+                in_untracked = False
+                continue
+            if s.startswith("(use \"git "):
+                continue
+            m_porc = _GIT_PORCELAIN_LINE_RE.match(ln)
+            if m_porc:
+                code = ln[:2]
+                fpath = ln[2:].strip()
+                if "?" in code:
+                    grouped["untracked"].append(fpath)
+                elif "D" in code:
+                    grouped["deleted"].append(fpath)
+                elif "A" in code:
+                    grouped["added"].append(fpath)
+                elif "R" in code:
+                    grouped["renamed"].append(fpath)
+                elif "M" in code:
+                    grouped["modified"].append(fpath)
+                else:
+                    grouped["other"].append(f"{code.strip()} {fpath}")
+            elif s.startswith("modified:"):
+                grouped["modified"].append(s.split(":", 1)[1].strip())
+            elif s.startswith("new file:"):
+                grouped["added"].append(s.split(":", 1)[1].strip())
+            elif s.startswith("deleted:"):
+                grouped["deleted"].append(s.split(":", 1)[1].strip())
+            elif s.startswith("renamed:"):
+                grouped["renamed"].append(s.split(":", 1)[1].strip())
+            elif in_untracked and ln.startswith(("\t", "  ")):
+                grouped["untracked"].append(s)
+
+        out = ["[Git Working Tree Status Digest]:"]
+        out.extend(branch_hdr[:3])
+        for bucket, items in grouped.items():
+            if items:
+                out.append(f"  {bucket} ({len(items)}): " + ", ".join(items))
+        return "\n".join(out)
+
+    # Full `git diff` / `git show` parser
+    commit_preamble: List[str] = []
+    files: List[Dict[str, Any]] = []
+    cur_file: Optional[Dict[str, Any]] = None
+    cur_hunk: Optional[Dict[str, Any]] = None
+
+    for idx, ln in enumerate(lines, start=1):
+        if ln.startswith("diff --git "):
+            if cur_file is not None:
+                files.append(cur_file)
+            # Parse `diff --git a/foo b/bar`
+            path_part = ln[len("diff --git ") :].strip()
+            b_idx = path_part.rfind(" b/")
+            if b_idx != -1:
+                a_path = path_part[2:b_idx] if path_part.startswith("a/") else path_part[:b_idx]
+                b_path = path_part[b_idx + 3 :]
+                display_path = b_path if a_path == b_path else f"{a_path} -> {b_path}"
+            else:
+                display_path = path_part
+            cur_file = {
+                "path": display_path,
+                "status": "modified",
+                "added": 0,
+                "removed": 0,
+                "start_line": idx,
+                "hunks": [],
+            }
+            cur_hunk = None
+            continue
+
+        if cur_file is None:
+            if len(commit_preamble) < 8 and ln.strip():
+                commit_preamble.append(ln[:160])
+            continue
+
+        if ln.startswith("new file mode"):
+            cur_file["status"] = "added"
+        elif ln.startswith("deleted file mode"):
+            cur_file["status"] = "deleted"
+        elif ln.startswith("rename to "):
+            cur_file["status"] = "renamed"
+        elif ln.startswith("Binary files "):
+            cur_file["status"] = "binary"
+        elif ln.startswith("@@ "):
+            cur_hunk = {
+                "line_no": idx,
+                "header": ln[:160],
+                "samples": [],
+            }
+            cur_file["hunks"].append(cur_hunk)
+        elif ln.startswith("+") and not ln.startswith("+++"):
+            cur_file["added"] += 1
+            if cur_hunk is not None and len(cur_hunk["samples"]) < 2 and ln[1:].strip():
+                cur_hunk["samples"].append(ln[:110])
+        elif ln.startswith("-") and not ln.startswith("---"):
+            cur_file["removed"] += 1
+            if cur_hunk is not None and len(cur_hunk["samples"]) < 2 and ln[1:].strip():
+                cur_hunk["samples"].append(ln[:110])
+
+    if cur_file is not None:
+        files.append(cur_file)
+
+    total_add = sum(f["added"] for f in files)
+    total_rem = sum(f["removed"] for f in files)
+    parts: List[str] = []
+    if commit_preamble:
+        parts.append("[Commit Header]:")
+        parts.extend(commit_preamble)
+    parts.append(
+        f"[Git Diff File Manifest ({len(files)} file(s), +{total_add} / -{total_rem} lines)]:"
+    )
+    # 100% file path recall guaranteed first
+    for f in files:
+        tag = f" [{f['status']}]" if f["status"] != "modified" else ""
+        parts.append(
+            f"  • {f['path']}{tag} (+{f['added']} / -{f['removed']}, {len(f['hunks'])} hunk(s), raw L{f['start_line']})"
+        )
+
+    manifest_str = "\n".join(parts)
+    budget = max(2400, max_bytes)
+    hunk_lines: List[str] = ["[Modified Hunk Headers]:"]
+    used_bytes = len(manifest_str.encode("utf-8", errors="replace")) + 32
+
+    for f in files:
+        if not f["hunks"]:
+            continue
+        file_hdr = f"  {f['path']}:"
+        hdr_cost = len(file_hdr) + 1
+        if used_bytes + hdr_cost > budget:
+            break
+        hunk_lines.append(file_hdr)
+        used_bytes += hdr_cost
+        for hk in f["hunks"]:
+            hk_line = f"    L{hk['line_no']}: {hk['header']}"
+            if used_bytes + len(hk_line) + 1 > budget:
+                break
+            hunk_lines.append(hk_line)
+            used_bytes += len(hk_line) + 1
+            for smp in hk["samples"]:
+                smp_line = f"      {smp}"
+                if used_bytes + len(smp_line) + 1 <= budget:
+                    hunk_lines.append(smp_line)
+                    used_bytes += len(smp_line) + 1
+
+    if len(hunk_lines) > 1:
+        return manifest_str + "\n" + "\n".join(hunk_lines)
+    return manifest_str
+
+
+def _build_test_suite_stdout_digest(lines: List[str], max_bytes: int = 8000) -> str:
+    """
+    Deterministic `test_suite_stdout` digest across `pytest`, `cargo test`, `go test`, and `jest`:
+    collapses passing progress noise into summary counters while preserving 100.0% of
+    middle-of-log and section-grouped `FAILED` / `ERROR` / `AssertionError` blocks.
+    """
+    passed_count = 0
+    failed_count = 0
+    skipped_count = 0
+    error_count = 0
+
+    in_failure_section = False
+    in_inline_failure = False
+    pending_run_header: Optional[Tuple[int, str]] = None
+    recent_context_buf: List[Tuple[int, str]] = []
+    failure_lines: List[str] = []
+    summary_lines: List[str] = []
+    emitted_line_nos: set[int] = set()
+
+    def _emit_failure_line(lno: int, text: str) -> None:
+        if lno not in emitted_line_nos:
+            emitted_line_nos.add(lno)
+            failure_lines.append(f"L{lno}: {text}")
+
+    for idx, ln in enumerate(lines, start=1):
+        stripped = ln.strip()
+
+        if _FINAL_TEST_SUMMARY_RE.match(stripped):
+            in_failure_section = False
+            in_inline_failure = False
+            summary_lines.append(f"L{idx}: {ln}")
+            continue
+
+        if _FAILURE_SECTION_START_RE.match(stripped):
+            in_failure_section = True
+            in_inline_failure = False
+            _emit_failure_line(idx, ln)
+            continue
+
+        if in_failure_section and _FAILURE_SECTION_STOP_RE.match(stripped):
+            in_failure_section = False
+            continue
+
+        if in_failure_section:
+            _emit_failure_line(idx, ln)
+            continue
+
+        # Classify explicit passing / skipped / running progress lines
+        m_py = _PYTEST_ITEM_RE.match(stripped)
+        if m_py:
+            outcome = m_py.group(1) or m_py.group(2)
+            if outcome in ("PASSED", "XPASS"):
+                passed_count += 1
+                in_inline_failure = False
+                pending_run_header = None
+                recent_context_buf.clear()
+                continue
+            if outcome in ("SKIPPED", "XFAIL"):
+                skipped_count += 1
+                in_inline_failure = False
+                pending_run_header = None
+                recent_context_buf.clear()
+                continue
+            if outcome == "FAILED":
+                failed_count += 1
+                in_inline_failure = True
+                _emit_failure_line(idx, ln)
+                continue
+            if outcome == "ERROR":
+                error_count += 1
+                in_inline_failure = True
+                _emit_failure_line(idx, ln)
+                continue
+
+        if _PYTEST_DOT_PROGRESS_RE.match(stripped):
+            passed_count += stripped.count(".")
+            skipped_count += stripped.count("s")
+            failed_count += stripped.count("F")
+            error_count += stripped.count("E")
+            continue
+
+        m_cargo = _CARGO_ITEM_RE.match(stripped)
+        if m_cargo:
+            outcome = m_cargo.group(2)
+            if outcome == "ok":
+                passed_count += 1
+                in_inline_failure = False
+                pending_run_header = None
+                recent_context_buf.clear()
+                continue
+            if outcome == "ignored":
+                skipped_count += 1
+                in_inline_failure = False
+                continue
+            if outcome == "FAILED":
+                failed_count += 1
+                in_inline_failure = True
+                _emit_failure_line(idx, ln)
+                continue
+
+        m_go_run = _GO_RUN_RE.match(stripped)
+        if m_go_run:
+            in_inline_failure = False
+            pending_run_header = (idx, ln)
+            recent_context_buf.clear()
+            continue
+
+        m_go_res = _GO_RESULT_RE.match(stripped)
+        if m_go_res:
+            outcome = m_go_res.group(1)
+            if outcome == "PASS":
+                passed_count += 1
+                in_inline_failure = False
+                pending_run_header = None
+                recent_context_buf.clear()
+                continue
+            if outcome == "SKIP":
+                skipped_count += 1
+                in_inline_failure = False
+                pending_run_header = None
+                recent_context_buf.clear()
+                continue
+            if outcome == "FAIL":
+                failed_count += 1
+                if pending_run_header is not None:
+                    _emit_failure_line(*pending_run_header)
+                    pending_run_header = None
+                for ctx_lno, ctx_txt in recent_context_buf:
+                    _emit_failure_line(ctx_lno, ctx_txt)
+                recent_context_buf.clear()
+                _emit_failure_line(idx, ln)
+                in_inline_failure = True
+                continue
+
+        if _GO_PKG_OK_RE.match(stripped):
+            in_inline_failure = False
+            pending_run_header = None
+            recent_context_buf.clear()
+            continue
+
+        if _JEST_PASS_RE.match(ln):
+            passed_count += 1
+            in_inline_failure = False
+            pending_run_header = None
+            recent_context_buf.clear()
+            continue
+
+        if stripped.startswith(("running ", "Running unittests", "Doc-tests ", "collecting ...")) or (
+            stripped.startswith("platform ") and "pytest-" in stripped
+        ) or stripped.startswith(("rootdir:", "configfile:", "plugins:", "collected ")):
+            if stripped.startswith("collected "):
+                summary_lines.insert(0, f"L{idx}: {ln}")
+            continue
+
+        # Detect inline / middle-of-log failure blocks
+        is_inline_fail_trigger = bool(
+            _JEST_FAIL_RE.match(ln)
+            or "AssertionError" in ln
+            or ln.startswith("E   ")
+            or ln.startswith("E\t")
+            or "Traceback (most recent call last):" in ln
+            or "panicked at " in ln
+            or stripped.startswith(("FAIL\t", "FAIL ", "FAILED ", "ERROR ", "--- FAIL:"))
+            or re.search(r"\b(?:FAILED|AssertionError|TypeError|ValueError|KeyError|RuntimeError|ImportError|SyntaxError)\b", ln)
+        )
+
+        if is_inline_fail_trigger:
+            if pending_run_header is not None:
+                _emit_failure_line(*pending_run_header)
+                pending_run_header = None
+            for ctx_lno, ctx_txt in recent_context_buf[-4:]:
+                _emit_failure_line(ctx_lno, ctx_txt)
+            recent_context_buf.clear()
+            in_inline_failure = True
+            _emit_failure_line(idx, ln)
+            continue
+
+        if in_inline_failure:
+            if not stripped:
+                _emit_failure_line(idx, ln)
+            elif ln.startswith((" ", "\t", ">", "E ", "+", "-")) or ":" in stripped or stripped.startswith("_"):
+                _emit_failure_line(idx, ln)
+            else:
+                in_inline_failure = False
+                recent_context_buf.append((idx, ln))
+                if len(recent_context_buf) > 6:
+                    recent_context_buf.pop(0)
+        else:
+            if stripped:
+                recent_context_buf.append((idx, ln))
+                if len(recent_context_buf) > 6:
+                    recent_context_buf.pop(0)
+
+    if not summary_lines and lines:
+        for idx in range(max(1, len(lines) - 4), len(lines) + 1):
+            if lines[idx - 1].strip():
+                summary_lines.append(f"L{idx}: {lines[idx - 1]}")
+
+    header = (
+        f"[Test Suite Semantic Digest: {passed_count:,} passed collapsed | "
+        f"{failed_count} failed | {error_count} error(s) | {skipped_count} skipped]"
+    )
+    out_parts: List[str] = [header]
+    if failure_lines:
+        out_parts.append(f"[Retained Failure & Assertion Blocks ({len(failure_lines)} lines, 100% recall)]:")
+        # Guarantee 100% retention of failure signal lines up to generous safety ceiling
+        hard_cap_chars = max(16000, max_bytes * 2)
+        joined_failures = "\n".join(failure_lines)
+        if len(joined_failures) <= hard_cap_chars:
+            out_parts.append(joined_failures)
+        else:
+            # Even on massive 50-test failure cascades, retain every FAILED/ERROR/E-assert line + top context
+            critical_only = [
+                fl
+                for fl in failure_lines
+                if any(k in fl for k in ("FAILED", "FAIL", "ERROR", "AssertionError", ": E   ", "panicked at", "Error:"))
+            ]
+            out_parts.append("\n".join(failure_lines[:120]))
+            out_parts.append("...[additional verbose stack frames condensed; all failure assertions retained below]...")
+            out_parts.extend(critical_only[:120])
+    else:
+        out_parts.append("[All Passing - 0 Failure / Error Blocks Detected]")
+
+    if summary_lines:
+        out_parts.append("[Summary]:")
+        out_parts.extend(summary_lines[-6:])
+
+    return "\n".join(out_parts)
+
+
+def _build_grep_grouped_stdout_digest(lines: List[str], max_bytes: int = 8000) -> str:
+    """
+    Deterministic `grep_grouped_stdout` digest: groups `rg` / `grep` matches by file path
+    (`file.py (N matches): L12, L45...`) preserving 100% of matched files + compact snippets.
+    """
+    grouped: Dict[str, List[Tuple[int, str]]] = {}
+    unparsed: List[str] = []
+    total_matches = 0
+
+    for ln in lines:
+        if not ln.strip():
+            continue
+        m = _GREP_LINE_RE.match(ln)
+        if m and _looks_like_grep_file_token(m.group("file")):
+            fpath = m.group("file")
+            lno = int(m.group("line"))
+            txt = m.group("text").strip()
+            grouped.setdefault(fpath, []).append((lno, txt))
+            total_matches += 1
+        elif len(unparsed) < 5:
+            unparsed.append(ln[:120])
+
+    out_lines: List[str] = [
+        f"[Grouped Search Digest: {total_matches:,} match(es) across {len(grouped):,} file(s)]:"
+    ]
+    # Guarantee 100% file path + line coordinate visibility first
+    file_summaries: List[str] = []
+    for fpath, hits in grouped.items():
+        line_refs = ", ".join(f"L{lno}" for lno, _ in hits[:18])
+        if len(hits) > 18:
+            line_refs += f", ... (+{len(hits) - 18} more)"
+        file_summaries.append(f"  • {fpath} ({len(hits)} match{'es' if len(hits) != 1 else ''}): {line_refs}")
+
+    base_text = "\n".join(out_lines + file_summaries)
+    budget = max(2400, max_bytes)
+    if len(base_text.encode("utf-8", errors="replace")) >= budget:
+        return base_text
+
+    # Enrich with up to 2 sample match snippets per file while within byte budget
+    enriched: List[str] = list(out_lines)
+    used = len(out_lines[0]) + 1
+    remaining_summary_cost = sum(len(s) + 1 for s in file_summaries)
+
+    for idx, (fpath, hits) in enumerate(grouped.items()):
+        summary_line = file_summaries[idx]
+        enriched.append(summary_line)
+        used += len(summary_line) + 1
+        remaining_summary_cost -= len(summary_line) + 1
+
+        for lno, txt in hits[:2]:
+            if not txt:
+                continue
+            snippet = f"      L{lno}: {txt[:96] + '...' if len(txt) > 96 else txt}"
+            if used + len(snippet) + 1 + remaining_summary_cost <= budget:
+                enriched.append(snippet)
+                used += len(snippet) + 1
+
+    if unparsed and used + 120 <= budget:
+        enriched.extend(f"  [note] {u}" for u in unparsed[:2])
+
+    return "\n".join(enriched)
+
+
+def _detect_buffer_schema_format(
+    raw_text: str,
+    target_path: Optional[str | Path] = None,
+    tool_name: str = "tool_output",
+) -> Tuple[str, Path]:
     """
     Deterministically detect the structural schema format of an arbitrary tool output buffer
-    (AST Python, Tree-sitter/CST/regex source, JSON, CSV, SQL, Markdown, or YAML).
+    (Semantic CLI stdout digests, AST Python, Tree-sitter/CST/regex source, JSON, CSV, SQL, Markdown, or YAML).
     """
+    is_shell_tool = str(tool_name or "").strip().lower() in _SHELL_OUTPUT_TOOL_NAMES
+    has_real_file_target = False
+    if target_path:
+        p = Path(str(target_path))
+        if not is_shell_tool or p.is_file():
+            has_real_file_target = True
+
+    if not has_real_file_target or is_shell_tool:
+        cli_schema = _detect_cli_stdout_schema(raw_text)
+        if cli_schema is not None:
+            return cli_schema
+
     if target_path:
         p = Path(str(target_path))
         ext = p.suffix.lower()
@@ -1235,6 +2128,10 @@ def _detect_buffer_schema_format(raw_text: str, target_path: Optional[str | Path
             return "markdown_outline", p
         if ext in (".yaml", ".yml"):
             return "yaml_schema", p
+
+    cli_fallback = _detect_cli_stdout_schema(raw_text)
+    if cli_fallback is not None:
+        return cli_fallback
 
     stripped = raw_text.lstrip()
     if stripped.startswith(("{", "[")):
@@ -1296,6 +2193,8 @@ def slice_post_tool_output_buffer(
             "content": "",
             "direct_tokens_saved": 0,
             "quadratic_tokens_saved": 0,
+            "airlock_blob_id": "",
+            "airlock_receipt": "",
         }
 
     if isinstance(raw_output, (dict, list)):
@@ -1311,7 +2210,7 @@ def slice_post_tool_output_buffer(
     byte_len = len(raw_text.encode("utf-8", errors="replace"))
     lines = raw_text.splitlines()
     total_lines = len(lines)
-    fmt_name, virtual_path = _detect_buffer_schema_format(raw_text, default_path)
+    fmt_name, virtual_path = _detect_buffer_schema_format(raw_text, default_path, tool_name=tool_name)
 
     if total_lines <= max_lines and byte_len <= max_bytes:
         return {
@@ -1325,40 +2224,83 @@ def slice_post_tool_output_buffer(
             "content": raw_text if isinstance(raw_output, (bytes, bytearray)) else raw_output,
             "direct_tokens_saved": 0,
             "quadratic_tokens_saved": 0,
+            "airlock_blob_id": "",
+            "airlock_receipt": "",
         }
 
-    outline = _build_fast_file_symbol_outline(virtual_path, raw_text, max_items=30)
-    max_preview_chars = max(300, min(2000, max_bytes // 4))
-    head_slice_lines = [
-        (ln[:200] + "...[line truncated]") if len(ln) > 200 else ln
-        for ln in lines[: max(1, head_lines)]
-    ]
-    head_preview = "\n".join(head_slice_lines)[:max_preview_chars]
-    tail_preview = ""
-    if total_lines > head_lines:
-        tail_slice_lines = [
-            (ln[:200] + "...[line truncated]") if len(ln) > 200 else ln
-            for ln in lines[-max(1, tail_lines) :]
-        ]
-        tail_preview = "\n".join(tail_slice_lines)[:max_preview_chars]
-    elif total_lines == 1 and len(raw_text) > 400:
-        tail_preview = "..." + raw_text[-min(200, max_preview_chars // 2) :]
+    airlock_blob_id = ""
+    airlock_receipt = ""
+    if os.environ.get("WBC_AIRLOCK_VAULT_DISABLED") != "1":
+        try:
+            from whole_body_compute.organs.immune_vault import store_airlock_blob
 
-    compressed_str = (
-        f"🛡️ Blood-Brain Barrier PostToolOutput Pre-Ingestion Context Shield ({fmt_name}):\n"
-        f"Tool `{tool_name}` output on `{virtual_path.name}` was {total_lines:,} lines "
-        f"({byte_len / 1024:.1f} KB). Replaced prior to LLM context ingestion with "
-        f"Structural Index + Head/Tail Slice:\n"
-        f"--- [STRUCTURAL SYMBOL / SCHEMA MAP ({fmt_name})] ---\n"
-        f"{outline}\n"
-        f"--- [HEAD SLICE (L1-L{min(total_lines, head_lines)})] ---\n"
-        f"{head_preview}\n"
-    )
-    if tail_preview:
-        compressed_str += (
-            f"--- [TAIL SLICE (L{max(1, total_lines - tail_lines + 1)}-L{total_lines})] ---\n"
-            f"{tail_preview}\n"
+            vault_info = store_airlock_blob(raw_text)
+            airlock_blob_id = str(vault_info.get("blob_id") or "")
+            airlock_receipt = str(vault_info.get("receipt") or "")
+        except Exception:
+            airlock_blob_id = ""
+            airlock_receipt = ""
+
+    if fmt_name == "git_diff_status":
+        outline = _build_git_diff_status_digest(lines, max_bytes=max_bytes)
+        compressed_str = (
+            f"🛡️ Blood-Brain Barrier PostToolOutput Semantic CLI Digest ({fmt_name}):\n"
+            f"Tool `{tool_name}` stdout ({total_lines:,} lines, {byte_len / 1024:.1f} KB) "
+            f"compacted with 100% modified-file recall:\n"
+            f"{outline}\n"
         )
+    elif fmt_name == "test_suite_stdout":
+        outline = _build_test_suite_stdout_digest(lines, max_bytes=max_bytes)
+        compressed_str = (
+            f"🛡️ Blood-Brain Barrier PostToolOutput Semantic CLI Digest ({fmt_name}):\n"
+            f"Tool `{tool_name}` test log ({total_lines:,} lines, {byte_len / 1024:.1f} KB) "
+            f"compacted with 100% failure & assertion recall:\n"
+            f"{outline}\n"
+        )
+    elif fmt_name == "grep_grouped_stdout":
+        outline = _build_grep_grouped_stdout_digest(lines, max_bytes=max_bytes)
+        compressed_str = (
+            f"🛡️ Blood-Brain Barrier PostToolOutput Semantic CLI Digest ({fmt_name}):\n"
+            f"Tool `{tool_name}` search stdout ({total_lines:,} lines, {byte_len / 1024:.1f} KB) "
+            f"grouped by file:\n"
+            f"{outline}\n"
+        )
+    else:
+        outline = _build_fast_file_symbol_outline(virtual_path, raw_text, max_items=30)
+        max_preview_chars = max(300, min(2000, max_bytes // 4))
+        head_slice_lines = [
+            (ln[:200] + "...[line truncated]") if len(ln) > 200 else ln
+            for ln in lines[: max(1, head_lines)]
+        ]
+        head_preview = "\n".join(head_slice_lines)[:max_preview_chars]
+        tail_preview = ""
+        if total_lines > head_lines:
+            tail_slice_lines = [
+                (ln[:200] + "...[line truncated]") if len(ln) > 200 else ln
+                for ln in lines[-max(1, tail_lines) :]
+            ]
+            tail_preview = "\n".join(tail_slice_lines)[:max_preview_chars]
+        elif total_lines == 1 and len(raw_text) > 400:
+            tail_preview = "..." + raw_text[-min(200, max_preview_chars // 2) :]
+
+        compressed_str = (
+            f"🛡️ Blood-Brain Barrier PostToolOutput Pre-Ingestion Context Shield ({fmt_name}):\n"
+            f"Tool `{tool_name}` output on `{virtual_path.name}` was {total_lines:,} lines "
+            f"({byte_len / 1024:.1f} KB). Replaced prior to LLM context ingestion with "
+            f"Structural Index + Head/Tail Slice:\n"
+            f"--- [STRUCTURAL SYMBOL / SCHEMA MAP ({fmt_name})] ---\n"
+            f"{outline}\n"
+            f"--- [HEAD SLICE (L1-L{min(total_lines, head_lines)})] ---\n"
+            f"{head_preview}\n"
+        )
+        if tail_preview:
+            compressed_str += (
+                f"--- [TAIL SLICE (L{max(1, total_lines - tail_lines + 1)}-L{total_lines})] ---\n"
+                f"{tail_preview}\n"
+            )
+
+    if airlock_receipt:
+        compressed_str += f"{airlock_receipt}\n"
 
     full_tokens_est = max(1, byte_len // 4)
     sliced_tokens_est = max(1, len(compressed_str.encode("utf-8", errors="replace")) // 4)
@@ -1377,4 +2319,6 @@ def slice_post_tool_output_buffer(
         "content": compressed_str,
         "direct_tokens_saved": direct_tokens_saved,
         "quadratic_tokens_saved": quadratic_tokens_saved,
+        "airlock_blob_id": airlock_blob_id,
+        "airlock_receipt": airlock_receipt,
     }

@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com"
 DEFAULT_POSTHOG_API_KEY = "phc_D3TxQWXwnd9Z6wBBK3DpnsdKQAHdLpSSMxup4qL8djc2"
+WBC_EDGE_AUDIT_SOURCE = ""
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -546,48 +547,219 @@ def scan_goose_harness(
     return records
 
 
-def scan_cursor_harness(
-    cursor_dir: Path,
+_WSL_SKIP_USERS = frozenset({"public", "default", "default user", "all users", "desktop.ini"})
+
+
+def _iter_candidate_user_homes() -> List[Path]:
+    """Return Path.home() plus Windows/WSL2 `/mnt/c/Users/<WinUser>` homes when present."""
+    homes: List[Path] = []
+    seen: set[str] = set()
+
+    def _add(p: Path) -> None:
+        try:
+            ep = p.expanduser()
+            if not ep.is_dir():
+                return
+            rp = os.path.realpath(ep)
+            if rp not in seen:
+                seen.add(rp)
+                homes.append(ep)
+        except Exception:
+            pass
+
+    _add(Path.home())
+    win_prof = os.environ.get("USERPROFILE", "").strip()
+    if win_prof:
+        _add(Path(win_prof))
+
+    wsl_root_env = os.environ.get("WBC_WSL_USERS_ROOT", "").strip()
+    wsl_root = Path(wsl_root_env) if wsl_root_env else Path("/mnt/c/Users")
+    try:
+        if wsl_root.is_dir():
+            for child in sorted(wsl_root.iterdir()):
+                cname = child.name.strip()
+                if not cname or cname.startswith(".") or cname.lower() in _WSL_SKIP_USERS:
+                    continue
+                _add(child)
+    except Exception:
+        pass
+
+    return homes or [Path.home()]
+
+
+def _dedup_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Deduplicate scanned conversation records by (harness, conv_id), keeping richest token payload."""
+    by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for rec in records:
+        key = (
+            str(rec.get("harness") or ""),
+            str(rec.get("conversation_id") or rec.get("conv_id") or rec.get("short_id") or id(rec)),
+        )
+        prev = by_key.get(key)
+        rec_rank = (
+            1 if rec.get("metered_exact") else 0,
+            int(rec.get("transcript_bytes", 0)),
+            int(rec.get("actual_cumulative_input_tokens", 0)),
+        )
+        prev_rank = (
+            (
+                1 if prev.get("metered_exact") else 0,
+                int(prev.get("transcript_bytes", 0)),
+                int(prev.get("actual_cumulative_input_tokens", 0)),
+            )
+            if prev is not None
+            else (-1, -1, -1)
+        )
+        if rec_rank > prev_rank:
+            by_key[key] = rec
+    return list(by_key.values())
+
+
+def _parse_iso_or_epoch_ts(val: Any) -> float:
+    if val is None:
+        return 0.0
+    if isinstance(val, (int, float)):
+        fv = float(val)
+        return fv / 1000.0 if fv > 1e11 else fv
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return 0.0
+        try:
+            fv = float(s)
+            return fv / 1000.0 if fv > 1e11 else fv
+        except ValueError:
+            pass
+        try:
+            iso = s.replace("Z", "+00:00") if s.endswith("Z") else s
+            dt = datetime.datetime.fromisoformat(iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            return dt.timestamp()
+        except Exception:
+            return 0.0
+    return 0.0
+
+
+def _scan_cursor_global_vscdb(
+    db_p: Path,
     window_seconds: float,
     now: float,
     in_price_per_m: float,
     out_price_per_m: float,
 ) -> List[Dict[str, Any]]:
+    """Scan modern Cursor `globalStorage/state.vscdb` (`cursorDiskKV` composerData + bubbleId)."""
     records: List[Dict[str, Any]] = []
-    if not cursor_dir.is_dir():
+    if not db_p.is_file():
         return records
-
-    vscdb_files = list(cursor_dir.glob("*/state.vscdb")) + list(cursor_dir.glob("*.vscdb"))
-    for db_p in vscdb_files[:60]:
-        if not db_p.is_file():
-            continue
-        try:
-            mtime = os.path.getmtime(db_p)
-            if window_seconds > 0 and (now - mtime) > window_seconds:
-                continue
-            conn = sqlite3.connect(f"file:{db_p}?mode=ro", uri=True, timeout=1.5)
-            rows = conn.execute(
-                "SELECT key, value FROM ItemTable WHERE key LIKE '%aichat%' OR key LIKE '%composer%' OR key = 'aiService.prompts' LIMIT 40"
-            ).fetchall()
+    try:
+        db_mtime = os.path.getmtime(db_p)
+        conn = sqlite3.connect(f"file:{db_p}?mode=ro", uri=True, timeout=1.5)
+        tables = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        if "cursorDiskKV" not in tables:
             conn.close()
-            if not rows:
+            return records
+
+        composers: Dict[str, Dict[str, Any]] = {}
+        for k, v in conn.execute(
+            "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%' LIMIT 1500"
+        ):
+            if not k or not v:
                 continue
-            step_tuples: List[Tuple[bool, int, bool]] = []
-            tot_bytes = 0
-            for _k, val in rows:
-                val_s = str(val or "")
-                b_len = len(val_s.encode("utf-8"))
-                if b_len < 64:
+            cid = str(k).split(":", 1)[1] if ":" in str(k) else str(k)
+            try:
+                raw_s = v.decode("utf-8", errors="ignore") if isinstance(v, bytes) else str(v)
+                d = json.loads(raw_s)
+            except Exception:
+                continue
+            if not isinstance(d, dict):
+                continue
+            ts = _parse_iso_or_epoch_ts(d.get("lastUpdatedAt") or d.get("createdAt"))
+            prompt_s = _extract_text_snippet(d.get("text") or d.get("name") or "")
+            composers[cid] = {
+                "ts": ts,
+                "prompt": prompt_s,
+                "raw_bytes": len(raw_s.encode("utf-8")),
+                "conversation": d.get("conversation") if isinstance(d.get("conversation"), list) else [],
+            }
+
+        bubbles_by_cid: Dict[str, List[Tuple[float, bool, int, int, int, str]]] = {}
+        for k, v in conn.execute(
+            "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'bubbleId:%' LIMIT 25000"
+        ):
+            if not k or not v:
+                continue
+            parts = str(k).split(":")
+            if len(parts) < 3:
+                continue
+            cid = parts[1]
+            try:
+                raw_s = v.decode("utf-8", errors="ignore") if isinstance(v, bytes) else str(v)
+                b_len = max(32, len(raw_s.encode("utf-8")))
+                d = json.loads(raw_s)
+            except Exception:
+                continue
+            if not isinstance(d, dict):
+                continue
+            b_type = d.get("type")
+            role_s = str(d.get("role") or "").lower()
+            is_p = (b_type == 2) or (role_s in ("assistant", "model", "ai"))
+            bts = _parse_iso_or_epoch_ts(d.get("createdAt") or d.get("timestamp"))
+            tc = d.get("tokenCount") if isinstance(d.get("tokenCount"), dict) else {}
+            in_tok = int(tc.get("inputTokens") or 0)
+            out_tok = int(tc.get("outputTokens") or 0)
+            snip = ""
+            if not is_p:
+                snip = _extract_text_snippet(d.get("text") or d.get("rawText") or "")
+            bubbles_by_cid.setdefault(cid, []).append((bts, is_p, b_len, in_tok, out_tok, snip))
+        conn.close()
+
+        all_cids = set(bubbles_by_cid.keys()) | {
+            cid for cid, meta in composers.items() if meta.get("conversation")
+        }
+        for cid in all_cids:
+            cmeta = composers.get(cid, {})
+            blist = bubbles_by_cid.get(cid, [])
+            if blist:
+                blist.sort(key=lambda x: x[0] if x[0] > 0 else 0.0)
+                latest_b_ts = max((x[0] for x in blist if x[0] > 0), default=0.0)
+                sess_ts = max(float(cmeta.get("ts") or 0.0), latest_b_ts) or db_mtime
+                if window_seconds > 0 and (now - sess_ts) > window_seconds:
                     continue
-                tot_bytes += b_len
-                # Estimate turns inside Cursor composer/chat blob
-                est_steps = max(4, min(120, b_len // 1200))
-                chunk_b = max(250, b_len // est_steps)
-                for idx in range(est_steps):
-                    step_tuples.append((idx % 2 == 1, chunk_b, chunk_b > 8000))
+                step_tuples = [(x[1], x[2], x[2] > 16000) for x in blist]
+                tot_bytes = sum(x[2] for x in blist)
+                m_turns = sum(1 for x in blist if x[1] and (x[3] > 0 or x[4] > 0))
+                m_in = sum(x[3] for x in blist)
+                m_out = sum(x[4] for x in blist)
+                first_prompt = str(cmeta.get("prompt") or "") or next(
+                    (x[5] for x in blist if x[5]), ""
+                )
+            else:
+                conv_items = cmeta.get("conversation") or []
+                sess_ts = float(cmeta.get("ts") or 0.0) or db_mtime
+                if window_seconds > 0 and (now - sess_ts) > window_seconds:
+                    continue
+                step_tuples = []
+                tot_bytes = 0
+                m_turns = m_in = m_out = 0
+                first_prompt = str(cmeta.get("prompt") or "")
+                for item in conv_items:
+                    if not isinstance(item, dict):
+                        continue
+                    raw_i = json.dumps(item)
+                    ib = max(32, len(raw_i.encode("utf-8")))
+                    tot_bytes += ib
+                    is_p = (item.get("type") == 2) or (
+                        str(item.get("role") or "").lower() in ("assistant", "model", "ai")
+                    )
+                    if not first_prompt and not is_p:
+                        first_prompt = _extract_text_snippet(item.get("text") or "")
+                    step_tuples.append((is_p, ib, ib > 16000))
             if not step_tuples:
                 continue
-            cid = db_p.parent.name if db_p.parent != cursor_dir else db_p.stem
             records.append(
                 _evaluate_step_sequence(
                     step_Tuples=step_tuples,
@@ -595,15 +767,404 @@ def scan_cursor_harness(
                     short_id=cid[:8],
                     conv_id=cid,
                     harness="cursor",
-                    mtime=mtime,
+                    mtime=sess_ts,
                     in_price_per_m=in_price_per_m,
                     out_price_per_m=out_price_per_m,
                     top_tool_override="cursor_composer",
+                    first_prompt=first_prompt,
+                    exact_usage={
+                        "metered_turns": m_turns,
+                        "billed_input_tokens": m_in,
+                        "cache_create_tokens": 0,
+                        "cache_read_tokens": 0,
+                        "output_tokens": m_out,
+                    }
+                    if m_turns > 0
+                    else None,
+                )
+            )
+    except Exception:
+        pass
+    return records
+
+
+def _scan_cursor_agent_transcripts_jsonl(
+    projects_root: Path,
+    window_seconds: float,
+    now: float,
+    in_price_per_m: float,
+    out_price_per_m: float,
+) -> List[Dict[str, Any]]:
+    """Scan modern Cursor `~/.cursor/projects/**/agent-transcripts/**/*.jsonl` transcripts."""
+    records: List[Dict[str, Any]] = []
+    if not projects_root.exists():
+        return records
+    jfiles: List[Path] = []
+    try:
+        if projects_root.is_file() and projects_root.suffix == ".jsonl":
+            jfiles.append(projects_root)
+        elif projects_root.is_dir():
+            for jf in projects_root.rglob("*.jsonl"):
+                if jf.is_file() and ("agent-transcripts" in jf.parts or projects_root.name == "agent-transcripts"):
+                    jfiles.append(jf)
+    except Exception:
+        return records
+
+    for jpath in jfiles[:400]:
+        try:
+            mtime = os.path.getmtime(jpath)
+            if window_seconds > 0 and (now - mtime) > window_seconds:
+                continue
+            conv_bytes = os.path.getsize(jpath)
+            step_tuples: List[Tuple[bool, int, bool]] = []
+            first_prompt = ""
+            with open(jpath, "r", encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    s = line.strip()
+                    if not s:
+                        continue
+                    try:
+                        obj = json.loads(s)
+                    except Exception:
+                        continue
+                    if not isinstance(obj, dict):
+                        continue
+                    msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+                    role = str(obj.get("role") or msg.get("role") or obj.get("type") or "").lower()
+                    is_p = role in ("assistant", "model", "ai", "planner_response")
+                    b_len = max(32, len(s.encode("utf-8")))
+                    if not first_prompt and role in ("user", "human", "user_input"):
+                        first_prompt = _extract_text_snippet(msg.get("content") or obj.get("content") or "")
+                    step_tuples.append((is_p, b_len, b_len > 16000))
+            if not step_tuples:
+                continue
+            cid = jpath.stem
+            records.append(
+                _evaluate_step_sequence(
+                    step_Tuples=step_tuples,
+                    conv_bytes=conv_bytes,
+                    short_id=cid[:8],
+                    conv_id=cid,
+                    harness="cursor",
+                    mtime=mtime,
+                    in_price_per_m=in_price_per_m,
+                    out_price_per_m=out_price_per_m,
+                    top_tool_override="cursor_agent",
+                    first_prompt=first_prompt,
                 )
             )
         except Exception:
             continue
     return records
+
+
+def scan_cursor_harness(
+    cursor_dir: Optional[Any] = None,
+    window_seconds: float = 0.0,
+    now: float = 0.0,
+    in_price_per_m: float = 5.0,
+    out_price_per_m: float = 25.0,
+) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    if now <= 0.0:
+        now = time.time()
+
+    roots: List[Path] = []
+    transcript_roots: List[Path] = []
+    if cursor_dir is not None:
+        raw_list = list(cursor_dir) if isinstance(cursor_dir, (list, tuple)) else [cursor_dir]
+        for item in raw_list:
+            p = Path(item).expanduser()
+            roots.append(p)
+            if p.name == "workspaceStorage" and (p.parent / "globalStorage" / "state.vscdb").is_file():
+                roots.append(p.parent / "globalStorage")
+            elif p.is_dir() and (p / "workspaceStorage").is_dir():
+                roots.append(p / "workspaceStorage")
+                if (p / "globalStorage").is_dir():
+                    roots.append(p / "globalStorage")
+            if p.is_dir() and ((p / "projects").is_dir() or p.name in ("projects", "agent-transcripts")):
+                transcript_roots.append(p / "projects" if (p / "projects").is_dir() else p)
+            elif p.is_dir():
+                transcript_roots.append(p)
+    else:
+        env_dir = os.environ.get("CURSOR_STORAGE_DIR")
+        if env_dir:
+            ep = Path(env_dir).expanduser()
+            roots.append(ep)
+            if ep.name == "workspaceStorage" and (ep.parent / "globalStorage").is_dir():
+                roots.append(ep.parent / "globalStorage")
+            elif ep.is_dir() and (ep / "workspaceStorage").is_dir():
+                roots.append(ep / "workspaceStorage")
+                if (ep / "globalStorage").is_dir():
+                    roots.append(ep / "globalStorage")
+            transcript_roots.append(ep)
+        else:
+            appdata = os.environ.get("APPDATA", "").strip()
+            if appdata:
+                ap_user = Path(appdata) / "Cursor" / "User"
+                roots.extend([ap_user / "workspaceStorage", ap_user / "globalStorage"])
+            for home in _iter_candidate_user_homes():
+                for user_base in (
+                    home / "Library" / "Application Support" / "Cursor" / "User",
+                    home / "AppData" / "Roaming" / "Cursor" / "User",
+                    home / ".config" / "Cursor" / "User",
+                    home / ".cursor-server" / "data" / "User",
+                ):
+                    roots.extend([user_base / "workspaceStorage", user_base / "globalStorage"])
+                transcript_roots.append(home / ".cursor" / "projects")
+
+    seen_global_dbs: set[str] = set()
+    seen_legacy_dbs: set[str] = set()
+    for root in roots:
+        if not root.exists():
+            continue
+        # Modern globalStorage/state.vscdb (`cursorDiskKV`)
+        global_candidates: List[Path] = []
+        if root.is_file() and root.suffix == ".vscdb":
+            global_candidates.append(root)
+        elif root.is_dir():
+            if (root / "state.vscdb").is_file():
+                global_candidates.append(root / "state.vscdb")
+            if (root / "globalStorage" / "state.vscdb").is_file():
+                global_candidates.append(root / "globalStorage" / "state.vscdb")
+        for gdb in global_candidates:
+            rp = os.path.realpath(gdb)
+            if rp not in seen_global_dbs:
+                seen_global_dbs.add(rp)
+                records.extend(
+                    _scan_cursor_global_vscdb(gdb, window_seconds, now, in_price_per_m, out_price_per_m)
+                )
+
+        # Legacy workspaceStorage/*/state.vscdb (`ItemTable`)
+        vscdb_files = (
+            [root]
+            if (root.is_file() and root.suffix == ".vscdb")
+            else (list(root.glob("*/state.vscdb")) + list(root.glob("*.vscdb")))
+        )
+        for db_p in vscdb_files[:80]:
+            if not db_p.is_file() or db_p.parent.name == "globalStorage":
+                continue
+            rp = os.path.realpath(db_p)
+            if rp in seen_legacy_dbs:
+                continue
+            seen_legacy_dbs.add(rp)
+            try:
+                mtime = os.path.getmtime(db_p)
+                if window_seconds > 0 and (now - mtime) > window_seconds:
+                    continue
+                conn = sqlite3.connect(f"file:{db_p}?mode=ro", uri=True, timeout=1.5)
+                tables = {
+                    r[0]
+                    for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                }
+                if "ItemTable" not in tables:
+                    conn.close()
+                    continue
+                rows = conn.execute(
+                    "SELECT key, value FROM ItemTable WHERE key LIKE '%aichat%' OR key LIKE '%composer%' OR key = 'aiService.prompts' LIMIT 40"
+                ).fetchall()
+                conn.close()
+                if not rows:
+                    continue
+                step_tuples: List[Tuple[bool, int, bool]] = []
+                tot_bytes = 0
+                for _k, val in rows:
+                    val_s = str(val or "")
+                    b_len = len(val_s.encode("utf-8"))
+                    if b_len < 64:
+                        continue
+                    tot_bytes += b_len
+                    est_steps = max(4, min(120, b_len // 1200))
+                    chunk_b = max(250, b_len // est_steps)
+                    for idx in range(est_steps):
+                        step_tuples.append((idx % 2 == 1, chunk_b, chunk_b > 8000))
+                if not step_tuples:
+                    continue
+                cid = db_p.parent.name if db_p.parent != root else db_p.stem
+                records.append(
+                    _evaluate_step_sequence(
+                        step_Tuples=step_tuples,
+                        conv_bytes=tot_bytes,
+                        short_id=cid[:8],
+                        conv_id=cid,
+                        harness="cursor",
+                        mtime=mtime,
+                        in_price_per_m=in_price_per_m,
+                        out_price_per_m=out_price_per_m,
+                        top_tool_override="cursor_composer",
+                    )
+                )
+            except Exception:
+                continue
+
+    seen_t_roots: set[str] = set()
+    for tr in transcript_roots:
+        if not tr.exists():
+            continue
+        rp = os.path.realpath(tr)
+        if rp in seen_t_roots:
+            continue
+        seen_t_roots.add(rp)
+        records.extend(
+            _scan_cursor_agent_transcripts_jsonl(tr, window_seconds, now, in_price_per_m, out_price_per_m)
+        )
+
+    return _dedup_records(records)
+
+
+def scan_gemini_cli_harness(
+    gemini_cli_dir: Optional[Any] = None,
+    window_seconds: float = 0.0,
+    now: float = 0.0,
+    in_price_per_m: float = 5.0,
+    out_price_per_m: float = 25.0,
+) -> List[Dict[str, Any]]:
+    """Scan Google Gemini CLI (`~/.gemini/tmp/*/chats/session-*.{json,jsonl}`) sessions."""
+    records: List[Dict[str, Any]] = []
+    if now <= 0.0:
+        now = time.time()
+
+    roots: List[Path] = []
+    if gemini_cli_dir is not None:
+        if isinstance(gemini_cli_dir, (list, tuple)):
+            roots.extend(Path(p).expanduser() for p in gemini_cli_dir)
+        else:
+            roots.append(Path(gemini_cli_dir).expanduser())
+    else:
+        env_dir = os.environ.get("GEMINI_CLI_DIR")
+        if env_dir:
+            roots.append(Path(env_dir).expanduser())
+        else:
+            for home in _iter_candidate_user_homes():
+                roots.append(home / ".gemini" / "tmp")
+
+    session_files: List[Path] = []
+    seen_files: set[str] = set()
+    for root in roots:
+        if not root.exists():
+            continue
+        try:
+            cands = (
+                [root]
+                if root.is_file()
+                else (list(root.glob("*/chats/session-*.*")) + list(root.glob("chats/session-*.*")) + list(root.glob("session-*.*")))
+            )
+            for fp in cands:
+                if fp.is_file() and fp.suffix in (".json", ".jsonl"):
+                    rp = os.path.realpath(fp)
+                    if rp not in seen_files:
+                        seen_files.add(rp)
+                        session_files.append(fp)
+        except Exception:
+            continue
+
+    recent_files: List[Tuple[float, Path]] = []
+    for spath in session_files:
+        try:
+            mtime = os.path.getmtime(spath)
+            if window_seconds > 0 and (now - mtime) > window_seconds:
+                continue
+            recent_files.append((mtime, spath))
+        except Exception:
+            continue
+    recent_files.sort(key=lambda item: item[0], reverse=True)
+
+    for mtime, spath in recent_files[:600]:
+        try:
+            conv_bytes = os.path.getsize(spath)
+            msgs_by_id: Dict[str, Dict[str, Any]] = {}
+            session_id = spath.stem
+
+            if spath.suffix == ".json":
+                data = json.loads(spath.read_text(encoding="utf-8", errors="ignore"))
+                if isinstance(data, dict):
+                    if not spath.stem.startswith("session-") and data.get("sessionId"):
+                        session_id = str(data.get("sessionId"))
+                    for idx, m in enumerate(data.get("messages") or []):
+                        if isinstance(m, dict):
+                            mid = str(m.get("id") or f"idx-{idx}")
+                            msgs_by_id[mid] = m
+            else:
+                with open(spath, "r", encoding="utf-8", errors="ignore") as fh:
+                    for idx, line in enumerate(fh):
+                        s = line.strip()
+                        if not s:
+                            continue
+                        try:
+                            obj = json.loads(s)
+                        except Exception:
+                            continue
+                        if not isinstance(obj, dict):
+                            continue
+                        if not spath.stem.startswith("session-") and obj.get("sessionId"):
+                            session_id = str(obj["sessionId"])
+                        set_obj = obj.get("$set") if isinstance(obj.get("$set"), dict) else None
+                        if set_obj is not None:
+                            m_val = set_obj.get("messages")
+                            if isinstance(m_val, list):
+                                for m_i, m in enumerate(m_val):
+                                    if isinstance(m, dict):
+                                        mid = str(m.get("id") or f"set-{idx}-{m_i}")
+                                        msgs_by_id[mid] = m
+                            for sk, sv in set_obj.items():
+                                if sk.startswith("messages.") and isinstance(sv, dict):
+                                    mid = str(sv.get("id") or sk)
+                                    msgs_by_id[mid] = sv
+                        elif obj.get("type") in ("user", "gemini", "model", "assistant", "tool"):
+                            mid = str(obj.get("id") or f"ln-{idx}")
+                            msgs_by_id[mid] = obj
+
+            if not msgs_by_id:
+                continue
+            step_tuples: List[Tuple[bool, int, bool]] = []
+            first_prompt = ""
+            m_turns = m_in = m_cr = m_out = 0
+            for m in msgs_by_id.values():
+                mtype = str(m.get("type") or m.get("role") or "").lower()
+                is_p = mtype in ("gemini", "assistant", "model", "planner_response")
+                raw_m = json.dumps(m)
+                b_len = max(32, len(raw_m.encode("utf-8")))
+                if not first_prompt and mtype in ("user", "human"):
+                    first_prompt = _extract_text_snippet(m.get("content") or "")
+                tok = m.get("tokens") if isinstance(m.get("tokens"), dict) else None
+                if is_p and isinstance(tok, dict) and (tok.get("input") or tok.get("output") or tok.get("total")):
+                    in_total = int(tok.get("input") or 0)
+                    cached_t = int(tok.get("cached") or 0)
+                    out_t = int(tok.get("output") or 0) + int(tok.get("thoughts") or 0)
+                    m_turns += 1
+                    m_in += max(0, in_total - cached_t)
+                    m_cr += max(0, cached_t)
+                    m_out += max(0, out_t)
+                step_tuples.append((is_p, b_len, b_len > 16000))
+
+            if not step_tuples:
+                continue
+            records.append(
+                _evaluate_step_sequence(
+                    step_Tuples=step_tuples,
+                    conv_bytes=conv_bytes,
+                    short_id=session_id[:8],
+                    conv_id=session_id,
+                    harness="gemini_cli",
+                    mtime=mtime,
+                    in_price_per_m=in_price_per_m,
+                    out_price_per_m=out_price_per_m,
+                    top_tool_override="gemini_shell",
+                    first_prompt=first_prompt,
+                    exact_usage={
+                        "metered_turns": m_turns,
+                        "billed_input_tokens": m_in,
+                        "cache_create_tokens": 0,
+                        "cache_read_tokens": m_cr,
+                        "output_tokens": m_out,
+                    }
+                    if m_turns > 0
+                    else None,
+                )
+            )
+        except Exception:
+            continue
+    return _dedup_records(records)
 
 
 def _extract_text_snippet(val: Any) -> str:
@@ -659,8 +1220,9 @@ def scan_codex_harness(
             base = Path(env_home).expanduser()
             candidates.extend([base / "sessions", base / "history.jsonl", base])
         else:
-            home_codex = Path.home() / ".codex"
-            candidates.extend([home_codex / "sessions", home_codex / "history.jsonl"])
+            for home in _iter_candidate_user_homes():
+                home_codex = home / ".codex"
+                candidates.extend([home_codex / "sessions", home_codex / "history.jsonl"])
 
     seen_files: set[str] = set()
     jsonl_files: List[Path] = []
@@ -797,19 +1359,34 @@ def scan_cline_roo_harness(
         if env_dir:
             roots.append(Path(env_dir).expanduser())
         else:
-            home = Path.home()
-            roots.extend(
-                [
-                    home / "Library" / "Application Support" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "tasks",
-                    home / "Library" / "Application Support" / "Cursor" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "tasks",
-                    home / "Library" / "Application Support" / "Code" / "User" / "globalStorage" / "rooveterinaryinc.roo-cline" / "tasks",
-                    home / "Library" / "Application Support" / "Cursor" / "User" / "globalStorage" / "rooveterinaryinc.roo-cline" / "tasks",
-                    home / ".config" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "tasks",
-                    home / ".config" / "Cursor" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "tasks",
-                    home / ".config" / "Code" / "User" / "globalStorage" / "rooveterinaryinc.roo-cline" / "tasks",
-                    home / ".config" / "Cursor" / "User" / "globalStorage" / "rooveterinaryinc.roo-cline" / "tasks",
-                ]
-            )
+            appdata = os.environ.get("APPDATA", "").strip()
+            if appdata:
+                ap = Path(appdata)
+                roots.extend(
+                    [
+                        ap / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "tasks",
+                        ap / "Cursor" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "tasks",
+                        ap / "Code" / "User" / "globalStorage" / "rooveterinaryinc.roo-cline" / "tasks",
+                        ap / "Cursor" / "User" / "globalStorage" / "rooveterinaryinc.roo-cline" / "tasks",
+                    ]
+                )
+            for home in _iter_candidate_user_homes():
+                roots.extend(
+                    [
+                        home / "Library" / "Application Support" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "tasks",
+                        home / "Library" / "Application Support" / "Cursor" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "tasks",
+                        home / "Library" / "Application Support" / "Code" / "User" / "globalStorage" / "rooveterinaryinc.roo-cline" / "tasks",
+                        home / "Library" / "Application Support" / "Cursor" / "User" / "globalStorage" / "rooveterinaryinc.roo-cline" / "tasks",
+                        home / "AppData" / "Roaming" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "tasks",
+                        home / "AppData" / "Roaming" / "Cursor" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "tasks",
+                        home / "AppData" / "Roaming" / "Code" / "User" / "globalStorage" / "rooveterinaryinc.roo-cline" / "tasks",
+                        home / "AppData" / "Roaming" / "Cursor" / "User" / "globalStorage" / "rooveterinaryinc.roo-cline" / "tasks",
+                        home / ".config" / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "tasks",
+                        home / ".config" / "Cursor" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "tasks",
+                        home / ".config" / "Code" / "User" / "globalStorage" / "rooveterinaryinc.roo-cline" / "tasks",
+                        home / ".config" / "Cursor" / "User" / "globalStorage" / "rooveterinaryinc.roo-cline" / "tasks",
+                    ]
+                )
 
     task_files: Dict[str, Path] = {}
     for root in roots:
@@ -922,14 +1499,18 @@ def scan_windsurf_harness(
         if env_dir:
             roots.append(Path(env_dir).expanduser())
         else:
-            home = Path.home()
-            roots.extend(
-                [
-                    home / "Library" / "Application Support" / "Windsurf" / "User" / "workspaceStorage",
-                    home / ".config" / "Windsurf" / "User" / "workspaceStorage",
-                    home / ".codeium" / "windsurf" / "cascade",
-                ]
-            )
+            appdata = os.environ.get("APPDATA", "").strip()
+            if appdata:
+                roots.append(Path(appdata) / "Windsurf" / "User" / "workspaceStorage")
+            for home in _iter_candidate_user_homes():
+                roots.extend(
+                    [
+                        home / "Library" / "Application Support" / "Windsurf" / "User" / "workspaceStorage",
+                        home / "AppData" / "Roaming" / "Windsurf" / "User" / "workspaceStorage",
+                        home / ".config" / "Windsurf" / "User" / "workspaceStorage",
+                        home / ".codeium" / "windsurf" / "cascade",
+                    ]
+                )
 
     seen_paths: set[str] = set()
     for root in roots:
@@ -1448,6 +2029,344 @@ def scan_zed_harness(
     return records
 
 
+_TURN0_WORD_RE = re.compile(r"[A-Za-z]+|[0-9]{1,3}|[^\sA-Za-z0-9]")
+_TURN0_INDENT_RE = re.compile(r"[ ]{2,}")
+_TURN0_SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_.\-]")
+_TURN0_SECRET_ID_RE = re.compile(
+    r"^(?:sk-|ghp_|github_pat_|AKIA|AIza|phc_|xox[baprs]-)", re.IGNORECASE
+)
+DEFAULT_ESTIMATED_TOKENS_PER_MCP_SERVER = 1_800
+
+
+def _estimate_static_context_tokens(text: str, is_json: bool = False) -> int:
+    """Calibrated zero-dependency BPE token estimator (<10% drift) for Markdown & JSON schemas."""
+    if not text:
+        return 0
+    raw_bytes = len(text.encode("utf-8"))
+    byte_est = raw_bytes / (3.55 if is_json else 3.95)
+
+    sample = text[:262_144]
+    indent_tokens = sum(max(1, len(m.group(0)) // 4) for m in _TURN0_INDENT_RE.finditer(sample))
+    collapsed = _TURN0_INDENT_RE.sub(" ", sample)
+    lex_tokens = float(indent_tokens)
+    for tok in _TURN0_WORD_RE.findall(collapsed):
+        c0 = tok[0]
+        tlen = len(tok)
+        if ("A" <= c0 <= "Z") or ("a" <= c0 <= "z"):
+            if tlen <= 6:
+                lex_tokens += 1.0
+            elif tlen <= 11:
+                lex_tokens += 1.65
+            else:
+                lex_tokens += float((tlen + 4) // 5)
+        elif "0" <= c0 <= "9":
+            lex_tokens += 1.0
+        else:
+            lex_tokens += 0.68 if is_json else 0.76
+
+    if len(text) > len(sample) and len(sample) > 0:
+        lex_tokens *= float(len(text)) / float(len(sample))
+
+    return max(1, int(round((byte_est * 0.5) + (lex_tokens * 0.5))))
+
+
+def _sanitize_turn0_label(raw_name: str) -> str:
+    cleaned = _TURN0_SAFE_ID_RE.sub("", str(raw_name or "").strip())[:40]
+    if not cleaned or _TURN0_SECRET_ID_RE.match(cleaned):
+        return "redacted_mcp_server"
+    return cleaned
+
+
+def _format_turn0_rel_path(fpath: Path, ws_dir: Path, home_dir: Path) -> str:
+    try:
+        rel_ws = fpath.resolve().relative_to(ws_dir.resolve()).as_posix()
+        return f"<workspace>/{rel_ws}"
+    except Exception:
+        pass
+    try:
+        rel_home = fpath.resolve().relative_to(home_dir.resolve()).as_posix()
+        return f"~/{rel_home}"
+    except Exception:
+        return f"<local>/{fpath.name}"
+
+
+def audit_turn0_static_overhead(
+    workspace_dir: Optional[Path] = None,
+    home_dir: Optional[Path] = None,
+    sessions_count: int = 0,
+    in_price_per_m: float = 5.0,
+) -> Dict[str, Any]:
+    """
+    Organ 05 Phase 3 - Turn-0 Fixed Context Tax Audit (<50ms, 100% stdlib, 0 PII leaks):
+    Scans static instruction files (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`, etc.)
+    and MCP server tool configurations/schemas vs `0` MCP schema tokens for `body` OS hooks.
+    """
+    t0 = time.perf_counter()
+    ws_dir = Path(
+        workspace_dir or os.environ.get("WBC_AUDIT_WORKSPACE_DIR") or Path.cwd()
+    ).expanduser()
+    h_dir = Path(
+        home_dir or os.environ.get("WBC_AUDIT_HOME_DIR") or Path.home()
+    ).expanduser()
+
+    instruction_candidates: List[Tuple[Path, str]] = [
+        (ws_dir / "CLAUDE.md", "workspace"),
+        (ws_dir / ".claude" / "CLAUDE.md", "workspace"),
+        (ws_dir / "AGENTS.md", "workspace"),
+        (ws_dir / ".agents" / "AGENTS.md", "workspace"),
+        (ws_dir / "GEMINI.md", "workspace"),
+        (ws_dir / ".gemini" / "GEMINI.md", "workspace"),
+        (ws_dir / ".cursorrules", "workspace"),
+        (ws_dir / ".windsurfrules", "workspace"),
+        (ws_dir / ".clinerules", "workspace"),
+        (ws_dir / ".github" / "copilot-instructions.md", "workspace"),
+        (h_dir / ".claude" / "CLAUDE.md", "user_global"),
+        (h_dir / ".gemini" / "GEMINI.md", "user_global"),
+        (h_dir / ".gemini" / "antigravity" / "GEMINI.md", "user_global"),
+        (h_dir / ".codex" / "AGENTS.md", "user_global"),
+        (h_dir / ".codex" / "instructions.md", "user_global"),
+    ]
+    for rules_dir, r_scope in (
+        (ws_dir / ".cursor" / "rules", "workspace"),
+        (ws_dir / ".agents" / "rules", "workspace"),
+        (ws_dir / ".claude" / "rules", "workspace"),
+        (h_dir / ".gemini" / "rules", "user_global"),
+        (h_dir / ".claude" / "rules", "user_global"),
+    ):
+        if rules_dir.is_dir():
+            try:
+                for rule_p in sorted(
+                    list(rules_dir.glob("*.md")) + list(rules_dir.glob("*.mdc"))
+                )[:16]:
+                    instruction_candidates.append((rule_p, r_scope))
+            except OSError:
+                pass
+
+    seen_realpaths: set[str] = set()
+    instruction_files: List[Dict[str, Any]] = []
+    instruction_bytes = 0
+    instruction_tokens = 0
+
+    for cand_p, scope in instruction_candidates:
+        try:
+            if not cand_p.is_file():
+                continue
+            rp = os.path.realpath(cand_p)
+            if rp in seen_realpaths:
+                continue
+            seen_realpaths.add(rp)
+            raw = cand_p.read_text(encoding="utf-8", errors="ignore")
+            if not raw.strip():
+                continue
+            b_len = len(raw.encode("utf-8"))
+            tok = _estimate_static_context_tokens(raw, is_json=False)
+            instruction_bytes += b_len
+            instruction_tokens += tok
+            instruction_files.append(
+                {
+                    "path": _format_turn0_rel_path(cand_p, ws_dir, h_dir),
+                    "scope": scope,
+                    "bytes": b_len,
+                    "tokens": tok,
+                }
+            )
+        except OSError:
+            continue
+
+    disk_schema_by_server: Dict[str, Tuple[int, int]] = {}
+    for schema_root in (
+        h_dir / ".gemini" / "antigravity" / "mcp",
+        ws_dir / ".mcp-schemas",
+    ):
+        if not schema_root.is_dir():
+            continue
+        try:
+            for srv_dir in sorted(schema_root.iterdir())[:32]:
+                if not srv_dir.is_dir() or srv_dir.name.startswith("."):
+                    continue
+                s_name = _sanitize_turn0_label(srv_dir.name)
+                s_files = 0
+                s_toks = 0
+                for jf in sorted(srv_dir.glob("*.json"))[:64]:
+                    if not jf.is_file():
+                        continue
+                    try:
+                        j_raw = jf.read_text(encoding="utf-8", errors="ignore")
+                    except OSError:
+                        continue
+                    if not j_raw.strip():
+                        continue
+                    s_files += 1
+                    s_toks += _estimate_static_context_tokens(j_raw, is_json=True)
+                if s_files > 0:
+                    prev_f, prev_t = disk_schema_by_server.get(s_name, (0, 0))
+                    disk_schema_by_server[s_name] = (prev_f + s_files, prev_t + s_toks)
+        except OSError:
+            continue
+
+    mcp_config_candidates: List[Path] = [
+        ws_dir / ".mcp.json",
+        ws_dir / ".cursor" / "mcp.json",
+        ws_dir / ".vscode" / "mcp.json",
+        ws_dir / ".gemini" / "mcp_config.json",
+        ws_dir / ".agents" / "mcp_config.json",
+        h_dir / ".claude.json",
+        h_dir / ".claude" / "mcp.json",
+        h_dir / ".claude" / "claude_desktop_config.json",
+        h_dir / ".cursor" / "mcp.json",
+        h_dir / ".gemini" / "antigravity" / "mcp_config.json",
+        h_dir / ".gemini" / "settings.json",
+        h_dir / ".codeium" / "windsurf" / "mcp_config.json",
+    ]
+
+    mcp_servers_map: Dict[str, Dict[str, Any]] = {}
+    seen_cfg_realpaths: set[str] = set()
+
+    def _register_servers_dict(servers_obj: Any, cfg_label: str) -> None:
+        if not isinstance(servers_obj, dict):
+            return
+        for raw_srv_name, srv_cfg in list(servers_obj.items())[:48]:
+            if isinstance(srv_cfg, dict) and srv_cfg.get("disabled") is True:
+                continue
+            s_name = _sanitize_turn0_label(raw_srv_name)
+            inline_tools = (
+                srv_cfg.get("tools")
+                if isinstance(srv_cfg, dict) and isinstance(srv_cfg.get("tools"), list)
+                else None
+            )
+            if inline_tools:
+                inline_json = json.dumps(inline_tools)
+                t_cnt = len(inline_tools)
+                t_tok = _estimate_static_context_tokens(inline_json, is_json=True)
+                mcp_servers_map[s_name] = {
+                    "name": s_name,
+                    "source": cfg_label,
+                    "schema_files": t_cnt,
+                    "tokens": t_tok,
+                    "provenance": "measured_inline_schema",
+                }
+            elif s_name in disk_schema_by_server:
+                d_cnt, d_tok = disk_schema_by_server[s_name]
+                mcp_servers_map[s_name] = {
+                    "name": s_name,
+                    "source": cfg_label,
+                    "schema_files": d_cnt,
+                    "tokens": d_tok,
+                    "provenance": "measured_disk_schema",
+                }
+            elif s_name not in mcp_servers_map:
+                mcp_servers_map[s_name] = {
+                    "name": s_name,
+                    "source": cfg_label,
+                    "schema_files": 0,
+                    "tokens": DEFAULT_ESTIMATED_TOKENS_PER_MCP_SERVER,
+                    "provenance": "calibrated_server_estimate",
+                }
+
+    for cfg_p in mcp_config_candidates:
+        try:
+            if not cfg_p.is_file():
+                continue
+            rp = os.path.realpath(cfg_p)
+            if rp in seen_cfg_realpaths:
+                continue
+            seen_cfg_realpaths.add(rp)
+            if os.path.getsize(cfg_p) > 4_000_000:
+                continue
+            parsed = json.loads(cfg_p.read_text(encoding="utf-8", errors="ignore"))
+            if not isinstance(parsed, dict):
+                continue
+            cfg_lbl = _format_turn0_rel_path(cfg_p, ws_dir, h_dir)
+            _register_servers_dict(parsed.get("mcpServers") or parsed.get("servers"), cfg_lbl)
+            projects_obj = parsed.get("projects")
+            if isinstance(projects_obj, dict):
+                ws_key = str(ws_dir.resolve())
+                proj_entry = projects_obj.get(ws_key) or projects_obj.get(str(ws_dir))
+                if isinstance(proj_entry, dict):
+                    _register_servers_dict(proj_entry.get("mcpServers"), cfg_lbl)
+        except Exception:
+            continue
+
+    for s_name, (d_cnt, d_tok) in disk_schema_by_server.items():
+        if s_name not in mcp_servers_map:
+            mcp_servers_map[s_name] = {
+                "name": s_name,
+                "source": "~/.gemini/antigravity/mcp",
+                "schema_files": d_cnt,
+                "tokens": d_tok,
+                "provenance": "measured_disk_schema",
+            }
+
+    mcp_servers_list = sorted(
+        mcp_servers_map.values(), key=lambda x: int(x.get("tokens", 0)), reverse=True
+    )
+    mcp_measured_tokens = sum(
+        int(s["tokens"])
+        for s in mcp_servers_list
+        if s["provenance"] in ("measured_disk_schema", "measured_inline_schema")
+    )
+    mcp_estimated_tokens = sum(
+        int(s["tokens"])
+        for s in mcp_servers_list
+        if s["provenance"] == "calibrated_server_estimate"
+    )
+    mcp_measured_schemas_count = sum(int(s["schema_files"]) for s in mcp_servers_list)
+    mcp_turn0_tokens = mcp_measured_tokens + mcp_estimated_tokens
+    total_turn0_per_session = instruction_tokens + mcp_turn0_tokens
+
+    wbc_hook_active = any(
+        p.is_file()
+        for p in (
+            ws_dir / "bin" / "body-immune-hook",
+            h_dir / ".whole_body_compute" / "bin" / "body-immune-hook",
+            h_dir / ".voicefi" / "bin" / "body-immune-hook",
+        )
+    )
+
+    eff_sessions = max(1, int(sessions_count)) if sessions_count > 0 else 1
+    cum_turn0_tokens = total_turn0_per_session * eff_sessions
+    cum_mcp_tokens = mcp_turn0_tokens * eff_sessions
+    est_30d_turn0_usd = round((cum_turn0_tokens / 1_000_000.0) * float(in_price_per_m), 2)
+    est_30d_mcp_bloat_usd = round((cum_mcp_tokens / 1_000_000.0) * float(in_price_per_m), 2)
+
+    if total_turn0_per_session >= 12_000 or mcp_turn0_tokens >= 9_000:
+        status_tier = "HIGH_BLOAT"
+    elif total_turn0_per_session >= 4_500 or mcp_turn0_tokens >= 3_000:
+        status_tier = "MODERATE"
+    else:
+        status_tier = "LEAN"
+
+    scan_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+    summary = (
+        f"{total_turn0_per_session:,} tok/session "
+        f"({instruction_tokens:,} instruction tok across {len(instruction_files)} files + "
+        f"{mcp_turn0_tokens:,} MCP schema tok across {len(mcp_servers_list)} servers vs 0 MCP tok for `body` OS hooks)"
+    )
+
+    return {
+        "scan_latency_ms": scan_ms,
+        "status_tier": status_tier,
+        "instruction_files_count": len(instruction_files),
+        "instruction_bytes": instruction_bytes,
+        "instruction_tokens": instruction_tokens,
+        "instruction_files": instruction_files,
+        "mcp_servers_count": len(mcp_servers_list),
+        "mcp_tool_schemas_measured_count": mcp_measured_schemas_count,
+        "mcp_measured_schema_tokens": mcp_measured_tokens,
+        "mcp_estimated_unindexed_tokens": mcp_estimated_tokens,
+        "mcp_turn0_tokens": mcp_turn0_tokens,
+        "mcp_servers": mcp_servers_list,
+        "total_turn0_tokens_per_session": total_turn0_per_session,
+        "wbc_os_hook_active": wbc_hook_active,
+        "wbc_os_hook_turn0_tokens": 0,
+        "avoidable_mcp_turn0_tokens_per_session": mcp_turn0_tokens,
+        "cumulative_session_turn0_tokens": cum_turn0_tokens,
+        "estimated_30d_turn0_usd": est_30d_turn0_usd,
+        "estimated_30d_mcp_bloat_usd": est_30d_mcp_bloat_usd,
+        "summary": summary,
+    }
+
+
 def run_multi_harness_finops_audit(
     days: int = 30,
     price_per_m: float = 5.0,
@@ -1463,17 +2382,14 @@ def run_multi_harness_finops_audit(
     aider_path: Optional[Path] = None,
     continue_dir: Optional[Path] = None,
     zed_dir: Optional[Path] = None,
+    gemini_cli_dir: Optional[Path] = None,
+    workspace_dir: Optional[Path] = None,
+    home_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     now = time.time()
     window_seconds = max(1, int(days)) * 86400.0 if days > 0 else 0.0
     in_price = float(price_per_m)
     out_price = round(in_price * 5.0, 2)
-
-    default_cursor = (
-        Path.home() / "Library" / "Application Support" / "Cursor" / "User" / "workspaceStorage"
-        if sys.platform == "darwin"
-        else Path.home() / ".config" / "Cursor" / "User" / "workspaceStorage"
-    )
 
     any_custom_override = any(
         x is not None
@@ -1488,6 +2404,7 @@ def run_multi_harness_finops_audit(
             aider_path,
             continue_dir,
             zed_dir,
+            gemini_cli_dir,
         )
     ) or any(
         os.environ.get(k)
@@ -1503,31 +2420,79 @@ def run_multi_harness_finops_audit(
             "AIDER_HISTORY_PATH",
             "CONTINUE_SESSIONS_DIR",
             "ZED_THREADS_DIR",
+            "GEMINI_CLI_DIR",
         )
     )
 
-    p_agy = Path(agy_dir or os.environ.get("AGY_BRAIN_DIR") or (Path.home() / ".gemini" / "antigravity" / "brain")).expanduser()
-    p_claude = Path(claude_dir or os.environ.get("CLAUDE_CODE_DIR") or (Path.home() / ".claude" / "projects")).expanduser()
-    p_goose = Path(goose_db or os.environ.get("GOOSE_SESSIONS_DB") or (Path.home() / ".config" / "goose" / "sessions.db")).expanduser()
-    p_cursor = Path(cursor_dir or os.environ.get("CURSOR_STORAGE_DIR") or default_cursor).expanduser()
+    candidate_homes = _iter_candidate_user_homes()
+    agy_roots = (
+        [Path(agy_dir or os.environ["AGY_BRAIN_DIR"]).expanduser()]
+        if (agy_dir is not None or os.environ.get("AGY_BRAIN_DIR"))
+        else [h / ".gemini" / "antigravity" / "brain" for h in candidate_homes]
+    )
+    claude_roots = (
+        [Path(claude_dir or os.environ["CLAUDE_CODE_DIR"]).expanduser()]
+        if (claude_dir is not None or os.environ.get("CLAUDE_CODE_DIR"))
+        else [h / ".claude" / "projects" for h in candidate_homes]
+    )
+    goose_roots = (
+        [Path(goose_db or os.environ["GOOSE_SESSIONS_DB"]).expanduser()]
+        if (goose_db is not None or os.environ.get("GOOSE_SESSIONS_DB"))
+        else [
+            p
+            for h in candidate_homes
+            for p in (
+                h / ".config" / "goose" / "sessions.db",
+                h / "AppData" / "Roaming" / "Block" / "goose" / "data" / "sessions.db",
+            )
+        ]
+    )
+    cursor_override = (
+        Path(cursor_dir or os.environ["CURSOR_STORAGE_DIR"]).expanduser()
+        if (cursor_dir is not None or os.environ.get("CURSOR_STORAGE_DIR"))
+        else None
+    )
 
     agy_recs = (
-        scan_antigravity_harness(p_agy, window_seconds, now, in_price, out_price)
+        _dedup_records(
+            [
+                r
+                for root in agy_roots
+                for r in scan_antigravity_harness(root, window_seconds, now, in_price, out_price)
+            ]
+        )
         if (not any_custom_override or agy_dir is not None or os.environ.get("AGY_BRAIN_DIR"))
         else []
     )
+    gemini_cli_recs = (
+        scan_gemini_cli_harness(gemini_cli_dir, window_seconds, now, in_price, out_price)
+        if (not any_custom_override or gemini_cli_dir is not None or os.environ.get("GEMINI_CLI_DIR"))
+        else []
+    )
     claude_recs = (
-        scan_claude_code_harness(p_claude, window_seconds, now, in_price, out_price)
+        _dedup_records(
+            [
+                r
+                for root in claude_roots
+                for r in scan_claude_code_harness(root, window_seconds, now, in_price, out_price)
+            ]
+        )
         if (not any_custom_override or claude_dir is not None or os.environ.get("CLAUDE_CODE_DIR"))
         else []
     )
     goose_recs = (
-        scan_goose_harness(p_goose, window_seconds, now, in_price, out_price)
+        _dedup_records(
+            [
+                r
+                for root in goose_roots
+                for r in scan_goose_harness(root, window_seconds, now, in_price, out_price)
+            ]
+        )
         if (not any_custom_override or goose_db is not None or os.environ.get("GOOSE_SESSIONS_DB"))
         else []
     )
     cursor_recs = (
-        scan_cursor_harness(p_cursor, window_seconds, now, in_price, out_price)
+        scan_cursor_harness(cursor_override, window_seconds, now, in_price, out_price)
         if (not any_custom_override or cursor_dir is not None or os.environ.get("CURSOR_STORAGE_DIR"))
         else []
     )
@@ -1569,6 +2534,7 @@ def run_multi_harness_finops_audit(
 
     all_records = (
         agy_recs
+        + gemini_cli_recs
         + claude_recs
         + goose_recs
         + cursor_recs
@@ -1604,6 +2570,7 @@ def run_multi_harness_finops_audit(
 
     harness_breakdown = {
         "antigravity": _summarize_harness("Google Antigravity", agy_recs),
+        "gemini_cli": _summarize_harness("Google Gemini CLI", gemini_cli_recs),
         "claude_code": _summarize_harness("Anthropic Claude Code", claude_recs),
         "cursor": _summarize_harness("Cursor Agent / Composer", cursor_recs),
         "goose": _summarize_harness("Block Goose CLI", goose_recs),
@@ -1779,6 +2746,36 @@ def run_multi_harness_finops_audit(
         },
     }
 
+    fallback_custom_root = agy_roots[0].parent if agy_roots else Path.cwd()
+    resolved_turn0_ws = (
+        workspace_dir
+        if workspace_dir is not None
+        else (
+            Path(os.environ["WBC_AUDIT_WORKSPACE_DIR"])
+            if os.environ.get("WBC_AUDIT_WORKSPACE_DIR")
+            else (fallback_custom_root if any_custom_override else Path.cwd())
+        )
+    )
+    resolved_turn0_home = (
+        home_dir
+        if home_dir is not None
+        else (
+            Path(os.environ["WBC_AUDIT_HOME_DIR"])
+            if os.environ.get("WBC_AUDIT_HOME_DIR")
+            else (
+                fallback_custom_root
+                if any_custom_override
+                else (candidate_homes[0] if candidate_homes else Path.home())
+            )
+        )
+    )
+    turn0_static_overhead = audit_turn0_static_overhead(
+        workspace_dir=resolved_turn0_ws,
+        home_dir=resolved_turn0_home,
+        sessions_count=len(all_records),
+        in_price_per_m=in_price,
+    )
+
     return {
         "window_days": int(days),
         "input_price_per_m": in_price,
@@ -1822,6 +2819,7 @@ def run_multi_harness_finops_audit(
         "hal_benchmark_proof": hal_benchmark_proof,
         "quota_multiplier_metrics": quota_multiplier_metrics,
         "harness_breakdown": harness_breakdown,
+        "turn0_static_overhead": turn0_static_overhead,
         "pricing_tiers": pricing_tiers,
         "top_bloated_conversations": all_records[: max(1, int(top))],
         "generated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2077,6 +3075,23 @@ def format_standalone_receipt(
     if empty_labels:
         lines.append(f"  {DIM}Checked (0 recent sessions): {' • '.join(empty_labels)}{RESET}")
 
+    t0_meta = audit.get("turn0_static_overhead", {})
+    t0_tot = int(t0_meta.get("total_turn0_tokens_per_session", 0))
+    t0_inst = int(t0_meta.get("instruction_tokens", 0))
+    t0_ifiles = int(t0_meta.get("instruction_files_count", 0))
+    t0_mcp = int(t0_meta.get("mcp_turn0_tokens", 0))
+    t0_msrv = int(t0_meta.get("mcp_servers_count", 0))
+    if t0_tot > 0 or t0_msrv > 0 or t0_ifiles > 0:
+        mcp_col = YELLOW if t0_mcp >= 3000 else DIM
+        lines.extend(
+            [
+                "",
+                f"{BOLD}Turn-0 Fixed Startup Context Tax (Rules + MCP Schemas vs `body` OS Hooks):{RESET}",
+                f"  • {BOLD}{t0_tot:,} tok/session{RESET} ({t0_inst:,} instruction tok across {t0_ifiles} files + {mcp_col}{t0_mcp:,} MCP schema tok across {t0_msrv} servers{RESET})",
+                f"  • {GREEN}Whole Body Compute (`body`) OS Hooks:{RESET} {BOLD}{GREEN}0 MCP schema tokens{RESET} ($0.00 Turn-0 tax vs {t0_mcp:,} MCP tok/session)",
+            ]
+        )
+
     if (quad_tok + tool_tok) > 0:
         quad_share = int(round((quad_tok / max(1, quad_tok + tool_tok)) * 100.0))
         tool_share = max(0, 100 - quad_share)
@@ -2127,7 +3142,7 @@ def format_standalone_receipt(
                 f"{q_lo:.2f}x-{q_hi:.2f}x increase in subscription runway",
                 "",
                 f"{BOLD}Check yours free:{RESET}",
-                f"{CYAN}curl -sSL https://wholebodycompute.org/audit.py | python3{RESET}",
+                f"{CYAN}curl -sSL https://wholebodycompute.com/audit.py | python3{RESET}",
             ]
         )
 
@@ -2135,14 +3150,54 @@ def format_standalone_receipt(
         [
             "",
             f"{BOLD}{GREEN}Start Saving Now - Copy & Paste to Install (100% Free Open-Core • <10s):{RESET}",
-            f"  • {BOLD}Install:{RESET}   {CYAN}curl -fsSL https://wholebodycompute.com/begin | sh{RESET}",
-            f"  • {BOLD}Homebrew:{RESET}  {CYAN}brew install wholebodycompute/tap/whole-body-compute && body begin{RESET}",
+            f"  • {BOLD}Install:{RESET}   {CYAN}curl -fsSL https://wholebodycompute.com/begin/audit | sh{RESET}",
             f"  • {BOLD}PyPI / uv:{RESET} {CYAN}uv tool install whole-body-compute && body begin{RESET}",
+            f"  • {BOLD}pipx:{RESET}      {CYAN}pipx install whole-body-compute && body begin{RESET}",
             f"  • {BOLD}Verify:{RESET}    {CYAN}{prove_cmd}{RESET}  •  {DIM}https://wholebodycompute.com{RESET}",
             "",
         ]
     )
     return "\n".join(lines)
+
+
+def _detect_harness_env_flags() -> Dict[str, Any]:
+    """Return strictly boolean, zero-PII directory presence flags to diagnose 0-session audits."""
+    try:
+        homes = _iter_candidate_user_homes()
+        appdata = os.environ.get("APPDATA", "").strip()
+        is_wsl = bool(os.environ.get("WSL_DISTRO_NAME"))
+        if not is_wsl and Path("/proc/version").is_file():
+            try:
+                is_wsl = "microsoft" in Path("/proc/version").read_text(encoding="utf-8", errors="ignore").lower()
+            except Exception:
+                pass
+        return {
+            "has_agy_dir": any((h / ".gemini" / "antigravity" / "brain").is_dir() for h in homes),
+            "has_gemini_cli_dir": any((h / ".gemini" / "tmp").is_dir() for h in homes),
+            "has_claude_dir": any((h / ".claude" / "projects").is_dir() or (h / ".claude").is_dir() for h in homes),
+            "has_cursor_dir": bool(
+                (appdata and (Path(appdata) / "Cursor").is_dir())
+                or any(
+                    (h / ".cursor").is_dir()
+                    or (h / "Library" / "Application Support" / "Cursor").is_dir()
+                    or (h / "AppData" / "Roaming" / "Cursor").is_dir()
+                    or (h / ".config" / "Cursor").is_dir()
+                    or (h / ".cursor-server").is_dir()
+                    for h in homes
+                )
+            ),
+            "has_codex_dir": any((h / ".codex").is_dir() for h in homes),
+            "has_windsurf_dir": any(
+                (h / ".codeium" / "windsurf").is_dir()
+                or (h / "AppData" / "Roaming" / "Windsurf").is_dir()
+                or (h / "Library" / "Application Support" / "Windsurf").is_dir()
+                for h in homes
+            ),
+            "is_wsl": is_wsl,
+            "has_wsl_win_users": Path("/mnt/c/Users").is_dir() or bool(os.environ.get("WBC_WSL_USERS_ROOT")),
+        }
+    except Exception:
+        return {}
 
 
 def _emit_audit_telemetry(audit: Dict[str, Any], no_telemetry: bool = False) -> None:
@@ -2182,6 +3237,9 @@ def _emit_audit_telemetry(audit: Dict[str, Any], no_telemetry: bool = False) -> 
         if consent_p.is_file():
             c_data = json.loads(consent_p.read_text(encoding="utf-8"))
             cohort_id = str(c_data.get("cohort_id") or "")
+            if not cohort_id and c_data.get("random_salt"):
+                ym = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m")
+                cohort_id = hashlib.sha256(f"{c_data['random_salt']}:{ym}".encode("utf-8")).hexdigest()[:16]
         if not cohort_id:
             seed = f"{os.uname().sysname if hasattr(os, 'uname') else sys.platform}:{Path.home().name}"
             cohort_id = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
@@ -2251,6 +3309,14 @@ def _emit_audit_telemetry(audit: Dict[str, Any], no_telemetry: bool = False) -> 
 
     hb = audit.get("harness_breakdown", {}) or {}
     active_harnesses = [k for k, v in hb.items() if isinstance(v, dict) and int(v.get("threads", 0)) > 0]
+    convs_scanned = int(audit.get("conversations_scanned", 0))
+    raw_acq = (os.environ.get("WBC_AUDIT_SOURCE") or WBC_EDGE_AUDIT_SOURCE or "direct").strip().lower()
+    acq_source = re.sub(r"[^a-z0-9_.-]", "", raw_acq)[:40] or "direct"
+    is_internal = (
+        os.environ.get("WBC_INTERNAL_DEV") == "1"
+        or Path.cwd().name == "Whole Body Compute"
+        or acq_source == "wbc_canary"
+    )
     payload = {
         "api_key": api_key,
         "event": "wbc_audit_completed",
@@ -2258,8 +3324,11 @@ def _emit_audit_telemetry(audit: Dict[str, Any], no_telemetry: bool = False) -> 
         "properties": {
             "cohort_id": cohort_id,
             "mode": "standalone_audit_py",
+            "acquisition_source": acq_source,
+            "utm_source": acq_source if acq_source != "direct" else None,
+            "is_qualified_audit": convs_scanned > 0,
             "window_days": int(audit.get("window_days", 30)),
-            "conversations_scanned": int(audit.get("conversations_scanned", 0)),
+            "conversations_scanned": convs_scanned,
             "total_steps": int(audit.get("total_steps", 0)),
             "active_harnesses": ",".join(active_harnesses),
             "active_harnesses_count": len(active_harnesses),
@@ -2269,6 +3338,8 @@ def _emit_audit_telemetry(audit: Dict[str, Any], no_telemetry: bool = False) -> 
             "savings_pct": float(audit.get("savings_pct", 0.0)),
             "os_platform": sys.platform,
             "$lib": "whole-body-compute-standalone-audit",
+            **_detect_harness_env_flags(),
+            **({"is_internal_dev": True} if is_internal else {}),
         },
     }
     try:
@@ -2298,15 +3369,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--no-color", action="store_true", dest="no_color", help="Disable ANSI terminal colors")
     parser.add_argument("--no-telemetry", action="store_true", dest="no_telemetry", help="Skip anonymous audit completion ping")
     parser.add_argument("--agy-dir", dest="agy_dir", default=None, help="Custom Antigravity brain directory")
+    parser.add_argument("--gemini-cli-dir", dest="gemini_cli_dir", default=None, help="Custom Google Gemini CLI tmp directory")
     parser.add_argument("--claude-dir", dest="claude_dir", default=None, help="Custom Claude Code projects directory")
     parser.add_argument("--goose-db", dest="goose_db", default=None, help="Custom Block Goose sessions.db path")
-    parser.add_argument("--cursor-dir", dest="cursor_dir", default=None, help="Custom Cursor workspaceStorage directory")
+    parser.add_argument("--cursor-dir", dest="cursor_dir", default=None, help="Custom Cursor storage directory")
     parser.add_argument("--codex-dir", dest="codex_dir", default=None, help="Custom OpenAI Codex sessions directory or history.jsonl")
     parser.add_argument("--cline-dir", dest="cline_dir", default=None, help="Custom Cline / Roo Code tasks storage directory")
     parser.add_argument("--windsurf-dir", dest="windsurf_dir", default=None, help="Custom Windsurf Cascade storage directory")
     parser.add_argument("--aider-path", dest="aider_path", default=None, help="Custom Aider chat history path or directory")
     parser.add_argument("--continue-dir", dest="continue_dir", default=None, help="Custom Continue.dev sessions directory")
     parser.add_argument("--zed-dir", dest="zed_dir", default=None, help="Custom Zed AI threads directory")
+    parser.add_argument("--workspace-dir", dest="workspace_dir", default=None, help="Custom workspace directory for Turn-0 static instruction/MCP scan")
+    parser.add_argument("--home-dir", dest="home_dir", default=None, help="Custom user home directory for Turn-0 global MCP/instruction scan")
     parser.add_argument("--export-receipt", dest="export_receipt", default=None, help="Optional path to export receipt")
     parser.add_argument("--json", action="store_true", help="Output structured JSON")
     args = parser.parse_args(argv)
@@ -2326,6 +3400,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         aider_path=Path(args.aider_path) if args.aider_path else None,
         continue_dir=Path(args.continue_dir) if args.continue_dir else None,
         zed_dir=Path(args.zed_dir) if args.zed_dir else None,
+        gemini_cli_dir=Path(args.gemini_cli_dir) if args.gemini_cli_dir else None,
+        workspace_dir=Path(args.workspace_dir) if args.workspace_dir else None,
+        home_dir=Path(args.home_dir) if args.home_dir else None,
     )
     _emit_audit_telemetry(audit, no_telemetry=bool(getattr(args, "no_telemetry", False)))
 

@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qsl, urlparse, urlunparse
 
+from whole_body_compute.procedural_telemetry import get_wbc_data_dir
 from whole_body_compute.redaction import redact_secrets
 
 logger = logging.getLogger("whole_body_compute.integrations.vault_index")
@@ -163,7 +164,7 @@ class VaultRAGIndex:
     """
 
     def __init__(self, db_path: Optional[Path] = None):
-        default_dir = Path.home() / ".voicefi"
+        default_dir = get_wbc_data_dir()
         default_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = db_path or (default_dir / "vault_index.db")
         self._local = threading.local()
