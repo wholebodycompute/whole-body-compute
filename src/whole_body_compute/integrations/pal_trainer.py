@@ -226,7 +226,7 @@ class PalTeachRecorder:
             return
 
         try:
-            from whole_body_compute.integrations.screenpipe import record_audio_transcription
+            from whole_body_compute.integrations.foveal_memory import record_audio_transcription
 
             record_audio_transcription(clean_note, device="Pal Training Mic")
         except Exception:
@@ -326,7 +326,7 @@ class PalTeachRecorder:
                     enriched_params["har_entries"] = net_entries
             if "screenpipe_ocr" not in enriched_params and not PalHarness._is_test_env():
                 try:
-                    from whole_body_compute.integrations.screenpipe import search_screen_content
+                    from whole_body_compute.integrations.foveal_memory import search_screen_content
 
                     recs = search_screen_content(
                         query="",
@@ -1090,7 +1090,7 @@ class PalTrainer:
             try:
                 from whole_body_compute.integrations.pal_compiler import PalCompiler
                 from whole_body_compute.integrations.pal_harness import PalHarness
-                from whole_body_compute.integrations.screenpipe import (
+                from whole_body_compute.integrations.foveal_memory import (
                     extract_semantic_screen_entities,
                     search_screen_content,
                 )
@@ -1237,7 +1237,7 @@ class PalTrainer:
         2. Append a fine-tuning example (`~/.voicefi/training_data/pal_spoken_processes.jsonl`) pairing
            the user's spoken process narration + Foveal Vision episodic OCR with the compiled step plan for local models.
         """
-        from whole_body_compute.integrations.screenpipe import (
+        from whole_body_compute.integrations.foveal_memory import (
             extract_semantic_screen_entities,
             resolve_direct_headless_route,
             strip_ui_chrome_from_ocr,
@@ -1265,7 +1265,7 @@ class PalTrainer:
             for idx, ws in enumerate(recipe.steps, start=1):
                 step_lines.append(f"{idx}. {ws.name} ({ws.action.value})")
 
-        mcp_bin = str(Path(__file__).resolve().parents[3] / "bin" / "screenpipe-mcp")
+        mcp_bin = str(Path(__file__).resolve().parents[3] / "bin" / "foveal-vision-mcp")
         goose_recipe_doc = {
             "version": "1.0.0",
             "title": f"Pal Learned Workflow: {self.workflow_name}",
@@ -1290,7 +1290,7 @@ class PalTrainer:
             "prompt": f"Run the learned workflow '{self.workflow_name}' and summarize the result in under 25 words.",
             "extensions": [
                 {"type": "builtin", "name": "developer"},
-                {"type": "stdio", "name": "screenpipe", "cmd": mcp_bin, "args": []},
+                {"type": "stdio", "name": "foveal_vision", "cmd": mcp_bin, "args": []},
             ],
         }
 
@@ -1342,7 +1342,7 @@ class PalTrainer:
         Reconstructs a PalTrainer session from Foveal Vision episodic rolling OCR + audio SQLite history
         even if the user did not turn on Training Mode beforehand.
         """
-        from whole_body_compute.integrations.screenpipe import search_screen_content
+        from whole_body_compute.integrations.foveal_memory import search_screen_content
 
         trainer = cls(workflow_name=workflow_name)
         trainer.start_time = time.time() - (minutes * 60)

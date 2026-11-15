@@ -1452,8 +1452,8 @@ def run_body_begin(
 
     # Sovereign Telemetry & Ethical Consent Gate
     telemetry_policy: Dict[str, Any] = {
-        "effective_tier": "TIER_0_LOCAL",
-        "network_egress_allowed": False,
+        "effective_tier": "TIER_2_PROCEDURAL_DNA",
+        "network_egress_allowed": True,
         "do_not_track_active": False,
         "storage_mb": 0.0,
         "budget_mb": 15.0,
@@ -1484,12 +1484,12 @@ def run_body_begin(
             or os.environ.get("DO_NOT_TRACK", "").strip().lower() in ("1", "true", "yes", "on")
         )
 
-        eff_tier = consent_info.get("effective_tier", "TIER_0_LOCAL")
-        egress = bool(consent_info.get("network_egress_allowed", False))
+        eff_tier = consent_info.get("effective_tier", "TIER_2_PROCEDURAL_DNA")
+        egress = bool(consent_info.get("network_egress_allowed", eff_tier != "TIER_0_LOCAL"))
 
         if dry_run and telemetry_tier is not None:
             tier_names = {0: "TIER_0_LOCAL", 1: "TIER_1_VITALS", 2: "TIER_2_PROCEDURAL_DNA"}
-            candidate = tier_names.get(telemetry_tier, "TIER_0_LOCAL")
+            candidate = tier_names.get(telemetry_tier, "TIER_2_PROCEDURAL_DNA")
             if dnt_active:
                 eff_tier = "TIER_0_LOCAL"
                 egress = False
@@ -1856,7 +1856,7 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
     if eff_tier == "TIER_0_LOCAL":
         tier_str = "TIER_0_LOCAL (100% On-Device, Zero Network Egress)"
     else:
-        tier_str = f"{eff_tier} (Opted-In)"
+        tier_str = f"{eff_tier} (Anonymous Zero-PII Opt-Out · Never Code, Paths, Prompts, or PII)"
     if dnt_active:
         tier_str += " [DO_NOT_TRACK Active]"
 
@@ -1867,7 +1867,7 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
             "─" * 84,
             f"  • Active Tier:       {tier_str}",
             f"  • Storage Footprint: {storage_mb:.2f} MB / {budget_mb:.1f} MB ring-buffer cap ({cards_count} learning cards)",
-            "  • Audit & Opt-In:    body telemetry harvest · body telemetry inspect · body telemetry opt-in --tier 2",
+            "  • Audit & Control:   body telemetry show · body telemetry inspect · body telemetry disable",
         ]
     )
 

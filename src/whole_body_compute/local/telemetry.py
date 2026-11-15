@@ -1,12 +1,12 @@
 """
-voicefi/local/telemetry.py
+whole_body_compute/local/telemetry.py
 Unified Telemetry Ledger & Correlated Pipeline Tracer for Hybrid Cloud + Apple Silicon Orchestration.
 
 Tracks every stage of the 3-Stage Hybrid Gate (Local Scout -> Cloud Pro/Subagents -> Local QA):
 1. Token & Quota Offload (local tokens digested, cloud context saved %, estimated USD saved)
 2. Apple Silicon Vital Signs (thermal pressure, free Unified RAM GB, swap GB, Metal tok/s, <0.2ms RAM ingress)
 3. Quality & Gate Metrics (local_qa lint/pytest pass rate, thermal throttle pauses, hardware cascade fallbacks)
-4. Persists to ~/.voicefi/analytics.db, emits zero-PII PostHog events, and updates .agents/HYBRID_TELEMETRY.md.
+4. Persists to ~/.whole_body_compute/analytics.db, emits zero-PII PostHog events, and updates .agents/HYBRID_TELEMETRY.md.
 """
 
 from __future__ import annotations
@@ -32,8 +32,8 @@ except ImportError:
 
 
 def get_analytics_db_path() -> Path:
-    """Resolve the active analytics SQLite DB path, respecting VOICEFI_ANALYTICS_DB or WBC data dir."""
-    env_db = os.environ.get("VOICEFI_ANALYTICS_DB")
+    """Resolve the active analytics SQLite DB path, respecting WBC_ANALYTICS_DB / VOICEFI_ANALYTICS_DB or WBC data dir."""
+    env_db = os.environ.get("WBC_ANALYTICS_DB") or os.environ.get("VOICEFI_ANALYTICS_DB")
     if env_db:
         return Path(env_db).expanduser()
     try:
@@ -107,13 +107,26 @@ def capture_wbc_hybrid_step(
         from whole_body_compute.procedural_telemetry import (
             DEFAULT_POSTHOG_API_KEY,
             TelemetryConsentManager,
+            _record_last_outbound_payload,
+            get_anonymous_system_envelope,
+            sanitize_telemetry_payload,
         )
 
         mgr = TelemetryConsentManager()
         if not mgr.can_share_vitals():
             return False
 
+        if (
+            os.environ.get("PYTEST_CURRENT_TEST")
+            and async_send
+            and os.environ.get("WBC_TEST_SYNC") != "1"
+            and os.environ.get("VOICEFI_TEST_SYNC") != "1"
+            and os.environ.get("WBC_TEST_TELEMETRY_PING") != "1"
+        ):
+            return False
+
         cohort_id = mgr.get_cohort_id()
+        sys_env = get_anonymous_system_envelope()
     except Exception:
         return False
 
@@ -147,14 +160,20 @@ def capture_wbc_hybrid_step(
         "pipeline_id",
     }
 
-    props: Dict[str, Any] = {}
+    raw_props: Dict[str, Any] = {}
     for key in allowed_fields:
         if key in step_props and step_props[key] is not None:
-            props[key] = step_props[key]
+            raw_props[key] = step_props[key]
 
+    props = sanitize_telemetry_payload(raw_props)
+    for ek, ev in sys_env.items():
+        props.setdefault(ek, ev)
+    props["product"] = "whole_body_compute"
     props["source"] = "whole_body_compute_open_core"
     props["cohort_id"] = cohort_id
     props["$is_server"] = True
+    props["$geoip_disable"] = True
+    props["$ip"] = None
 
     api_key = (
         os.environ.get("WBC_POSTHOG_KEY")
@@ -167,14 +186,14 @@ def capture_wbc_hybrid_step(
         host = os.environ.get("POSTHOG_HOST") or "https://us.i.posthog.com"
         target_url = f"{host.rstrip('/')}/capture/"
 
-    payload = json.dumps(
-        {
-            "api_key": api_key,
-            "event": "wbc_hybrid_step",
-            "distinct_id": cohort_id,
-            "properties": props,
-        }
-    ).encode("utf-8")
+    envelope = {
+        "api_key": api_key,
+        "event": "wbc_hybrid_step",
+        "distinct_id": cohort_id,
+        "properties": props,
+    }
+    _record_last_outbound_payload(envelope)
+    payload = json.dumps(envelope).encode("utf-8")
 
     def _do_send():
         try:
@@ -186,7 +205,7 @@ def capture_wbc_hybrid_step(
                 headers={"Content-Type": "application/json", "User-Agent": "WholeBodyCompute-OpenCore/1.0"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout):
                 pass
         except Exception as exc:
             logger.debug("Failed to send wbc_hybrid_step: %s", exc)
@@ -359,7 +378,7 @@ def record_hybrid_step(
 ) -> HybridStepRecord:
     """
     Record a single Hybrid Cloud or Local Silicon execution step across:
-    1. ~/.voicefi/analytics.db (SQLite WAL store)
+    1. ~/.whole_body_compute/analytics.db (SQLite WAL store)
     2. Zero-PII PostHog telemetry
     3. .agents/HYBRID_TELEMETRY.md workspace scorecard
     """

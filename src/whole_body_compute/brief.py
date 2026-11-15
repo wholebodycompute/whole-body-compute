@@ -572,13 +572,10 @@ class SovereignDuetBriefingEngine:
             or os.environ.get("VOICEFI_DOT_MEMORY_DB", str(Path.home() / ".voicefi" / "dot_memory.db"))
         )
         foveal_default = Path.home() / ".whole_body" / "foveal_memory.sqlite"
-        screenpipe_default = Path.home() / ".screenpipe" / "db.sqlite"
-        default_db = foveal_default if foveal_default.exists() and not screenpipe_default.exists() else screenpipe_default
         self.screenpipe_db_path = Path(
             screenpipe_db_path
             or os.environ.get("FOVEAL_MEMORY_DB_PATH")
-            or os.environ.get("SCREENPIPE_DB_PATH")
-            or default_db
+            or foveal_default
         )
 
     # ------------------------------------------------------------------
@@ -591,10 +588,10 @@ class SovereignDuetBriefingEngine:
         foveal_override: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Inspect recent Screenpipe episodic context and Foveal AXUIElement window focus.
+        Inspect recent Foveal episodic context and AXUIElement window focus.
         All strings are scrubbed through `redact_secrets`.
         """
-        from whole_body_compute.integrations.screenpipe import (
+        from whole_body_compute.integrations.foveal_memory import (
             extract_semantic_screen_entities,
             strip_ui_chrome_from_ocr,
         )

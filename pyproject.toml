@@ -97,10 +97,12 @@ packages = ["src/whole_body_compute"]
 [tool.hatch.build.targets.sdist]
 include = [
     "/README.md",
+    "/TELEMETRY.md",
     "/LICENSE",
     "/PATENTS.md",
     "/pyproject.toml",
     "/.github/workflows/release_open_core.yml",
+    "/.github/workflows/traffic_archive.yml",
     "/assets/hero-architecture-banner.svg",
     "/bin/body-immune-hook",
     "/bin/foveal-vision-mcp",

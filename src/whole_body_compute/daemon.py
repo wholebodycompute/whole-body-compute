@@ -3,10 +3,10 @@ macOS LaunchAgent & Background Daemon Manager (`body daemon`) for Whole Body Com
 
 Works out-of-the-box in both Open-Core Community (`brew install whole-body-compute` /
 `uv tool install whole-body-compute`) and Pro/Team/Enterprise installations:
-  1. `com.wholebodycompute.foveal`     — Community & Pro: Warm Unix socket Foveal DOM daemon (`~/.voicefi/foveal.sock`)
-  2. `com.wholebodycompute.screenpipe` — Community & Pro: Sovereign Foveal Memory HTTP `:3030` bridge
-  3. `com.wholebodycompute.remsleep`   — Pro/Team: 03:30 AM Nocturnal REM Sleep & LoRA Distillation
-  4. `com.wholebodycompute.telemetry`  — Pro/Team: Live Biometric Telemetry HUD & WebSocket `:9381`
+  1. `com.wholebodycompute.foveal` - Community & Pro: Warm Unix socket Foveal DOM daemon (`~/.voicefi/foveal.sock`)
+  2. `com.wholebodycompute.foveal-memory` - Community & Pro: Sovereign Foveal Memory HTTP `:9382` bridge
+  3. `com.wholebodycompute.remsleep` - Pro/Team: 03:30 AM Nocturnal REM Sleep & LoRA Distillation
+  4. `com.wholebodycompute.telemetry` - Pro/Team: Live Biometric Telemetry HUD & WebSocket `:9381`
 """
 
 from __future__ import annotations
@@ -22,14 +22,14 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 DAEMON_LABELS: Tuple[str, ...] = (
     "com.wholebodycompute.foveal",
-    "com.wholebodycompute.screenpipe",
+    "com.wholebodycompute.foveal-memory",
     "com.wholebodycompute.remsleep",
     "com.wholebodycompute.telemetry",
 )
 
 COMMUNITY_DAEMON_LABELS: Tuple[str, ...] = (
     "com.wholebodycompute.foveal",
-    "com.wholebodycompute.screenpipe",
+    "com.wholebodycompute.foveal-memory",
 )
 
 PRO_DAEMON_LABELS: Tuple[str, ...] = (
@@ -133,22 +133,22 @@ def resolve_body_program_args(subcommand_args: Sequence[str]) -> List[str]:
 
 
 def resolve_foveal_http_program_args() -> List[str]:
-    """Resolve portable `ProgramArguments` for the `:3030` Foveal Memory HTTP server."""
+    """Resolve portable `ProgramArguments` for the `:9382` Foveal Memory HTTP server."""
     explicit_bin = os.environ.get("WBC_DAEMON_BODY_BIN", "").strip()
     if explicit_bin:
         sibling_override_mcp = Path(explicit_bin).parent / "foveal-vision-mcp"
-        return [str(sibling_override_mcp), "--serve-http", "--host", "127.0.0.1", "--port", "3030"]
+        return [str(sibling_override_mcp), "--serve-http", "--host", "127.0.0.1", "--port", "9382"]
 
     sibling_mcp = Path(sys.executable).resolve().parent / "foveal-vision-mcp"
     if sibling_mcp.is_file() and os.access(sibling_mcp, os.X_OK) and not _is_temp_path(str(sibling_mcp)):
-        return [str(sibling_mcp), "--serve-http", "--host", "127.0.0.1", "--port", "3030"]
+        return [str(sibling_mcp), "--serve-http", "--host", "127.0.0.1", "--port", "9382"]
 
     which_mcp = shutil.which("foveal-vision-mcp")
     if which_mcp and not _is_temp_path(which_mcp):
-        return [str(Path(which_mcp).resolve()), "--serve-http", "--host", "127.0.0.1", "--port", "3030"]
+        return [str(Path(which_mcp).resolve()), "--serve-http", "--host", "127.0.0.1", "--port", "9382"]
 
     if sibling_mcp.is_file() and os.access(sibling_mcp, os.X_OK):
-        return [str(sibling_mcp), "--serve-http", "--host", "127.0.0.1", "--port", "3030"]
+        return [str(sibling_mcp), "--serve-http", "--host", "127.0.0.1", "--port", "9382"]
 
     return [
         sys.executable,
@@ -158,7 +158,7 @@ def resolve_foveal_http_program_args() -> List[str]:
         "--host",
         "127.0.0.1",
         "--port",
-        "3030",
+        "9382",
     ]
 
 
@@ -222,8 +222,8 @@ def build_launchd_plist_specs(
             "StandardOutPath": str(resolved_logs / "foveal_daemon.log"),
             "StandardErrorPath": str(resolved_logs / "foveal_daemon.log"),
         },
-        "com.wholebodycompute.screenpipe": {
-            "Label": "com.wholebodycompute.screenpipe",
+        "com.wholebodycompute.foveal-memory": {
+            "Label": "com.wholebodycompute.foveal-memory",
             "ProgramArguments": resolve_foveal_http_program_args(),
             "EnvironmentVariables": dict(env_vars),
             "RunAtLoad": True,
@@ -464,17 +464,17 @@ def manage_launchd_daemon(
     # default: status
     active_map = _query_launchctl_state()
     foveal_plist = agents_dir / "com.wholebodycompute.foveal.plist"
-    sp_plist = agents_dir / "com.wholebodycompute.screenpipe.plist"
+    fm_plist = agents_dir / "com.wholebodycompute.foveal-memory.plist"
     rem_plist = agents_dir / "com.wholebodycompute.remsleep.plist"
     tel_plist = agents_dir / "com.wholebodycompute.telemetry.plist"
 
     fov_active = "com.wholebodycompute.foveal" in active_map
-    sp_active = "com.wholebodycompute.screenpipe" in active_map
+    fm_active = "com.wholebodycompute.foveal-memory" in active_map
     rem_active = "com.wholebodycompute.remsleep" in active_map
     tel_active = "com.wholebodycompute.telemetry" in active_map
 
     fov_pid = active_map.get("com.wholebodycompute.foveal", "-")
-    sp_pid = active_map.get("com.wholebodycompute.screenpipe", "-")
+    fm_pid = active_map.get("com.wholebodycompute.foveal-memory", "-")
     tel_pid = active_map.get("com.wholebodycompute.telemetry", "-")
 
     pro_unlocked = _is_pro_daemon_unlocked() if include_pro is None else bool(include_pro)
@@ -504,10 +504,10 @@ def manage_launchd_daemon(
         "┌─────────────────────────────────┬────────────┬──────────┬──────────────────────────────────────────────────┐",
         "│ Daemon                          │ Status     │ Target   │ Details                                          │",
         "├─────────────────────────────────┼────────────┼──────────┼──────────────────────────────────────────────────┤",
-        f"│ com.wholebodycompute.foveal     │ {'🟢 ACTIVE  ' if fov_active and fov_pid != '-' else '⚪ STOPPED '} │ PID {fov_pid.ljust(4)} │ {foveal_plist.name} • Foveal + Ambient Observer │",
-        f"│ com.wholebodycompute.screenpipe │ {'🟢 ACTIVE  ' if sp_active and sp_pid != '-' else '⚪ STOPPED '} │ PID {sp_pid.ljust(4)} │ {sp_plist.name} • Local Foveal HTTP :3030  │",
-        f"│ com.wholebodycompute.remsleep   │ {rem_status_cell} │ 03:30 AM │ {rem_plist.name} • Nightly REM consolidation    │",
-        f"│ com.wholebodycompute.telemetry  │ {tel_status_cell} │ PID {tel_pid.ljust(4)} │ {tel_plist.name} • Biometric HUD on :9381  │",
+        f"│ com.wholebodycompute.foveal        │ {'🟢 ACTIVE  ' if fov_active and fov_pid != '-' else '⚪ STOPPED '} │ PID {fov_pid.ljust(4)} │ {foveal_plist.name} • Foveal + Ambient Observer │",
+        f"│ com.wholebodycompute.foveal-memory │ {'🟢 ACTIVE  ' if fm_active and fm_pid != '-' else '⚪ STOPPED '} │ PID {fm_pid.ljust(4)} │ {fm_plist.name} • Local Foveal HTTP :9382  │",
+        f"│ com.wholebodycompute.remsleep      │ {rem_status_cell} │ 03:30 AM │ {rem_plist.name} • Nightly REM consolidation    │",
+        f"│ com.wholebodycompute.telemetry     │ {tel_status_cell} │ PID {tel_pid.ljust(4)} │ {tel_plist.name} • Biometric HUD on :9381  │",
         "└─────────────────────────────────┴────────────┴──────────┴──────────────────────────────────────────────────┘",
         f"🌙 Last REM Sleep Activity: {last_run_summary}",
         "💡 Manage daemons: `body daemon install` • `body daemon logs` • `body daemon uninstall`",
@@ -519,7 +519,7 @@ def manage_launchd_daemon(
         "pro_daemons_unlocked": pro_unlocked,
         "foveal": {"active": fov_active, "pid": fov_pid, "plist": str(foveal_plist), "installed": foveal_plist.is_file()},
         "rem_sleep": {"active": rem_active, "plist": str(rem_plist), "installed": rem_plist.is_file()},
-        "screenpipe": {"active": sp_active, "pid": sp_pid, "plist": str(sp_plist), "installed": sp_plist.is_file()},
+        "foveal_memory": {"active": fm_active, "pid": fm_pid, "plist": str(fm_plist), "installed": fm_plist.is_file()},
         "telemetry": {"active": tel_active, "pid": tel_pid, "plist": str(tel_plist), "installed": tel_plist.is_file()},
         "message": "\n".join(msg),
     }

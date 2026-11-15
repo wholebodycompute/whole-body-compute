@@ -1,16 +1,19 @@
 """
-Federated Procedural DNA & Ethical Telemetry Engine for Whole Body Compute.
+Federated Procedural DNA, Hybrid Compute Benchmark & Ethical Telemetry Engine for Whole Body Compute.
 
 Transforms local workflow compilations, Foveal accessibility discoveries, router tool-pruning
-habits, and promoted PalWorkflow recipes into zero-PII, content-addressable **Procedural DNA
-Learning Cards** while strictly enforcing a 3-Tier Sovereign Consent Gate:
+habits, Hybrid Local+Cloud Pareto metrics, and promoted PalWorkflow recipes into zero-PII,
+content-addressable **Procedural DNA Learning Cards** while enforcing a transparent 3-Tier
+Sovereign Consent Gate (never code, paths, prompts, or PII):
 
-- TIER_0_LOCAL (default): 100% on-device SQLite WAL & local outbox preview only; zero network egress.
-- TIER_1_VITALS: Opt-in anonymous numeric/enum daily rollup.
-- TIER_2_PROCEDURAL_DNA: Opt-in sharing of sanitized Procedural DNA learning cards.
+- TIER_2_PROCEDURAL_DNA (default, opt-out): Anonymous operational vitals + sanitized Procedural DNA
+  and Hybrid Compute Efficiency cards (`$ip: null`, `$geoip_disable: true`).
+- TIER_1_VITALS: Anonymous numeric/enum operational vitals & hybrid step metrics only.
+- TIER_0_LOCAL (`body telemetry disable` / `opt-out`): 100% on-device SQLite WAL & local outbox only;
+  zero network egress across all events and cards.
 
-Honors `DO_NOT_TRACK=1`, `CI=true`, and `BODY_TELEMETRY=0|off|false|airgapped` automatically,
-overriding any stored opt-in back to `TIER_0_LOCAL`.
+Honors `DO_NOT_TRACK=1`, `WBC_TELEMETRY_DISABLED=1`, `CI=true`, `GITHUB_ACTIONS=true`, and
+`BODY_TELEMETRY=0|off|false|airgapped` automatically, overriding any stored tier to `TIER_0_LOCAL`.
 """
 
 from __future__ import annotations
@@ -30,7 +33,20 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-import yaml
+try:
+    import yaml  # type: ignore[import-untyped]
+except ImportError:  # pragma: no cover - optional under `python -S` hook fast-path
+    yaml = None  # type: ignore[assignment]
+
+
+def _safe_load_yaml(text: str) -> Any:
+    """Lazily load YAML so `python -S` hook invocations never fail on `import yaml`."""
+    global yaml
+    if yaml is None:
+        import yaml as _yaml  # type: ignore[import-untyped]
+
+        yaml = _yaml
+    return yaml.safe_load(text)
 
 from whole_body_compute.redaction import redact_secrets
 
@@ -73,7 +89,7 @@ DEFAULT_WBC_DIR = get_wbc_data_dir()
 DEFAULT_CONSENT_CONFIG_PATH = DEFAULT_WBC_DIR / "telemetry_consent.json"
 DEFAULT_OUTBOX_PATH = DEFAULT_WBC_DIR / "telemetry_outbox.jsonl"
 def get_default_recipes_dir() -> Path:
-    """Resolve the active recipes directory: env override, cwd recipes, or home-scoped voicefi recipes."""
+    """Resolve the active recipes directory: env override, cwd recipes, or home-scoped WBC recipes."""
     env_dir = os.environ.get("WBC_RECIPES_DIR")
     if env_dir:
         return Path(env_dir).expanduser()
@@ -137,10 +153,16 @@ def normalize_consent_tier(tier: int | str | ConsentTier) -> ConsentTier:
     raise ValueError(f"Unsupported consent tier: {tier!r}")
 
 
+CONSENT_SCHEMA_VERSION = 2
+DEFAULT_CONSENT_TIER = ConsentTier.TIER_2_PROCEDURAL_DNA
+
+
 class TelemetryConsentManager:
     """
-    Manages 3-Tier Telemetry Consent, environment variable circuit-breakers
-    (`DO_NOT_TRACK`, `CI`, `BODY_TELEMETRY`), and monthly-rotating anonymous cohort IDs.
+    Manages 3-Tier Telemetry Consent (defaulting to anonymous opt-out `TIER_2_PROCEDURAL_DNA`),
+    environment variable circuit-breakers (`DO_NOT_TRACK`, `WBC_TELEMETRY_DISABLED`, `CI`,
+    `GITHUB_ACTIONS`, `BODY_TELEMETRY`), one-time transparency notices, and monthly-rotating
+    anonymous cohort IDs.
     """
 
     def __init__(self, config_path: Path | None = None) -> None:
@@ -152,9 +174,11 @@ class TelemetryConsentManager:
         else:
             self.config_path = (get_wbc_data_dir() / "telemetry_consent.json").expanduser()
         self._memory_fallback: dict[str, Any] = {
-            "consent_tier": ConsentTier.TIER_0_LOCAL.value,
+            "consent_schema_version": CONSENT_SCHEMA_VERSION,
+            "consent_tier": DEFAULT_CONSENT_TIER.value,
+            "explicit_choice": False,
             "random_salt": secrets.token_hex(16),
-            "updated_at": time.time(),
+            "updated_at": round(time.time(), 3),
         }
 
     def _load_raw_config(self) -> dict[str, Any]:
@@ -162,8 +186,17 @@ class TelemetryConsentManager:
             try:
                 data = json.loads(self.config_path.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
+                    dirty = False
                     if not data.get("random_salt"):
                         data["random_salt"] = secrets.token_hex(16)
+                        dirty = True
+                    schema_ver = int(data.get("consent_schema_version") or 1)
+                    if schema_ver < CONSENT_SCHEMA_VERSION and not data.get("explicit_choice"):
+                        data["consent_tier"] = DEFAULT_CONSENT_TIER.value
+                        data["consent_schema_version"] = CONSENT_SCHEMA_VERSION
+                        data["explicit_choice"] = False
+                        dirty = True
+                    if dirty:
                         self._save_raw_config(data)
                     return data
             except Exception as exc:
@@ -184,13 +217,19 @@ class TelemetryConsentManager:
         """
         Check whether environment flags force `TIER_0_LOCAL` (zero network egress).
         Honors:
-        - `DO_NOT_TRACK=1|true|yes`
-        - `CI=true|1|yes`
-        - `BODY_TELEMETRY=0|off|false|airgapped`
+        - `DO_NOT_TRACK=1|true|yes|on`
+        - `WBC_TELEMETRY_DISABLED=1|true|yes|on` / `VOICEFI_TELEMETRY_DISABLED=1|true|yes|on`
+        - `BODY_TELEMETRY=0|off|false|airgapped|none|disabled`
+        - `CI=true|1|yes` / `GITHUB_ACTIONS=true|1|yes`
         """
         dnt = os.environ.get("DO_NOT_TRACK", "").strip().lower()
         if dnt in ("1", "true", "yes", "on"):
             return True, f"DO_NOT_TRACK={os.environ.get('DO_NOT_TRACK')}"
+
+        for dis_var in ("WBC_TELEMETRY_DISABLED", "VOICEFI_TELEMETRY_DISABLED"):
+            dis_val = os.environ.get(dis_var, "").strip().lower()
+            if dis_val in ("1", "true", "yes", "on"):
+                return True, f"{dis_var}={os.environ.get(dis_var)}"
 
         body_tel = os.environ.get("BODY_TELEMETRY", "").strip().lower()
         if body_tel in ("0", "off", "false", "airgapped", "none", "disabled"):
@@ -199,6 +238,10 @@ class TelemetryConsentManager:
         ci = os.environ.get("CI", "").strip().lower()
         if ci in ("1", "true", "yes"):
             return True, f"CI={os.environ.get('CI')}"
+
+        gha = os.environ.get("GITHUB_ACTIONS", "").strip().lower()
+        if gha in ("1", "true", "yes"):
+            return True, f"GITHUB_ACTIONS={os.environ.get('GITHUB_ACTIONS')}"
 
         return False, None
 
@@ -210,9 +253,9 @@ class TelemetryConsentManager:
         """Return the user's persisted consent tier before environment overrides."""
         cfg = self._load_raw_config()
         try:
-            return normalize_consent_tier(cfg.get("consent_tier", ConsentTier.TIER_0_LOCAL.value))
+            return normalize_consent_tier(cfg.get("consent_tier", DEFAULT_CONSENT_TIER.value))
         except ValueError:
-            return ConsentTier.TIER_0_LOCAL
+            return DEFAULT_CONSENT_TIER
 
     def get_effective_tier(self) -> ConsentTier:
         """
@@ -228,7 +271,9 @@ class TelemetryConsentManager:
         """Persist a new consent tier and return the updated consent status dictionary."""
         normalized = normalize_consent_tier(tier)
         cfg = self._load_raw_config()
+        cfg["consent_schema_version"] = CONSENT_SCHEMA_VERSION
         cfg["consent_tier"] = normalized.value
+        cfg["explicit_choice"] = True
         cfg["updated_at"] = round(time.time(), 3)
         self._save_raw_config(cfg)
         return self.get_status()
@@ -240,9 +285,37 @@ class TelemetryConsentManager:
             target = ConsentTier.TIER_2_PROCEDURAL_DNA
         return self.set_consent_tier(target)
 
+    def enable(self, tier: int | str | ConsentTier = ConsentTier.TIER_2_PROCEDURAL_DNA) -> dict[str, Any]:
+        """Alias for `opt_in()` (`body telemetry enable`)."""
+        return self.opt_in(tier=tier)
+
     def opt_out(self) -> dict[str, Any]:
-        """Opt out of all network telemetry and return to `TIER_0_LOCAL`."""
+        """Opt out of all network telemetry and return to `TIER_0_LOCAL` (`0` network egress)."""
         return self.set_consent_tier(ConsentTier.TIER_0_LOCAL)
+
+    def disable(self) -> dict[str, Any]:
+        """Alias for `opt_out()` (`body telemetry disable`)."""
+        return self.opt_out()
+
+    def reset_cohort_salt(self) -> dict[str, Any]:
+        """Rotate the local random cohort salt immediately on user request (`body telemetry reset-id`)."""
+        cfg = self._load_raw_config()
+        cfg["random_salt"] = secrets.token_hex(16)
+        cfg["updated_at"] = round(time.time(), 3)
+        self._save_raw_config(cfg)
+        return self.get_status()
+
+    def mark_notice_shown(self) -> None:
+        """Record that the one-time first-run transparency notice has been displayed."""
+        cfg = self._load_raw_config()
+        if not cfg.get("notice_shown_at"):
+            cfg["notice_shown_at"] = round(time.time(), 3)
+            self._save_raw_config(cfg)
+
+    def has_shown_notice(self) -> bool:
+        """Return True if the one-time transparency notice was already displayed."""
+        cfg = self._load_raw_config()
+        return bool(cfg.get("notice_shown_at"))
 
     def get_cohort_id(self, year_month: str | None = None) -> str:
         """
@@ -267,21 +340,244 @@ class TelemetryConsentManager:
 
     def get_status(self) -> dict[str, Any]:
         """Return comprehensive consent and sovereignty status."""
+        cfg = self._load_raw_config()
         stored = self.get_stored_tier()
         overridden, reason = self.check_environment_override()
         effective = ConsentTier.TIER_0_LOCAL if overridden else stored
         return {
             "effective_tier": effective.value,
             "stored_tier": stored.value,
+            "explicit_choice": bool(cfg.get("explicit_choice", False)),
+            "notice_shown": bool(cfg.get("notice_shown_at")),
             "env_override_active": overridden,
             "env_override_reason": reason,
             "network_egress_allowed": effective != ConsentTier.TIER_0_LOCAL,
             "can_share_vitals": effective in (ConsentTier.TIER_1_VITALS, ConsentTier.TIER_2_PROCEDURAL_DNA),
             "can_share_procedural_dna": effective == ConsentTier.TIER_2_PROCEDURAL_DNA,
+            "zero_pii_guarantees": [
+                "no_code",
+                "no_paths",
+                "no_prompts",
+                "no_pii",
+                "no_ip_address",
+            ],
             "cohort_id": self.get_cohort_id(),
             "cohort_rotation_period": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m"),
             "config_path": str(self.config_path),
         }
+
+
+def maybe_emit_first_run_telemetry_notice(
+    consent_manager: TelemetryConsentManager | None = None,
+    *,
+    is_json: bool = False,
+    stream: Any = None,
+) -> bool:
+    """
+    Display a single-time, non-intrusive transparency notice on `stderr` during the first
+    interactive CLI run so telemetry is never silent or surprising, without corrupting `--json`.
+    """
+    import sys
+
+    if is_json or os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("WBC_SUPPRESS_TELEMETRY_NOTICE") == "1":
+        return False
+
+    out = stream if stream is not None else sys.stderr
+    try:
+        if stream is None and not (hasattr(out, "isatty") and out.isatty()):
+            return False
+    except Exception:
+        return False
+
+    mgr = consent_manager or TelemetryConsentManager()
+    if mgr.get_effective_tier() == ConsentTier.TIER_0_LOCAL or mgr.has_shown_notice():
+        return False
+
+    notice = (
+        "ℹ️  Whole Body Compute shares anonymous hybrid-compute & workflow efficiency vitals "
+        "(never code, paths, prompts, or PII).\n"
+        "   Inspect exact payload: `body telemetry show` · "
+        "Opt out anytime: `body telemetry disable` or `DO_NOT_TRACK=1` (See TELEMETRY.md)\n"
+    )
+    try:
+        out.write(notice)
+        out.flush()
+        mgr.mark_notice_shown()
+        return True
+    except Exception:
+        return False
+
+
+def _detect_active_agent_harness() -> str:
+    """Detect which AI coding harness invoked Whole Body Compute using safe env heuristics."""
+    env = os.environ
+    explicit = env.get("WBC_CALLER_HARNESS", "").strip().lower()
+    if explicit:
+        return re.sub(r"[^a-z0-9_\-]", "", explicit)[:32] or "unknown"
+    if any(k.startswith("ANTIGRAVITY") for k in env) or env.get("AGY_SESSION_ID"):
+        return "antigravity"
+    if env.get("CLAUDECODE") or env.get("CLAUDE_CODE_ENTRYPOINT") or any(k.startswith("CLAUDE_CODE") for k in env):
+        return "claude_code"
+    if any(k.startswith("CURSOR_") for k in env) or "cursor" in env.get("TERM_PROGRAM", "").lower():
+        return "cursor"
+    if any(k.startswith("WINDSURF") for k in env) or "windsurf" in env.get("TERM_PROGRAM", "").lower():
+        return "windsurf"
+    if any(k.startswith("CLINE_") for k in env):
+        return "cline"
+    if any(k.startswith("GOOSE_") for k in env):
+        return "goose"
+    if any(k.startswith("CODEX_") for k in env):
+        return "codex"
+    if any(k.startswith("AIDER_") for k in env):
+        return "aider"
+    return "terminal_cli"
+
+
+_CACHED_SYSTEM_ENVELOPE: dict[str, Any] | None = None
+
+
+def get_anonymous_system_envelope(*, refresh: bool = False) -> dict[str, Any]:
+    """
+    Build a memoized (<1ms cached) zero-PII hardware & harness envelope so hybrid compute
+    metrics can be analyzed by Apple Silicon generation, Unified RAM tier, OS, and agent harness.
+    Strictly excludes serial numbers, hardware UUIDs, hostnames, usernames, and MAC/IP addresses.
+    """
+    global _CACHED_SYSTEM_ENVELOPE
+    if _CACHED_SYSTEM_ENVELOPE is not None and not refresh:
+        env_copy = dict(_CACHED_SYSTEM_ENVELOPE)
+        env_copy["active_agent_harness"] = _detect_active_agent_harness()
+        return env_copy
+
+    import platform
+    import subprocess
+    import sys
+
+    os_name = sys.platform.lower()
+    arch = os.uname().machine.lower() if hasattr(os, "uname") else platform.machine().lower() or "unknown"
+
+    wbc_version = "0.1.1"
+    try:
+        from whole_body_compute import __version__ as _ver
+
+        if _ver:
+            wbc_version = str(_ver)
+    except Exception:
+        pass
+
+    chip_family = arch
+    ram_gb_bucket = 0
+    if os_name == "darwin":
+        try:
+            brand = subprocess.check_output(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                stderr=subprocess.DEVNULL,
+                timeout=0.35,
+            ).decode("utf-8", errors="ignore").strip()
+            if brand:
+                chip_family = re.sub(r"[^A-Za-z0-9 _.\-]", "", brand)[:48]
+        except Exception:
+            pass
+        try:
+            mem_bytes = int(
+                subprocess.check_output(
+                    ["sysctl", "-n", "hw.memsize"],
+                    stderr=subprocess.DEVNULL,
+                    timeout=0.35,
+                ).decode("utf-8", errors="ignore").strip()
+            )
+            ram_gb_bucket = max(1, round(mem_bytes / (1024**3)))
+        except Exception:
+            pass
+    else:
+        try:
+            if hasattr(os, "sysconf") and "SC_PAGE_SIZE" in os.sysconf_names and "SC_PHYS_PAGES" in os.sysconf_names:
+                mem_bytes = int(os.sysconf("SC_PAGE_SIZE")) * int(os.sysconf("SC_PHYS_PAGES"))
+                if mem_bytes > 0:
+                    ram_gb_bucket = max(1, round(mem_bytes / (1024**3)))
+        except Exception:
+            pass
+        try:
+            cpuinfo = Path("/proc/cpuinfo")
+            if cpuinfo.is_file():
+                for ln in cpuinfo.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    if "model name" in ln.lower() and ":" in ln:
+                        raw_m = ln.split(":", 1)[1].strip()
+                        chip_family = re.sub(r"[^A-Za-z0-9 _.\-@]", "", raw_m)[:48]
+                        break
+        except Exception:
+            pass
+
+    license_tier = "community"
+    try:
+        lic_path = get_wbc_data_dir() / "license.json"
+        env_lic = os.environ.get("VOICEFI_LICENSE_PATH")
+        if env_lic:
+            lic_path = Path(env_lic).expanduser()
+        if lic_path.is_file():
+            lic_raw = json.loads(lic_path.read_text(encoding="utf-8", errors="ignore"))
+            if isinstance(lic_raw, dict) and lic_raw.get("tier"):
+                license_tier = str(lic_raw["tier"]).strip().lower()[:24]
+    except Exception:
+        pass
+
+    base_env: dict[str, Any] = {
+        "wbc_version": wbc_version,
+        "license_tier": license_tier,
+        "os": os_name,
+        "arch": arch,
+        "chip_family": chip_family,
+        "ram_gb_bucket": ram_gb_bucket,
+        "cpu_cores": int(os.cpu_count() or 1),
+        "python_minor": f"{sys.version_info.major}.{sys.version_info.minor}",
+    }
+    _CACHED_SYSTEM_ENVELOPE = base_env
+    out = dict(base_env)
+    out["active_agent_harness"] = _detect_active_agent_harness()
+    return out
+
+
+def get_last_telemetry_payload_path() -> Path:
+    """Return path to the auditable JSON snapshot of the most recent outbound telemetry payload."""
+    env_p = os.environ.get("WBC_LAST_TELEMETRY_PAYLOAD_PATH")
+    if env_p:
+        return Path(env_p).expanduser()
+    return (get_wbc_data_dir() / "last_telemetry_payload.json").expanduser()
+
+
+def _record_last_outbound_payload(event_envelope: dict[str, Any]) -> None:
+    """Save a redacted copy of the exact last outbound JSON payload for `body telemetry show`."""
+    if os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get("WBC_LAST_TELEMETRY_PAYLOAD_PATH"):
+        return
+    try:
+        target = get_last_telemetry_payload_path()
+        redacted_copy = dict(event_envelope)
+        if "api_key" in redacted_copy and isinstance(redacted_copy["api_key"], str):
+            redacted_copy["api_key"] = redacted_copy["api_key"][:12] + "..."
+        redacted_copy["recorded_at_iso"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(redacted_copy, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(target)
+    except Exception as exc:
+        logger.debug("Last outbound payload snapshot notice: %s", exc)
+
+
+def load_last_telemetry_payload() -> dict[str, Any]:
+    """Load the most recent outbound telemetry payload for `body telemetry show`."""
+    target = get_last_telemetry_payload_path()
+    if target.is_file():
+        try:
+            parsed = json.loads(target.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(parsed, dict):
+                return {"status": "ok", "path": str(target), "last_payload": parsed}
+        except Exception:
+            pass
+    return {
+        "status": "empty",
+        "path": str(target),
+        "last_payload": None,
+        "message": "No outbound telemetry payload has been transmitted yet on this machine.",
+    }
 
 
 # ============================================================================
@@ -572,16 +868,19 @@ def _load_recipe_dict(recipe_or_id: dict[str, Any] | Path | str | Any) -> dict[s
     if isinstance(recipe_or_id, dict):
         return dict(recipe_or_id)
     if hasattr(recipe_or_id, "model_dump"):
-        return recipe_or_id.model_dump()
+        try:
+            return recipe_or_id.model_dump(mode="json")
+        except TypeError:
+            return recipe_or_id.model_dump()
     if isinstance(recipe_or_id, Path):
         if recipe_or_id.is_file():
-            return yaml.safe_load(recipe_or_id.read_text(encoding="utf-8")) or {}
+            return _safe_load_yaml(recipe_or_id.read_text(encoding="utf-8")) or {}
         raise FileNotFoundError(f"Recipe path not found: {recipe_or_id}")
 
     slug = str(recipe_or_id).strip()
     p = Path(slug)
     if p.is_file():
-        return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        return _safe_load_yaml(p.read_text(encoding="utf-8")) or {}
 
     slug_clean = slug.removesuffix(".yaml")
     search_dirs = [
@@ -595,7 +894,7 @@ def _load_recipe_dict(recipe_or_id: dict[str, Any] | Path | str | Any) -> dict[s
     for d in search_dirs:
         cand = d / f"{slug_clean}.yaml"
         if cand.is_file():
-            return yaml.safe_load(cand.read_text(encoding="utf-8")) or {}
+            return _safe_load_yaml(cand.read_text(encoding="utf-8")) or {}
 
     raise FileNotFoundError(f"Could not locate workflow recipe '{recipe_or_id}'")
 
@@ -650,10 +949,12 @@ def generalize_workflow_recipe(recipe_or_id: dict[str, Any] | Path | str | Any) 
     for idx, step in enumerate(raw.get("steps") or []):
         if not isinstance(step, dict):
             continue
+        raw_act = step.get("action") or "run_shell"
+        act_str = str(raw_act.value if hasattr(raw_act, "value") else raw_act)
         step_entry: dict[str, Any] = {
             "step_index": idx + 1,
             "name": sanitize_procedural_text(str(step.get("name") or f"step_{idx + 1}")),
-            "action": str(step.get("action") or "run_shell"),
+            "action": act_str,
             "description": sanitize_procedural_text(str(step.get("description") or "")),
             "on_failure": str(step.get("on_failure") or "abort"),
             "max_retries": int(step.get("max_retries") or 0),
@@ -781,7 +1082,7 @@ class ProceduralDNAHarvester:
 
         for ypath in self._iter_recipe_files():
             try:
-                raw = yaml.safe_load(ypath.read_text(encoding="utf-8")) or {}
+                raw = _safe_load_yaml(ypath.read_text(encoding="utf-8")) or {}
                 if not isinstance(raw, dict):
                     continue
                 wf_id = sanitize_procedural_text(str(raw.get("id") or ypath.stem))
@@ -1040,6 +1341,176 @@ class ProceduralDNAHarvester:
                 logger.debug("Generalized recipe harvest notice (%s): %s", ypath, exc)
         return templates
 
+    def extract_hybrid_efficiency_cards(self) -> list[dict[str, Any]]:
+        """
+        Learning 5 - Hybrid Local + Cloud Compute Efficiency Benchmark Cards:
+        Aggregates empirical Pareto measurements of how local silicon (AST Slicer, Metal
+        ReconScout, Foveal AX DOM, Tier-0/1 PalWorkflows, Cold-Storage Skill Pruning)
+        collaborates with frontier Cloud LLMs. Strictly numeric/enum aggregates - zero
+        code, paths, prompts, or PII.
+        """
+        cohort_id = self.consent_manager.get_cohort_id()
+        sys_env = get_anonymous_system_envelope()
+
+        shield_metrics: dict[str, Any] = {
+            "interceptions_total": 0,
+            "direct_tokens_saved": 0,
+            "cumulative_tokens_saved": 0,
+            "estimated_usd_saved": 0.0,
+            "wall_time_saved_sec": 0.0,
+            "secrets_scrubbed": 0,
+            "by_tool_category": {},
+        }
+        try:
+            from whole_body_compute.shield import get_savings_summary
+
+            sav = get_savings_summary(window="all")
+            by_cat: dict[str, int] = {}
+            for item in sav.get("by_category", []) if isinstance(sav.get("by_category"), list) else []:
+                if isinstance(item, dict) and item.get("category"):
+                    cat_key = re.sub(r"[^a-zA-Z0-9_\-]", "", str(item["category"]))[:32]
+                    by_cat[cat_key] = int(item.get("tokens_saved") or item.get("count") or 0)
+            shield_metrics = {
+                "interceptions_total": int(sav.get("total_events", 0)),
+                "direct_tokens_saved": int(sav.get("direct_tokens_saved", 0)),
+                "cumulative_tokens_saved": int(sav.get("cumulative_tokens_saved", 0)),
+                "estimated_usd_saved": round(float(sav.get("estimated_usd_saved", 0.0)), 4),
+                "wall_time_saved_sec": round(float(sav.get("wall_time_saved_sec", 0.0)), 2),
+                "secrets_scrubbed": int(sav.get("secrets_scrubbed", 0)),
+                "by_tool_category": by_cat,
+            }
+        except Exception:
+            pass
+
+        # Query local hybrid step division-of-labor from analytics.db if present
+        hybrid_division: dict[str, Any] = {
+            "local_steps_count": 0,
+            "cloud_steps_count": 0,
+            "local_offload_share_pct": 0.0,
+            "avg_local_latency_ms": 0.0,
+            "avg_local_tok_per_sec": 0.0,
+            "cascade_to_cloud_count": 0,
+            "local_success_rate": 1.0,
+        }
+        try:
+            adb = get_wbc_data_dir() / "analytics.db"
+            env_adb = os.environ.get("WBC_ANALYTICS_DB") or os.environ.get("VOICEFI_ANALYTICS_DB")
+            if env_adb:
+                adb = Path(env_adb).expanduser()
+            if adb.is_file():
+                with sqlite3.connect(f"file:{adb}?mode=ro", uri=True, timeout=1.0) as conn:
+                    tables = {
+                        r[0]
+                        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                    }
+                    if "events" in tables:
+                        rows = conn.execute(
+                            "SELECT caller_agent, duration_ms, success, properties "
+                            "FROM events WHERE event_name = 'hybrid_step' ORDER BY id DESC LIMIT 500"
+                        ).fetchall()
+                        loc_cnt = 0
+                        cld_cnt = 0
+                        loc_lat: list[float] = []
+                        loc_tps: list[float] = []
+                        loc_ok = 0
+                        cascades = 0
+                        for caller, dur_ms, succ, props_raw in rows:
+                            is_loc = str(caller or "") == "local_silicon"
+                            if is_loc:
+                                loc_cnt += 1
+                                if dur_ms is not None:
+                                    loc_lat.append(float(dur_ms))
+                                if succ:
+                                    loc_ok += 1
+                            else:
+                                cld_cnt += 1
+                            try:
+                                p_obj = json.loads(props_raw or "{}")
+                                if isinstance(p_obj, dict):
+                                    if is_loc and p_obj.get("tok_per_sec"):
+                                        loc_tps.append(float(p_obj["tok_per_sec"]))
+                                    if p_obj.get("cascaded"):
+                                        cascades += 1
+                            except Exception:
+                                pass
+                        tot_steps = loc_cnt + cld_cnt
+                        if tot_steps > 0:
+                            hybrid_division = {
+                                "local_steps_count": loc_cnt,
+                                "cloud_steps_count": cld_cnt,
+                                "local_offload_share_pct": round((loc_cnt / tot_steps) * 100.0, 2),
+                                "avg_local_latency_ms": round(sum(loc_lat) / len(loc_lat), 2) if loc_lat else 0.0,
+                                "avg_local_tok_per_sec": round(sum(loc_tps) / len(loc_tps), 2) if loc_tps else 0.0,
+                                "cascade_to_cloud_count": cascades,
+                                "local_success_rate": round(loc_ok / loc_cnt, 4) if loc_cnt > 0 else 1.0,
+                            }
+        except Exception:
+            pass
+
+        # Workflow habit rollup
+        wf_habits: dict[str, Any] = {
+            "total_workflow_runs": 0,
+            "unique_workflows_executed": 0,
+            "habitual_workflows_3plus_runs": 0,
+            "workflow_tokens_saved": 0,
+        }
+        try:
+            pal_candidates = [get_wbc_data_dir() / "telemetry" / "pal_cloud_savings.json"]
+            if "WBC_DATA_DIR" not in os.environ:
+                pal_candidates.append(Path.home() / ".voicefi" / "telemetry" / "pal_cloud_savings.json")
+            for cand_p in pal_candidates:
+                if cand_p.is_file():
+                    wf_raw = json.loads(cand_p.read_text(encoding="utf-8"))
+                    wfs = wf_raw.get("workflows", {}) if isinstance(wf_raw, dict) else {}
+                    hab_cnt = sum(
+                        1 for v in wfs.values() if isinstance(v, dict) and int(v.get("runs", 0)) >= 3
+                    )
+                    wf_habits = {
+                        "total_workflow_runs": int(wf_raw.get("total_runs", 0)),
+                        "unique_workflows_executed": len(wfs),
+                        "habitual_workflows_3plus_runs": hab_cnt,
+                        "workflow_tokens_saved": int(wf_raw.get("total_tokens_saved", 0)),
+                    }
+                    break
+        except Exception:
+            pass
+
+        sig_seed = (
+            f"hybrid_compute_efficiency_card|{sys_env.get('os')}|{sys_env.get('arch')}|"
+            f"{sys_env.get('chip_family')}|{sys_env.get('ram_gb_bucket')}|{sys_env.get('active_agent_harness')}"
+        )
+        sig = hashlib.sha256(sig_seed.encode("utf-8")).hexdigest()[:16]
+
+        return [
+            {
+                "schema_version": "1.0",
+                "card_type": "hybrid_compute_efficiency_card",
+                "cohort_id": cohort_id,
+                "hardware_profile": {
+                    "os": sys_env.get("os"),
+                    "arch": sys_env.get("arch"),
+                    "chip_family": sys_env.get("chip_family"),
+                    "ram_gb_bucket": sys_env.get("ram_gb_bucket"),
+                    "cpu_cores": sys_env.get("cpu_cores"),
+                    "python_minor": sys_env.get("python_minor"),
+                },
+                "active_agent_harness": sys_env.get("active_agent_harness"),
+                "wbc_version": sys_env.get("wbc_version"),
+                "shield_pareto": shield_metrics,
+                "hybrid_division_of_labor": hybrid_division,
+                "workflow_habit_summary": wf_habits,
+                "reliability_score": float(hybrid_division.get("local_success_rate", 1.0)),
+                "zero_pii_guarantees": [
+                    "no_code",
+                    "no_paths",
+                    "no_prompts",
+                    "no_pii",
+                    "no_ip_address",
+                ],
+                "signature_hash": sig,
+            }
+        ]
+
     def load_outbox_cards(self) -> list[dict[str, Any]]:
         """Read all deduplicated Procedural DNA cards currently stored in the local outbox."""
         if not self.outbox_path.is_file():
@@ -1062,7 +1533,7 @@ class ProceduralDNAHarvester:
 
     def upsert_outbox_cards(self, new_cards: list[dict[str, Any]]) -> dict[str, Any]:
         """
-        Content-addressable deduplication into `~/.voicefi/telemetry_outbox.jsonl` by `signature_hash`.
+        Content-addressable deduplication into `~/.whole_body_compute/telemetry_outbox.jsonl` by `signature_hash`.
         If a card with the same `signature_hash` already exists, increments `verified_count` and
         updates rolling `reliability_score` & `last_seen_at` in-place rather than appending duplicate rows.
         """
@@ -1126,15 +1597,22 @@ class ProceduralDNAHarvester:
 
     def harvest_all(self, persist: bool = True) -> dict[str, Any]:
         """
-        Run all 4 Procedural DNA harvesters, deduplicate into the local outbox,
+        Run all 5 Procedural DNA & Hybrid Compute harvesters, deduplicate into the local outbox,
         and return the structured harvest report.
         """
         compiler_cards = self.extract_compiler_ir_cards()
         proprioception_cards = self.extract_app_proprioception_cards()
         router_cards = self.extract_router_habit_cards()
         recipe_templates = self.extract_generalized_recipe_templates()
+        hybrid_efficiency_cards = self.extract_hybrid_efficiency_cards()
 
-        all_cards = compiler_cards + proprioception_cards + router_cards + recipe_templates
+        all_cards = (
+            compiler_cards
+            + proprioception_cards
+            + router_cards
+            + recipe_templates
+            + hybrid_efficiency_cards
+        )
         outbox_stats = (
             self.upsert_outbox_cards(all_cards)
             if persist
@@ -1147,7 +1625,14 @@ class ProceduralDNAHarvester:
         )
 
         consent_status = self.consent_manager.get_status()
-        if persist and self.consent_manager.can_share_procedural_dna() and os.environ.get("WBC_DISABLE_AUTO_FLUSH") != "1":
+        in_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST"))
+        should_auto_flush = (
+            persist
+            and self.consent_manager.can_share_procedural_dna()
+            and os.environ.get("WBC_DISABLE_AUTO_FLUSH") != "1"
+            and (not in_pytest or os.environ.get("WBC_ENABLE_TEST_AUTO_FLUSH") == "1")
+        )
+        if should_auto_flush:
             try:
                 flush_res = flush_telemetry_outbox(
                     outbox_path=self.outbox_path,
@@ -1165,6 +1650,7 @@ class ProceduralDNAHarvester:
                 "app_proprioception_cards": len(proprioception_cards),
                 "router_habit_cards": len(router_cards),
                 "generalized_recipe_templates": len(recipe_templates),
+                "hybrid_efficiency_cards": len(hybrid_efficiency_cards),
                 "total_harvested": len(all_cards),
             },
             "outbox": outbox_stats,
@@ -1172,6 +1658,7 @@ class ProceduralDNAHarvester:
             "app_proprioception_cards": proprioception_cards,
             "router_habit_cards": router_cards,
             "generalized_recipe_templates": recipe_templates,
+            "hybrid_efficiency_cards": hybrid_efficiency_cards,
         }
 
 
@@ -1221,7 +1708,14 @@ def export_sanitized_learning_card(
         else {"outbox_path": str(harvester.outbox_path), "persisted": False}
     )
 
-    if persist_to_outbox and harvester.consent_manager.can_share_procedural_dna() and os.environ.get("WBC_DISABLE_AUTO_FLUSH") != "1":
+    in_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    should_auto_flush = (
+        persist_to_outbox
+        and harvester.consent_manager.can_share_procedural_dna()
+        and os.environ.get("WBC_DISABLE_AUTO_FLUSH") != "1"
+        and (not in_pytest or os.environ.get("WBC_ENABLE_TEST_AUTO_FLUSH") == "1")
+    )
+    if should_auto_flush:
         try:
             flush_res = flush_telemetry_outbox(
                 outbox_path=harvester.outbox_path,
@@ -1242,8 +1736,38 @@ def export_sanitized_learning_card(
     }
 
 
+_FORBIDDEN_TELEMETRY_KEYS = frozenset(
+    {
+        "prompt",
+        "user_prompt",
+        "system_prompt",
+        "raw_text",
+        "raw_speech",
+        "transcript_content",
+        "code",
+        "source_code",
+        "file_content",
+        "ast_slice_content",
+        "window_title",
+        "dom_text",
+        "clipboard",
+        "ip",
+        "ip_address",
+        "client_ip",
+        "email",
+        "hostname",
+        "mac_address",
+        "serial_number",
+    }
+)
+
+
 def sanitize_telemetry_payload(data: Any) -> Any:
-    """Recursively strip user home directory paths, secrets, and auth tokens."""
+    """
+    Sovereign Red-Line Choke Point:
+    Recursively strip user home/workspace paths, secrets, API tokens, prompts, raw code,
+    window titles, and PII (emails, phone numbers, SSNs, credit cards, IP addresses).
+    """
     if isinstance(data, str):
         clean = redact_secrets(data)
         try:
@@ -1252,9 +1776,16 @@ def sanitize_telemetry_payload(data: Any) -> Any:
                 clean = clean.replace(home, "~")
         except Exception:
             pass
-        clean = re.sub(r"/Users/[^/]+", "~", clean)
-        clean = re.sub(r"/home/[^/]+", "~", clean)
-        clean = re.sub(r"[A-Za-z]:\\Users\\[^\\]+", "~", clean)
+        clean = _EMAIL_RE.sub("<EMAIL>", clean)
+        clean = _SSH_USER_HOST_RE.sub("<USER>@", clean)
+        clean = _SSN_RE.sub("<SSN>", clean)
+        clean = _CREDIT_CARD_RE.sub("<CREDIT_CARD>", clean)
+        clean = _PHONE_RE.sub("<PHONE>", clean)
+        clean = _IPV4_RE.sub("<IP>", clean)
+        clean = _IPV6_RE.sub("<IP>", clean)
+        clean = re.sub(r"/Users/[^/\s\"']+", "~", clean)
+        clean = re.sub(r"/home/[^/\s\"']+", "~", clean)
+        clean = re.sub(r"[A-Za-z]:\\Users\\[^\\\s\"']+", "~", clean)
         clean = re.sub(r"(sk-[a-zA-Z0-9_\-]{16,})", "[REDACTED_API_KEY]", clean)
         clean = re.sub(r"(phc_[a-zA-Z0-9_\-]{16,})", "[REDACTED_KEY]", clean)
         clean = re.sub(r"(gsk_[a-zA-Z0-9_\-]{16,})", "[REDACTED_KEY]", clean)
@@ -1264,12 +1795,16 @@ def sanitize_telemetry_payload(data: Any) -> Any:
     elif isinstance(data, dict):
         sanitized = {}
         for k, v in data.items():
-            k_lower = str(k).lower()
+            k_str = str(k)
+            k_lower = k_str.lower()
+            if k_str == "$ip":
+                sanitized[k_str] = None
+                continue
             if any(k_lower.endswith(s) for s in ("_key", "_secret", "_token", "_password", "auth")):
                 continue
-            if k_lower in ("prompt", "user_prompt", "raw_text", "raw_speech", "transcript_content"):
+            if k_lower in _FORBIDDEN_TELEMETRY_KEYS:
                 continue
-            sanitized[k] = sanitize_telemetry_payload(v)
+            sanitized[k_str] = sanitize_telemetry_payload(v)
         return sanitized
     elif isinstance(data, list):
         return [sanitize_telemetry_payload(item) for item in data]
@@ -1286,7 +1821,7 @@ def flush_telemetry_outbox(
     Synchronize pending zero-PII Procedural DNA cards from the local outbox to central telemetry.
 
     Strictly gated by TelemetryConsentManager.can_share_procedural_dna() (requires TIER_2_PROCEDURAL_DNA
-    and respects DO_NOT_TRACK / CI / BODY_TELEMETRY circuit-breakers).
+    and respects DO_NOT_TRACK / CI / BODY_TELEMETRY / `body telemetry disable` circuit-breakers).
     """
     mgr = consent_manager or TelemetryConsentManager()
     env_outbox = os.environ.get("WBC_TELEMETRY_OUTBOX_PATH")
@@ -1327,7 +1862,7 @@ def flush_telemetry_outbox(
         return {
             "status": "blocked_by_consent",
             "effective_tier": mgr.get_effective_tier().value,
-            "reason": "Procedural DNA sharing not consented (requires TIER_2_PROCEDURAL_DNA)",
+            "reason": "Procedural DNA sharing disabled (run `body telemetry enable` to share zero-PII cards)",
             "outbox_path": str(target_outbox),
             "sent_count": 0,
             "already_synced_count": already_synced_count,
@@ -1346,6 +1881,7 @@ def flush_telemetry_outbox(
         }
 
     cohort_id = mgr.get_cohort_id()
+    sys_env = get_anonymous_system_envelope()
     api_key = (
         os.environ.get("WBC_POSTHOG_KEY")
         or os.environ.get("POSTHOG_API_KEY")
@@ -1364,9 +1900,13 @@ def flush_telemetry_outbox(
             continue
 
         clean_props = sanitize_telemetry_payload(card)
+        for ek, ev in sys_env.items():
+            clean_props.setdefault(ek, ev)
         clean_props["source"] = "whole_body_compute_open_core"
         clean_props["cohort_id"] = card.get("cohort_id") or cohort_id
         clean_props["$is_server"] = True
+        clean_props["$geoip_disable"] = True
+        clean_props["$ip"] = None
 
         event_payload = {
             "api_key": api_key,
@@ -1374,6 +1914,7 @@ def flush_telemetry_outbox(
             "distinct_id": clean_props["cohort_id"],
             "properties": clean_props,
         }
+        _record_last_outbound_payload(event_payload)
 
         try:
             req = urllib.request.Request(
@@ -1422,10 +1963,11 @@ def send_vitals_rollup(
         return {
             "status": "blocked_by_consent",
             "effective_tier": mgr.get_effective_tier().value,
-            "reason": "Vitals telemetry not consented (requires TIER_1_VITALS or TIER_2_PROCEDURAL_DNA)",
+            "reason": "Vitals telemetry disabled (requires TIER_1_VITALS or TIER_2_PROCEDURAL_DNA)",
         }
 
     cohort_id = mgr.get_cohort_id()
+    sys_env = get_anonymous_system_envelope()
     api_key = (
         os.environ.get("WBC_POSTHOG_KEY")
         or os.environ.get("POSTHOG_API_KEY")
@@ -1438,9 +1980,13 @@ def send_vitals_rollup(
         target_url = f"{host.rstrip('/')}/capture/"
 
     clean_props = sanitize_telemetry_payload(vitals_payload)
+    for ek, ev in sys_env.items():
+        clean_props.setdefault(ek, ev)
     clean_props["cohort_id"] = cohort_id
     clean_props["source"] = "whole_body_compute_open_core"
     clean_props["$is_server"] = True
+    clean_props["$geoip_disable"] = True
+    clean_props["$ip"] = None
 
     payload = {
         "api_key": api_key,
@@ -1448,6 +1994,7 @@ def send_vitals_rollup(
         "distinct_id": cohort_id,
         "properties": clean_props,
     }
+    _record_last_outbound_payload(payload)
 
     try:
         req = urllib.request.Request(
@@ -1502,17 +2049,17 @@ def track_wbc_event(
     consent_manager: TelemetryConsentManager | None = None,
     stats_path: Path | None = None,
     async_send: bool = True,
-    force_anonymous_ping: bool = True,
+    force_anonymous_ping: bool = False,
     timeout: float = 1.5,
     detached_hook: bool = False,
 ) -> dict[str, Any]:
     """
     Record a zero-PII Whole Body Compute usage event:
     1. Always increments the local usage ledger (`~/.whole_body_compute/usage_stats.json`).
-    2. Emits an anonymous PostHog event to Project 730830 (`DEFAULT_POSTHOG_API_KEY`) unless
-       disabled by `DO_NOT_TRACK=1`, `BODY_TELEMETRY=0|off|false|airgapped`, `CI=true`, or `PYTEST_CURRENT_TEST`.
+    2. Emits an anonymous zero-IP PostHog event to Project 730830 (`DEFAULT_POSTHOG_API_KEY`) unless
+       opted out via `body telemetry disable` (`TIER_0_LOCAL`) or disabled by `DO_NOT_TRACK=1`,
+       `WBC_TELEMETRY_DISABLED=1`, `BODY_TELEMETRY=0|off|false|airgapped`, `CI=true`, or `PYTEST_CURRENT_TEST`.
     """
-    import sys
     import threading
 
     clean_props = sanitize_telemetry_payload(dict(properties or {}))
@@ -1560,7 +2107,22 @@ def track_wbc_event(
                     "summary": {
                         k: v
                         for k, v in clean_props.items()
-                        if k in ("command", "action", "mode", "recipe_id", "engine_used", "harnesses_active", "threads_scanned", "wasted_spend_usd", "passive_workflows_crystallized", "discovered_count")
+                        if k
+                        in (
+                            "command",
+                            "action",
+                            "mode",
+                            "recipe_id",
+                            "outcome",
+                            "archetype",
+                            "lifetime_runs_for_recipe",
+                            "engine_used",
+                            "harnesses_active",
+                            "threads_scanned",
+                            "wasted_spend_usd",
+                            "passive_workflows_crystallized",
+                            "discovered_count",
+                        )
                     },
                 }
             )
@@ -1600,6 +2162,7 @@ def track_wbc_event(
         }
 
     cohort_id = mgr.get_cohort_id()
+    sys_env = get_anonymous_system_envelope()
     api_key = (
         os.environ.get("WBC_POSTHOG_KEY")
         or os.environ.get("POSTHOG_API_KEY")
@@ -1611,23 +2174,34 @@ def track_wbc_event(
         host = os.environ.get("POSTHOG_HOST") or "https://us.i.posthog.com"
         target_url = f"{host.rstrip('/')}/capture/"
 
+    for ek, ev in sys_env.items():
+        clean_props.setdefault(ek, ev)
     clean_props["cohort_id"] = cohort_id
     clean_props["product"] = "whole_body_compute"
     clean_props["source"] = "whole_body_compute_open_core"
-    clean_props["os"] = sys.platform.lower()
-    clean_props["arch"] = (os.uname().machine.lower() if hasattr(os, "uname") else "unknown")
     clean_props["$is_server"] = True
-    if os.environ.get("WBC_INTERNAL_DEV") == "1" or Path.cwd().name == "Whole Body Compute":
+    clean_props["$geoip_disable"] = True
+    clean_props["$ip"] = None
+    if (
+        clean_props.get("is_internal_dev") is True
+        or os.environ.get("WBC_INTERNAL_DEV") == "1"
+        or Path.cwd().name == "Whole Body Compute"
+    ):
         clean_props["is_internal_dev"] = True
+        clean_props["$internal_or_test_user"] = True
+        existing_set = clean_props.get("$set")
+        merged_set = dict(existing_set) if isinstance(existing_set, dict) else {}
+        merged_set["$internal_or_test_user"] = True
+        clean_props["$set"] = merged_set
 
-    payload_bytes = json.dumps(
-        {
-            "api_key": api_key,
-            "event": event_name,
-            "distinct_id": cohort_id,
-            "properties": clean_props,
-        }
-    ).encode("utf-8")
+    event_envelope = {
+        "api_key": api_key,
+        "event": event_name,
+        "distinct_id": cohort_id,
+        "properties": clean_props,
+    }
+    _record_last_outbound_payload(event_envelope)
+    payload_bytes = json.dumps(event_envelope).encode("utf-8")
 
     def _send() -> dict[str, Any]:
         try:
@@ -1733,6 +2307,7 @@ def fetch_posthog_cloud_funnel_summary(
         "AND coalesce(toString(person.properties.$internal_or_test_user), 'false') != 'true' "
         "AND coalesce(toString(properties.is_internal_dev), 'false') != 'true' "
         "AND coalesce(toString(properties.is_internal), 'false') != 'true' "
+        "AND coalesce(toString(properties.utm_source), '') != 'wbc_canary' "
         "AND coalesce(toString(properties.is_bot), 'false') != 'true'"
     )
     sql = f"""
@@ -1747,7 +2322,10 @@ def fetch_posthog_cloud_funnel_summary(
             countIf(event IN ('wbc_edge_pricing_click', 'wbc_pricing_viewed') AND ({ext_pred})) AS ext_pricing_intents,
             countIf(event = 'wbc_checkout_clicked' AND ({ext_pred})) AS ext_checkout_clicks,
             countIf(event = 'wbc_license_activated' AND ({ext_pred})) AS ext_licenses_activated,
-            countIf(event = 'wbc_license_activation_failed' AND ({ext_pred})) AS ext_license_failures
+            countIf(event = 'wbc_license_activation_failed' AND ({ext_pred})) AS ext_license_failures,
+            countIf(event = 'wbc_web_install_copied' AND ({ext_pred})) AS ext_web_install_copies,
+            countIf(event = 'wbc_edge_hub_fetch' AND ({ext_pred})) AS ext_hub_fetches,
+            countIf(event = 'wbc_quota_bypass_detected' AND ({ext_pred})) AS ext_quota_bypasses
         FROM events
     """
     url = f"https://us.posthog.com/api/projects/{project_id}/query/"
@@ -1766,7 +2344,9 @@ def fetch_posthog_cloud_funnel_summary(
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
         rows = payload.get("results") or []
-        row = rows[0] if rows else [0] * 11
+        row = list(rows[0]) if rows else []
+        while len(row) < 14:
+            row.append(0)
         return {
             "status": "ok",
             "project_id": int(project_id),
@@ -1781,6 +2361,9 @@ def fetch_posthog_cloud_funnel_summary(
             "ext_checkout_clicks": int(row[8] or 0),
             "ext_licenses_activated": int(row[9] or 0),
             "ext_license_failures": int(row[10] or 0),
+            "ext_web_install_copies": int(row[11] or 0),
+            "ext_hub_fetches": int(row[12] or 0),
+            "ext_quota_bypasses": int(row[13] or 0),
         }
     except Exception as exc:
         return {"status": "error", "reason": str(exc)}
@@ -1822,10 +2405,10 @@ def get_comprehensive_usage_stats_report(
     # Workflow execution savings
     wf_savings: dict[str, Any] = {"total_runs": 0, "total_tokens_saved": 0, "workflows_count": 0}
     try:
-        for cand_p in (
-            get_wbc_data_dir() / "telemetry" / "pal_cloud_savings.json",
-            Path.home() / ".voicefi" / "telemetry" / "pal_cloud_savings.json",
-        ):
+        pal_candidates = [get_wbc_data_dir() / "telemetry" / "pal_cloud_savings.json"]
+        if "WBC_DATA_DIR" not in os.environ:
+            pal_candidates.append(Path.home() / ".voicefi" / "telemetry" / "pal_cloud_savings.json")
+        for cand_p in pal_candidates:
             if cand_p.is_file():
                 wf_raw = json.loads(cand_p.read_text(encoding="utf-8"))
                 wf_savings = {
@@ -1962,10 +2545,12 @@ def format_usage_stats_table(report: dict[str, Any]) -> str:
         if cloud.get("status") == "ok":
             lines.extend(
                 [
-                    f"      • Web Visitors / Pageviews:   {cloud.get('ext_web_visitors', 0):,} unique visitors ({cloud.get('ext_pageviews', 0):,} views)",
-                    f"      • CLI Script `curl` Fetches:  {cloud.get('ext_cli_begin_fetches', 0):,} `/begin.sh` • {cloud.get('ext_cli_audit_fetches', 0):,} `/audit.py`",
+                    f"      • Web Visitors / Pageviews:   {cloud.get('ext_web_visitors', 0):,} unique visitors ({cloud.get('ext_pageviews', 0):,} views) • "
+                    f"{cloud.get('ext_web_install_copies', 0):,} install copies",
+                    f"      • CLI & Hub Fetches:          {cloud.get('ext_cli_begin_fetches', 0):,} `/begin.sh` • {cloud.get('ext_cli_audit_fetches', 0):,} `/audit.py` • "
+                    f"{cloud.get('ext_hub_fetches', 0):,} `/hub`",
                     f"      • Active Product Cohorts:     {cloud.get('ext_product_cohorts', 0):,} external cohort(s) | "
-                    f"Limit Hits: {cloud.get('ext_cohorts_hitting_limits', 0):,} cohort(s) ({cloud.get('ext_quota_events', 0):,} quota events)",
+                    f"Limit Hits: {cloud.get('ext_cohorts_hitting_limits', 0):,} cohort(s) ({cloud.get('ext_quota_events', 0):,} quota, {cloud.get('ext_quota_bypasses', 0):,} bypass)",
                     f"      • Upgrade Conversion Funnel:  {cloud.get('ext_pricing_intents', 0):,} pricing views -> "
                     f"{cloud.get('ext_checkout_clicks', 0):,} checkout clicks -> {cloud.get('ext_licenses_activated', 0):,} activated "
                     f"({cloud.get('ext_license_failures', 0):,} failed)",
@@ -2160,6 +2745,7 @@ def get_telemetry_status_report(
         "app_proprioception_card": 0,
         "router_habit_card": 0,
         "generalized_recipe_template": 0,
+        "hybrid_compute_efficiency_card": 0,
     }
     for c in cards:
         ct = str(c.get("card_type") or "unknown")
@@ -2172,6 +2758,8 @@ def get_telemetry_status_report(
     return {
         "status": "ok",
         "consent": consent_mgr.get_status(),
+        "system_envelope": get_anonymous_system_envelope(),
+        "last_payload_path": str(get_last_telemetry_payload_path()),
         "storage": storage,
         "outbox_path": str(harvester.outbox_path),
         "outbox_total_cards": len(cards),
@@ -2179,6 +2767,58 @@ def get_telemetry_status_report(
         "outbox_pending_cards": pending_cards,
         "outbox_cards_by_type": by_type,
     }
+
+
+def get_telemetry_show_report(
+    outbox_path: Path | None = None,
+    config_path: Path | None = None,
+) -> dict[str, Any]:
+    """Build an auditable payload inspection report for `body telemetry show`."""
+    status = get_telemetry_status_report(outbox_path=outbox_path, config_path=config_path)
+    last_sent = load_last_telemetry_payload()
+    harvester = ProceduralDNAHarvester(
+        outbox_path=outbox_path,
+        consent_manager=TelemetryConsentManager(config_path=config_path),
+    )
+    sample_cards = harvester.load_outbox_cards()[-3:]
+    return {
+        "status": "ok",
+        "sovereign_red_line": "NEVER collects source code, file paths, prompts, window titles, IP addresses, or PII.",
+        "consent": status["consent"],
+        "system_envelope": status["system_envelope"],
+        "last_outbound_payload": last_sent.get("last_payload"),
+        "last_outbound_payload_path": last_sent.get("path"),
+        "recent_outbox_cards_sample": sample_cards,
+        "opt_out_commands": [
+            "body telemetry disable",
+            "export DO_NOT_TRACK=1",
+            "export BODY_TELEMETRY=airgapped",
+        ],
+    }
+
+
+def format_telemetry_show_report(report: dict[str, Any]) -> str:
+    """Format `body telemetry show` so developers can audit exact outbound JSON payloads."""
+    consent = report.get("consent", {})
+    last_p = report.get("last_outbound_payload")
+    lines = [
+        "🔍 Whole Body Compute - Outbound Telemetry Payload Inspector (`body telemetry show`)",
+        "=" * 88,
+        f"  • Sovereign Red-Line:   {report.get('sovereign_red_line')}",
+        f"  • Effective Tier:       {consent.get('effective_tier')} "
+        f"({'Egress Active' if consent.get('network_egress_allowed') else '100% Local / Zero Egress'})",
+        f"  • Rotating Cohort ID:   {consent.get('cohort_id')} (IP Logging: DISABLED `$ip: null`)",
+        f"  • Opt-Out Commands:     `body telemetry disable` · `export DO_NOT_TRACK=1`",
+        "-" * 88,
+        "  [Exact Last Outbound JSON Payload]:",
+    ]
+    if last_p:
+        lines.append(json.dumps(last_p, indent=2))
+    else:
+        lines.append("  (No outbound payload sent yet on this machine - Showing current anonymous system envelope:)")
+        lines.append(json.dumps(report.get("system_envelope", {}), indent=2))
+    lines.append("=" * 88)
+    return "\n".join(lines)
 
 
 def format_telemetry_status(report: dict[str, Any]) -> str:
@@ -2191,24 +2831,35 @@ def format_telemetry_status(report: dict[str, Any]) -> str:
         if consent.get("env_override_active")
         else "INACTIVE (normal)"
     )
-    egress_str = "ALLOWED (Opt-In)" if consent.get("network_egress_allowed") else "BLOCKED (100% Local)"
+    egress_str = (
+        "ALLOWED (Anonymous Zero-PII Opt-Out · `$ip: null`)"
+        if consent.get("network_egress_allowed")
+        else "BLOCKED (100% Local · Zero Network Egress)"
+    )
 
     lines = [
         "🧬 Whole Body Compute - Federated Procedural DNA & Ethical Telemetry Status",
         "=" * 80,
         f"  • Effective Consent Tier: {consent.get('effective_tier')} (Stored: {consent.get('stored_tier')})",
+        f"  • Sovereign Red-Line:     Never code, paths, prompts, or PII",
         f"  • Env Circuit-Breaker:    {override_str}",
         f"  • Network Egress Gate:    {egress_str}",
         f"  • Rotating Cohort ID:     {consent.get('cohort_id')} (Month: {consent.get('cohort_rotation_period')})",
-        (f"  • Footprint vs Budget:    {storage.get('after_mb', 0.0):.3f} MB / {storage.get('max_mb_budget', 15.0):.1f} MB "
-        f"({'OK' if storage.get('within_budget', True) else 'OVER BUDGET'})"),
-        (f"  • Auditable Outbox:       {report.get('outbox_path')} ({report.get('outbox_total_cards', 0)} cards: "
-        f"{report.get('outbox_synced_cards', 0)} synced, {report.get('outbox_pending_cards', 0)} pending)"),
+        (
+            f"  • Footprint vs Budget:    {storage.get('after_mb', 0.0):.3f} MB / {storage.get('max_mb_budget', 15.0):.1f} MB "
+            f"({'OK' if storage.get('within_budget', True) else 'OVER BUDGET'})"
+        ),
+        (
+            f"  • Auditable Outbox:       {report.get('outbox_path')} ({report.get('outbox_total_cards', 0)} cards: "
+            f"{report.get('outbox_synced_cards', 0)} synced, {report.get('outbox_pending_cards', 0)} pending)"
+        ),
         "  • Harvested Procedural DNA Breakdown:",
-        f"      - Compiler IR Cards:           {by_type.get('compiler_ir_card', 0)}",
-        f"      - App Proprioception Cards:    {by_type.get('app_proprioception_card', 0)}",
-        f"      - Router Tool-Pruning Habits:  {by_type.get('router_habit_card', 0)}",
-        f"      - Generalized Recipe Skeletons:{by_type.get('generalized_recipe_template', 0)}",
+        f"      - Compiler IR Cards:              {by_type.get('compiler_ir_card', 0)}",
+        f"      - App Proprioception Cards:       {by_type.get('app_proprioception_card', 0)}",
+        f"      - Router Tool-Pruning Habits:     {by_type.get('router_habit_card', 0)}",
+        f"      - Generalized Recipe Skeletons:   {by_type.get('generalized_recipe_template', 0)}",
+        f"      - Hybrid Compute Efficiency Cards:{by_type.get('hybrid_compute_efficiency_card', 0)}",
+        "  • Inspect / Opt-Out:      `body telemetry show` · `body telemetry disable` · `DO_NOT_TRACK=1`",
         "=" * 80,
     ]
     return "\n".join(lines)
@@ -2223,12 +2874,16 @@ def format_harvest_summary(report: dict[str, Any]) -> str:
     lines = [
         "🧬 Whole Body Compute - Procedural DNA Harvest & Deduplication Report",
         "=" * 88,
-        (f"  Consent Tier: {consent.get('effective_tier')} | Cohort: {consent.get('cohort_id')} | "
-        f"Outbox: {outbox.get('total_unique_cards', 0)} unique cards "
-        f"(+{outbox.get('inserted_count', 0)} new, {outbox.get('updated_in_place_count', 0)} deduplicated in-place)"),
+        (
+            f"  Consent Tier: {consent.get('effective_tier')} | Cohort: {consent.get('cohort_id')} | "
+            f"Outbox: {outbox.get('total_unique_cards', 0)} unique cards "
+            f"(+{outbox.get('inserted_count', 0)} new, {outbox.get('updated_in_place_count', 0)} deduplicated in-place)"
+        ),
         "-" * 88,
-        ("  [1] Compiler & Tier-Promotion IR Cards "
-        f"({counts.get('compiler_ir_cards', 0)} harvested):"),
+        (
+            "  [1] Compiler & Tier-Promotion IR Cards "
+            f"({counts.get('compiler_ir_cards', 0)} harvested):"
+        ),
     ]
     for c in report.get("compiler_ir_cards", []):
         lines.append(
@@ -2266,6 +2921,17 @@ def format_harvest_summary(report: dict[str, Any]) -> str:
         )
         lines.append(
             f"      • {t['recipe_id']:<32} | ir_hash={t['ir_signature_hash']} | cmd=`{cmd_preview}`"
+        )
+
+    lines.append(
+        f"\n  [5] Hybrid Local + Cloud Compute Efficiency Cards ({counts.get('hybrid_efficiency_cards', 0)} harvested):"
+    )
+    for h in report.get("hybrid_efficiency_cards", []):
+        hw = h.get("hardware_profile", {})
+        sh = h.get("shield_pareto", {})
+        lines.append(
+            f"      • {str(hw.get('chip_family', 'unknown')):<32} | harness={str(h.get('active_agent_harness')):<16} | "
+            f"saved={sh.get('direct_tokens_saved', 0):,} tok | hash={h['signature_hash']}"
         )
 
     lines.append("=" * 88)

@@ -3361,7 +3361,7 @@ class FovealVisionEngine:
 
         try:
             import ApplicationServices as AS
-            from whole_body_compute.integrations.screenpipe import resolve_direct_headless_route
+            from whole_body_compute.integrations.foveal_memory import resolve_direct_headless_route
             from whole_body_compute.integrations.ambient_discovery import AmbientPrivacyGuard
 
             # 1. Target Application Resolution

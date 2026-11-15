@@ -1598,12 +1598,12 @@ check_organ_voice = check_organ_mouth_and_ears
 def check_organ_the_eyes() -> Dict[str, Any]:
     """Organ 03: The Eyes & Sensory-Motor - PyObjC AXUIElement Foveal DOM, Vagus Brake & Episodic Memory."""
     t0 = time.perf_counter()
-    screenpipe_online = False
+    foveal_memory_online = False
     try:
-        req = urllib.request.Request("http://127.0.0.1:3030/health", method="GET")
+        req = urllib.request.Request("http://127.0.0.1:9382/health", method="GET")
         with urllib.request.urlopen(req, timeout=0.1) as resp:
             if resp.status == 200:
-                screenpipe_online = True
+                foveal_memory_online = True
     except Exception:
         pass
 
@@ -1641,12 +1641,12 @@ def check_organ_the_eyes() -> Dict[str, Any]:
     ax_tag = "AX:trusted" if ax_trusted else "AX:untrusted"
     vagus_tag = "Vagus:armed" if vagus_armed else "Vagus:standby"
     lat = round((time.perf_counter() - t0) * 1000.0, 2)
-    status = "pass" if (screenpipe_online or elem_count > 0 or frame_ok or ax_trusted) else "warn"
-    sp_note = ":3030 online" if screenpipe_online else ":3030 standby"
+    status = "pass" if (foveal_memory_online or elem_count > 0 or frame_ok or ax_trusted) else "warn"
+    fm_note = ":9382 online" if foveal_memory_online else ":9382 standby"
     frame_note = " • Visual Frame Active" if frame_ok else ""
     details = (
         f"PyObjC AXUIElement DOM ({elem_count} elements in {foveal_lat:.1f}ms) • {ax_tag} "
-        f"• {vagus_tag} • {sp_note}{frame_note}"
+        f"• {vagus_tag} • {fm_note}{frame_note}"
     )
 
     return {
@@ -1657,7 +1657,7 @@ def check_organ_the_eyes() -> Dict[str, Any]:
         "details": details,
         "latency_ms": lat,
         "vital_signs": {
-            "screenpipe_online": screenpipe_online,
+            "foveal_memory_online": foveal_memory_online,
             "foveal_element_count": elem_count,
             "foveal_capture_ms": foveal_lat,
             "visual_frame_path": frame_path,

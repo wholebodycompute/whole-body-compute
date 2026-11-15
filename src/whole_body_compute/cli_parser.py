@@ -142,7 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
     # body search [query...] [--tag TAG] [--app APP] [--tier TIER] [--hub-url URL] [--offline] [--json]
     p_search = subparsers.add_parser(
         "search",
-        help="Search signed $0.00 PalWorkflow recipes in the Procedural DNA Hub (hub.wholebodycompute.org)",
+        help="Search signed $0.00 PalWorkflow recipes in the Procedural DNA Hub (wholebodycompute.com/hub)",
     )
     p_search.add_argument("query", nargs="*", default=[], help="Search keywords (e.g. github, linear, stripe, slack)")
     p_search.add_argument("--tag", default=None, help="Filter by recipe tag (e.g. git, finops, devops, browser)")
@@ -205,13 +205,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_dna = subparsers.add_parser(
         "telemetry",
         aliases=["dna", "learnings"],
-        help="Federated Procedural DNA & Ethical Telemetry Engine (status, stats, harvest, inspect, generalize, compact, opt-in, opt-out)",
+        help="Federated Procedural DNA & Ethical Telemetry Engine (status, show, stats, harvest, inspect, generalize, compact, enable, disable)",
     )
     p_dna.add_argument(
         "action",
         nargs="?",
         default="status",
-        choices=["status", "stats", "harvest", "sync", "flush", "inspect", "generalize", "compact", "opt-in", "opt-out"],
+        choices=[
+            "status",
+            "show",
+            "stats",
+            "harvest",
+            "sync",
+            "flush",
+            "inspect",
+            "generalize",
+            "compact",
+            "opt-in",
+            "opt-out",
+            "enable",
+            "disable",
+            "reset-id",
+        ],
         help="Telemetry action (default: status)",
     )
     p_dna.add_argument(
@@ -260,6 +275,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Unified Usage & Funnel Telemetry Report (Audits, body begin, CLI commands, Workflow Automations, Edit Mode & REM Dreaming)",
     )
     p_stats.add_argument("--json", action="store_true", help="Output structured JSON")
+    p_stats.add_argument(
+        "--cloud",
+        action="store_true",
+        help="Include live PostHog Cloud Project #730830 external funnel, limit-hit, and conversion stats",
+    )
 
     # body radix-cache (aliases: radix, prewarm, kv-cache)
     p_rad = subparsers.add_parser(
@@ -407,11 +427,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--path", default=".agents/team_exemplars.jsonl", help="Path to shared team exemplars JSONL ledger")
     p_sync.add_argument("--json", action="store_true", help="Output structured JSON")
 
-    # body license (aliases: tier, pricing, upgrade, plan)
+    # body license (aliases: tier, pricing, upgrade, plan, activate)
     p_lic = subparsers.add_parser(
         "license",
-        aliases=["tier", "pricing", "upgrade", "plan"],
+        aliases=["tier", "pricing", "upgrade", "plan", "activate"],
         help="Inspect or switch Whole Body Compute PLG license tier (community, pro, team, enterprise) and ROI payback",
+    )
+    p_lic.add_argument(
+        "license_key_pos",
+        nargs="?",
+        default=None,
+        metavar="POLAR_KEY",
+        help="Optional Polar.sh license key for `body activate <POLAR_KEY>`",
     )
     p_lic.add_argument(
         "--set-tier",

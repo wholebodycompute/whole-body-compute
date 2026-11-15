@@ -1050,7 +1050,7 @@ class SemanticDecompiler:
             win_title = str(getattr(s, "window_title", "") or "")
             direct_route_hint = ""
             try:
-                from whole_body_compute.integrations.screenpipe import resolve_direct_headless_route
+                from whole_body_compute.integrations.foveal_memory import resolve_direct_headless_route
 
                 route_str = resolve_direct_headless_route(app, win_title, ocr_text)
                 if route_str and "DIRECT ROUTE" in route_str:

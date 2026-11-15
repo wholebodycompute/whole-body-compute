@@ -90,6 +90,7 @@ body heart          # Thermal state, Unified RAM headroom & model perfusion stat
 body eyes           # Live macOS AXUIElement Foveal DOM snapshot + on-demand Apple Vision OCR
 body hands          # Deterministic UI actuation (ax_act) & <50ms tactile git/file delta sensor
 body immune         # Blood-Brain Barrier audit log (--window 24h --tools --blocked), APFS CoW & SecGate
+body telemetry show # Inspect exact zero-PII outbound payload or opt out (`body telemetry disable`)
 body daemon status  # Manage portable macOS LaunchAgents (install / status / logs)
 
 # Sovereign Context, Memory & Autonomous Consolidation [Pro / Team]
@@ -102,6 +103,12 @@ body sleep          # Nocturnal REM consolidation & Radix KV-Cache prefix digest
 ```
 
 Deep-dive component reference and glossary: **[`docs/WIKI_AND_GLOSSARY.md`](https://github.com/wholebodycompute/whole-body-compute/blob/main/docs/WIKI_AND_GLOSSARY.md)**.
+
+---
+
+## Sovereign Telemetry & Privacy (`TELEMETRY.md`)
+
+Whole Body Compute **never** collects source code, AST slice text, file paths, repository names, prompts, window titles, screen pixels, IP addresses (`$ip: null`), or PII. By default, anonymous operational vitals and sanitized Procedural DNA efficiency cards help benchmark local + cloud hybrid compute across Apple Silicon and Linux. Inspect the exact JSON payload anytime with `body telemetry show`, or opt out completely with `body telemetry disable` or `export DO_NOT_TRACK=1`. Full schema & CI redaction proofs: **[`TELEMETRY.md`](https://github.com/wholebodycompute/whole-body-compute/blob/main/TELEMETRY.md)**.
 
 ---
 

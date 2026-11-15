@@ -36,8 +36,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("whole_body_compute.local.bootstrap")
 
-SCREENPIPE_DEFAULT_URL = "http://127.0.0.1:3030"
-SCREENPIPE_DEFAULT_DB = Path.home() / ".screenpipe" / "db.sqlite"
+FOVEAL_MEMORY_DEFAULT_URL = "http://127.0.0.1:9382"
+FOVEAL_MEMORY_DEFAULT_DB = Path.home() / ".whole_body" / "foveal_memory.sqlite"
 DOT_MEMORY_DEFAULT_DB = Path.home() / ".voicefi" / "dot_memory.db"
 LOCAL_COMPUTE_RECEIPT_FILE = Path.home() / ".voicefi" / ".local_compute_bootstrapped.json"
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
@@ -408,7 +408,7 @@ def check_organ_status() -> List[OrganHealth]:
         )
 
     # 3. Eyes
-    screenpipe_running = is_screenpipe_running()
+    foveal_memory_running = is_foveal_memory_running()
     ax_trusted = False
     try:
         import ApplicationServices
@@ -417,31 +417,31 @@ def check_organ_status() -> List[OrganHealth]:
     except Exception:
         pass
 
-    eyes_status = "healthy" if screenpipe_running else "warning"
+    eyes_status = "healthy" if foveal_memory_running else "warning"
     details_str = (
-        f"Foveal Memory (:3030): {'ONLINE' if screenpipe_running else 'OFFLINE'} | "
+        f"Foveal Memory (:9382): {'ONLINE' if foveal_memory_running else 'OFFLINE'} | "
         f"AX Trust: {'GRANTED' if ax_trusted else 'NEEDED'}"
     )
     organs.append(
         OrganHealth(
             organ="3. Eyes",
-            name="Foveal Episodic Memory (:3030) & Foveal AX DOM",
+            name="Foveal Episodic Memory (:9382) & Foveal AX DOM",
             status=eyes_status,
             details=details_str,
-            file_path=str(SCREENPIPE_DEFAULT_DB),
+            file_path=str(FOVEAL_MEMORY_DEFAULT_DB),
         )
     )
 
     # 4. Hands & Hippocampus
-    screenpipe_db_ok = SCREENPIPE_DEFAULT_DB.is_file()
+    foveal_db_ok = FOVEAL_MEMORY_DEFAULT_DB.is_file()
     dot_mem_ok = DOT_MEMORY_DEFAULT_DB.is_file()
-    if screenpipe_db_ok and dot_mem_ok:
+    if foveal_db_ok and dot_mem_ok:
         organs.append(
             OrganHealth(
                 organ="4. Hands & Memory",
                 name="DotMemory WAL + Foveal Memory SQLite",
                 status="healthy",
-                details=f"Foveal Memory DB ({SCREENPIPE_DEFAULT_DB.name}) + DotMemory ({DOT_MEMORY_DEFAULT_DB.name}) active",
+                details=f"Foveal Memory DB ({FOVEAL_MEMORY_DEFAULT_DB.name}) + DotMemory ({DOT_MEMORY_DEFAULT_DB.name}) active",
                 file_path=str(DOT_MEMORY_DEFAULT_DB),
             )
         )
@@ -450,8 +450,8 @@ def check_organ_status() -> List[OrganHealth]:
             OrganHealth(
                 organ="4. Hands & Memory",
                 name="DotMemory & Episodic Storage",
-                status="warning" if (screenpipe_db_ok or dot_mem_ok) else "missing",
-                details=f"Screenpipe DB: {'OK' if screenpipe_db_ok else 'Missing'} | DotMemory: {'OK' if dot_mem_ok else 'Uninitialized'}",
+                status="warning" if (foveal_db_ok or dot_mem_ok) else "missing",
+                details=f"Foveal Memory DB: {'OK' if foveal_db_ok else 'Missing'} | DotMemory: {'OK' if dot_mem_ok else 'Uninitialized'}",
             )
         )
 
@@ -491,8 +491,8 @@ def check_organ_status() -> List[OrganHealth]:
     return organs
 
 
-def is_screenpipe_running(url: str = SCREENPIPE_DEFAULT_URL) -> bool:
-    """Check if the Screenpipe HTTP server responds to /health within 1 second."""
+def is_foveal_memory_running(url: str = FOVEAL_MEMORY_DEFAULT_URL) -> bool:
+    """Check if the Sovereign Foveal Memory HTTP server responds to /health within 1 second."""
     try:
         req = urllib.request.Request(f"{url}/health")
         with urllib.request.urlopen(req, timeout=1.0) as resp:
@@ -501,27 +501,26 @@ def is_screenpipe_running(url: str = SCREENPIPE_DEFAULT_URL) -> bool:
         return False
 
 
-def start_builtin_screenpipe_daemon(
+def start_builtin_foveal_memory_daemon(
     host: str = "127.0.0.1",
-    port: int = 3030,
+    port: int = 9382,
     db_path: Optional[Path] = None,
 ) -> bool:
     """
-    Launch the zero-dependency built-in Screenpipe server (screencapture + Apple Vision OCR + SQLite).
-    Runs as a detached background process or via Python worker.
+    Launch the zero-dependency built-in Sovereign Foveal Memory server (Apple Vision OCR + SQLite).
+    Runs as a detached background process.
     """
-    if is_screenpipe_running(f"http://{host}:{port}"):
+    if is_foveal_memory_running(f"http://{host}:{port}"):
         return True
 
-    db = db_path or SCREENPIPE_DEFAULT_DB
+    db = db_path or FOVEAL_MEMORY_DEFAULT_DB
     db.parent.mkdir(parents=True, exist_ok=True)
 
     python_bin = sys.executable
     cmd = [
         python_bin,
         "-m",
-        "whole_body_compute.cli",
-        "screenpipe",
+        "whole_body_compute.integrations.foveal_memory",
         "--serve-http",
         "--host",
         host,
@@ -531,7 +530,7 @@ def start_builtin_screenpipe_daemon(
         str(db),
     ]
 
-    log_file = db.parent / "screenpipe_local.log"
+    log_file = db.parent / "foveal_http.log"
     try:
         with open(log_file, "a") as lf:
             subprocess.Popen(
@@ -542,27 +541,24 @@ def start_builtin_screenpipe_daemon(
             )
         for _ in range(15):
             time.sleep(0.2)
-            if is_screenpipe_running(f"http://{host}:{port}"):
+            if is_foveal_memory_running(f"http://{host}:{port}"):
                 return True
     except Exception as exc:
-        logger.error(f"Failed to start built-in Screenpipe daemon: {exc}")
+        logger.error(f"Failed to start built-in Foveal Memory daemon: {exc}")
 
-    return is_screenpipe_running(f"http://{host}:{port}")
+    return is_foveal_memory_running(f"http://{host}:{port}")
 
 
-def install_screenpipe_launch_agent(port: int = 3030) -> Tuple[bool, Path]:
-    """Generate and register a macOS LaunchAgent so Screenpipe (:3030) runs automatically at login."""
+def install_foveal_memory_launch_agent(port: int = 9382) -> Tuple[bool, Path]:
+    """Generate and register a macOS LaunchAgent so Foveal Memory (:9382) runs automatically at login."""
     LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
-    plist_path = LAUNCH_AGENTS_DIR / "com.voicefi.screenpipe.plist"
+    plist_path = LAUNCH_AGENTS_DIR / "com.wholebodycompute.foveal-memory.plist"
 
     python_bin = sys.executable
-    voicefi_bin = shutil.which("voicefi") or python_bin
-    args = [voicefi_bin, "screenpipe", "--serve-http", "--port", str(port)]
-    if voicefi_bin == python_bin:
-        args = [python_bin, "-m", "whole_body_compute.cli", "screenpipe", "--serve-http", "--port", str(port)]
+    args = [python_bin, "-m", "whole_body_compute.integrations.foveal_memory", "--serve-http", "--port", str(port)]
 
     args_xml = "\n".join(f"        <string>{a}</string>" for a in args)
-    db_dir = SCREENPIPE_DEFAULT_DB.parent
+    db_dir = FOVEAL_MEMORY_DEFAULT_DB.parent
     db_dir.mkdir(parents=True, exist_ok=True)
 
     content = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -570,7 +566,7 @@ def install_screenpipe_launch_agent(port: int = 3030) -> Tuple[bool, Path]:
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.voicefi.screenpipe</string>
+    <string>com.wholebodycompute.foveal-memory</string>
     <key>ProgramArguments</key>
     <array>
 {args_xml}
@@ -587,9 +583,9 @@ def install_screenpipe_launch_agent(port: int = 3030) -> Tuple[bool, Path]:
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>{db_dir / "screenpipe_agent.log"}</string>
+    <string>{db_dir / "foveal_http.log"}</string>
     <key>StandardErrorPath</key>
-    <string>{db_dir / "screenpipe_agent.err"}</string>
+    <string>{db_dir / "foveal_http_err.log"}</string>
 </dict>
 </plist>
 """
@@ -597,8 +593,8 @@ def install_screenpipe_launch_agent(port: int = 3030) -> Tuple[bool, Path]:
         f.write(content)
 
     uid = os.getuid()
-    subprocess.run(["launchctl", "bootout", f"gui/{uid}/com.voicefi.screenpipe"], capture_output=True)
-    subprocess.run(["launchctl", "enable", f"gui/{uid}/com.voicefi.screenpipe"], capture_output=True)
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}/com.wholebodycompute.foveal-memory"], capture_output=True)
+    subprocess.run(["launchctl", "enable", f"gui/{uid}/com.wholebodycompute.foveal-memory"], capture_output=True)
     res = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)], capture_output=True)
     if res.returncode != 0:
         subprocess.run(["launchctl", "load", "-w", str(plist_path)], capture_output=True)
@@ -729,36 +725,36 @@ def run_sovereign_bootstrap(
     if not quiet:
         print("📦 [1/4] Initializing Sovereign Episodic & Workflow Storage...")
     dot_db = init_dot_memory_db()
-    SCREENPIPE_DEFAULT_DB.parent.mkdir(parents=True, exist_ok=True)
+    FOVEAL_MEMORY_DEFAULT_DB.parent.mkdir(parents=True, exist_ok=True)
     workflows_scripts_dir = Path.home() / ".voicefi" / "workflows" / "scripts"
     workflows_scripts_dir.mkdir(parents=True, exist_ok=True)
     if not quiet:
         print(f"  ✅ DotMemory WAL SQLite:  {dot_db}")
-        print(f"  ✅ Screenpipe SQLite:     {SCREENPIPE_DEFAULT_DB}")
+        print(f"  ✅ Foveal Memory SQLite:  {FOVEAL_MEMORY_DEFAULT_DB}")
         print(f"  ✅ Tier-1 API Scripts:    {workflows_scripts_dir}")
 
-    # Step 2: Screenpipe Daemon
+    # Step 2: Foveal Memory Daemon
     if not quiet:
-        print("\n👁️  [2/4] Verifying Screenpipe Service (:3030)...")
-    if is_screenpipe_running():
+        print("\n👁️  [2/4] Verifying Sovereign Foveal Memory Service (:9382)...")
+    if is_foveal_memory_running():
         if not quiet:
-            print("  ✅ Screenpipe HTTP API already active on http://127.0.0.1:3030")
+            print("  ✅ Foveal Memory HTTP API already active on http://127.0.0.1:9382")
     else:
         if not quiet:
-            print("  🚀 Starting built-in zero-dependency Screenpipe daemon...")
-        started = start_builtin_screenpipe_daemon()
+            print("  🚀 Starting built-in zero-dependency Foveal Memory daemon...")
+        started = start_builtin_foveal_memory_daemon()
         if started:
             if not quiet:
-                print("  ✅ Built-in Screenpipe daemon online on http://127.0.0.1:3030")
+                print("  ✅ Built-in Foveal Memory daemon online on http://127.0.0.1:9382")
             try:
-                install_screenpipe_launch_agent()
+                install_foveal_memory_launch_agent()
                 if not quiet:
                     print("  ✅ Registered LaunchAgent for login persistence")
             except Exception as e:
                 logger.debug(f"LaunchAgent registration notice: {e}")
         else:
             if not quiet:
-                print("  ⚠️ Screenpipe service pending. Direct SQLite fallback active.")
+                print("  ⚠️ Foveal Memory service pending. Direct SQLite fallback active.")
 
     # Step 3: Local LLMs
     if not skip_models:
@@ -831,16 +827,16 @@ def ensure_dmg_local_compute_bootstrapped_async(
 
     def _bg_worker() -> None:
         try:
-            # 1. Always ensure local storage & zero-egress Screenpipe (:3030) are active
+            # 1. Always ensure local storage & zero-egress Foveal Memory (:9382) are active
             init_dot_memory_db()
-            SCREENPIPE_DEFAULT_DB.parent.mkdir(parents=True, exist_ok=True)
+            FOVEAL_MEMORY_DEFAULT_DB.parent.mkdir(parents=True, exist_ok=True)
             (Path.home() / ".voicefi" / "workflows" / "scripts").mkdir(parents=True, exist_ok=True)
 
-            if not is_screenpipe_running():
-                started = start_builtin_screenpipe_daemon()
+            if not is_foveal_memory_running():
+                started = start_builtin_foveal_memory_daemon()
                 if started:
                     try:
-                        install_screenpipe_launch_agent()
+                        install_foveal_memory_launch_agent()
                     except Exception:
                         pass
 

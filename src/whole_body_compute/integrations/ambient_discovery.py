@@ -43,7 +43,7 @@ from whole_body_compute.integrations.pal_workflow import (
     PostConditionCheck,
     WorkflowStep,
 )
-from whole_body_compute.integrations.screenpipe import resolve_direct_headless_route
+from whole_body_compute.integrations.foveal_memory import resolve_direct_headless_route
 from whole_body_compute.redaction import REDACTION_PLACEHOLDER, contains_secret, redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -1708,14 +1708,14 @@ def discover_now_from_ambient_sources(
 ) -> Dict[str, Any]:
     """
     On-demand pass (`body candidates --discover`) that mines both the live `ambient_transitions.jsonl`
-    journal and `~/.screenpipe/db.sqlite` multi-app window transitions, compiling any recurring motifs
+    journal and `~/.whole_body/foveal_memory.sqlite` multi-app window transitions, compiling any recurring motifs
     directly into `recipes/candidates/`.
     """
     from types import SimpleNamespace
     import sqlite3
     import yaml
     from whole_body_compute.integrations.pal_compiler import PalCompiler
-    from whole_body_compute.integrations.screenpipe import DEFAULT_SCREENPIPE_DB
+    from whole_body_compute.integrations.foveal_memory import DEFAULT_FOVEAL_MEMORY_DB
 
     c_dir = Path(candidates_dir or resolve_default_candidates_dir())
     ev_path = Path(events_log_path or resolve_ambient_events_log_path())
@@ -1728,8 +1728,8 @@ def discover_now_from_ambient_sources(
     staged_from_journal = discovery.discover_and_stage()
     staged_ids: List[str] = [c.recipe.id for c in staged_from_journal if c.recipe]
 
-    # Also mine recent Screenpipe OCR multi-app transitions if available
-    sp_db = Path(screenpipe_db or DEFAULT_SCREENPIPE_DB)
+    # Also mine recent Foveal Memory OCR multi-app transitions if available
+    sp_db = Path(screenpipe_db or DEFAULT_FOVEAL_MEMORY_DB)
     if sp_db.is_file():
         try:
             conn = sqlite3.connect(f"file:{sp_db}?mode=ro", uri=True, timeout=3.0)

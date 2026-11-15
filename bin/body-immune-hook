@@ -310,16 +310,31 @@ case "$WBC_AIRLOCK_MODE" in
                               fi
                             fi
                             MAY_BE_COMMUNITY=0
-                            if [ "$PREV_BBB_CNT" -ge 50 ] 2>/dev/null && [ "${WBC_FOUNDER_MODE:-0}" != "1" ]; then
+                            if [ "$PREV_BBB_CNT" -ge 50 ] 2>/dev/null; then
+                              IS_OPEN_CORE_SH=1
+                              MONOREPO_DOT_MEM="$(dirname "$0")/../src/whole_body_compute/local/dot_memory.py"
+                              if [ -f "$MONOREPO_DOT_MEM" ] && ! grep -q "Requires Whole Body Compute Pro" "$MONOREPO_DOT_MEM" 2>/dev/null; then
+                                IS_OPEN_CORE_SH=0
+                              fi
                               if [ "${WBC_FORCE_COMMUNITY:-0}" = "1" ]; then
                                 MAY_BE_COMMUNITY=1
                               elif [ -f "$WBC_DIR/license.json" ]; then
-                                case "$(cat "$WBC_DIR/license.json" 2>/dev/null)" in
+                                LIC_RAW="$(cat "$WBC_DIR/license.json" 2>/dev/null)"
+                                case "$LIC_RAW" in
                                   *'"community"'*) MAY_BE_COMMUNITY=1 ;;
-                                  *'"pro"'*|*'"team"'*|*'"enterprise"'*) MAY_BE_COMMUNITY=0 ;;
+                                  *'"pro"'*|*'"team"'*|*'"enterprise"'*)
+                                    if [ "$IS_OPEN_CORE_SH" = "1" ]; then
+                                      case "$LIC_RAW" in
+                                        *'"polar.sh"'*) MAY_BE_COMMUNITY=0 ;;
+                                        *) MAY_BE_COMMUNITY=1 ;;
+                                      esac
+                                    else
+                                      MAY_BE_COMMUNITY=0
+                                    fi
+                                    ;;
                                   *) MAY_BE_COMMUNITY=1 ;;
                                 esac
-                              elif [ -n "${WBC_DATA_DIR:-}" ] || [ -n "${WBC_HOME:-}" ] || [ ! -d "$(dirname "$0")/../.git" ]; then
+                              elif [ -n "${WBC_DATA_DIR:-}" ] || [ -n "${WBC_HOME:-}" ] || [ "$IS_OPEN_CORE_SH" = "1" ]; then
                                 MAY_BE_COMMUNITY=1
                               fi
                             fi

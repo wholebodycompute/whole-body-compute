@@ -41,9 +41,9 @@ from whole_body_compute.organs.immune_polyglot import (
     run_polyglot_three_stage_secgate,
 )
 
-from whole_body_compute.integrations.screenpipe import (
-    DEFAULT_SCREENPIPE_DB,
-    DEFAULT_SCREENPIPE_URL,
+from whole_body_compute.integrations.foveal_memory import (
+    DEFAULT_FOVEAL_MEMORY_DB,
+    DEFAULT_FOVEAL_MEMORY_URL,
     extract_visible_errors,
     search_screen_content,
 )
@@ -641,7 +641,7 @@ def select_recipe_for_prompt(prompt: str, repo_root: Optional[Path] = None) -> O
 
 def build_deictic_screenpipe_context(
     prompt: str,
-    screenpipe_url: str = DEFAULT_SCREENPIPE_URL,
+    screenpipe_url: str = DEFAULT_FOVEAL_MEMORY_URL,
     db_path: Optional[Path] = None,
     include_foveal_dom: bool = True,
 ) -> str:
@@ -2127,9 +2127,9 @@ class GooseHeadlessRunner:
             cmd.append("--no-profile")
         elif with_extensions and recipe_path is None:
             cmd.extend(["--with-builtin", "developer"])
-            mcp_script = working_dir / "bin" / "screenpipe-mcp"
+            mcp_script = working_dir / "bin" / "foveal-vision-mcp"
             if mcp_script.is_file():
-                cmd.extend(["--with-extension", f"screenpipe:{mcp_script}"])
+                cmd.extend(["--with-extension", f"foveal_vision:{mcp_script}"])
 
         if recipe_path is not None and Path(recipe_path).is_file():
             cmd.extend(["--no-profile", "--recipe", str(recipe_path)])

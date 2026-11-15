@@ -20,6 +20,7 @@ import yaml
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from whole_body_compute.integrations.pal_harness import PalCommandResult, PalHarness
+from whole_body_compute.procedural_telemetry import get_wbc_data_dir
 
 
 class ActionType(str, Enum):
@@ -415,6 +416,65 @@ class PalWorkflowRunner:
             "screen_mb_saved": screen_mb,
         }
 
+    _BUNDLED_STARTER_RECIPES = frozenset(
+        {
+            "ambient_client_package_upload",
+            "ambient_foveal_multi-app_flow",
+            "ambient_screenpipe_multi-app_flow",
+            "post_call_actions",
+            "screen_debug",
+            "time_travel_recall",
+        }
+    )
+
+    @classmethod
+    def summarize_recipe_anatomy(cls, recipe: PalWorkflowRecipe) -> Dict[str, Any]:
+        """
+        Extract a zero-PII structural fingerprint of a workflow recipe so telemetry learns
+        what apps people connect, what action chains they run, and how much runs headless locally,
+        without ever touching window titles, prompts, paths, or bound user variables.
+        """
+        import re as _re
+
+        app_chain: List[str] = []
+        action_chain: List[str] = []
+        headless_count = 0
+        headless_actions = {"run_shell", "http_request", "read_file", "wait", "sleep"}
+
+        for st in recipe.steps:
+            act_val = st.action.value if hasattr(st.action, "value") else str(st.action)
+            action_chain.append(act_val)
+            if act_val in headless_actions:
+                headless_count += 1
+            raw_app = getattr(st, "app_name", None)
+            if raw_app and "${" not in str(raw_app):
+                clean_app = _re.sub(r"[^A-Za-z0-9 _.\-]", "", str(raw_app).strip())[:40]
+                if clean_app and (not app_chain or app_chain[-1] != clean_app):
+                    app_chain.append(clean_app)
+
+        tier_sum = getattr(recipe, "tier_summary", None) or {}
+        if not isinstance(tier_sum, dict):
+            tier_sum = {}
+        archetype = str(tier_sum.get("archetype") or "desktop_workflow")[:48]
+        dominant_tier = str(
+            tier_sum.get("dominant_tier")
+            or ("TIER_0_LOCAL" if headless_count >= max(1, len(recipe.steps) // 2) else "TIER_2_SEMANTIC_UI")
+        )
+        clean_id = _re.sub(r"[^A-Za-z0-9_.\-]", "_", str(recipe.id))[:64]
+        total_steps = len(recipe.steps)
+        return {
+            "recipe_id": clean_id,
+            "is_custom_user_recipe": clean_id not in cls._BUNDLED_STARTER_RECIPES,
+            "archetype": archetype,
+            "dominant_tier": dominant_tier,
+            "steps_count": total_steps,
+            "headless_step_share": round(headless_count / max(1, total_steps), 3),
+            "app_chain": app_chain[:12],
+            "action_chain": action_chain[:20],
+            "preconditions_count": len(recipe.preconditions or []),
+            "postconditions_count": len(recipe.postconditions or []),
+        }
+
     @classmethod
     def record_cloud_savings(
         cls,
@@ -423,11 +483,27 @@ class PalWorkflowRunner:
         screen_mb_saved: float,
         elapsed_s: float,
         telemetry_path: Optional[Path] = None,
+        *,
+        recipe: Optional[PalWorkflowRecipe] = None,
+        outcome: str = "success",
+        failed_step_index: Optional[int] = None,
+        failed_action_type: Optional[str] = None,
+        self_healed_steps: int = 0,
     ) -> Dict[str, Any]:
-        """Persist cumulative cloud token savings to ~/.voicefi/telemetry/pal_cloud_savings.json."""
+        """Persist cumulative cloud token savings & habit frequency and emit zero-PII workflow telemetry."""
+        import datetime as _dt
         import json
 
-        path = telemetry_path or (Path.home() / ".voicefi" / "telemetry" / "pal_cloud_savings.json")
+        if telemetry_path is not None:
+            path = telemetry_path
+        else:
+            try:
+                from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
+                path = get_wbc_data_dir() / "telemetry" / "pal_cloud_savings.json"
+            except Exception:
+                path = Path.home() / ".whole_body_compute" / "telemetry" / "pal_cloud_savings.json"
+
         data: Dict[str, Any] = {
             "total_runs": 0,
             "total_tokens_saved": 0,
@@ -440,41 +516,92 @@ class PalWorkflowRunner:
         except Exception:
             pass
 
-        data["total_runs"] = int(data.get("total_runs", 0)) + 1
-        data["total_tokens_saved"] = int(data.get("total_tokens_saved", 0)) + int(tokens_saved)
-        data["total_screen_mb_saved"] = round(
-            float(data.get("total_screen_mb_saved", 0.0)) + float(screen_mb_saved), 2
-        )
+        is_success = outcome == "success"
+        if is_success:
+            data["total_runs"] = int(data.get("total_runs", 0)) + 1
+            data["total_tokens_saved"] = int(data.get("total_tokens_saved", 0)) + int(tokens_saved)
+            data["total_screen_mb_saved"] = round(
+                float(data.get("total_screen_mb_saved", 0.0)) + float(screen_mb_saved), 2
+            )
 
+        today_utc = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
         wf_map = data.setdefault("workflows", {})
         wf_entry = wf_map.setdefault(
             recipe_id,
-            {"runs": 0, "tokens_saved": 0, "screen_mb_saved": 0.0, "last_elapsed_s": 0.0},
+            {
+                "runs": 0,
+                "failed_runs": 0,
+                "self_healed_runs": 0,
+                "active_days": [],
+                "tokens_saved": 0,
+                "screen_mb_saved": 0.0,
+                "last_elapsed_s": 0.0,
+            },
         )
-        wf_entry["runs"] = int(wf_entry.get("runs", 0)) + 1
-        wf_entry["tokens_saved"] = int(wf_entry.get("tokens_saved", 0)) + int(tokens_saved)
-        wf_entry["screen_mb_saved"] = round(
-            float(wf_entry.get("screen_mb_saved", 0.0)) + float(screen_mb_saved), 2
-        )
+        if is_success:
+            wf_entry["runs"] = int(wf_entry.get("runs", 0)) + 1
+            wf_entry["tokens_saved"] = int(wf_entry.get("tokens_saved", 0)) + int(tokens_saved)
+            wf_entry["screen_mb_saved"] = round(
+                float(wf_entry.get("screen_mb_saved", 0.0)) + float(screen_mb_saved), 2
+            )
+        else:
+            wf_entry["failed_runs"] = int(wf_entry.get("failed_runs", 0)) + 1
+
+        if self_healed_steps > 0:
+            wf_entry["self_healed_runs"] = int(wf_entry.get("self_healed_runs", 0)) + 1
+
+        active_days = list(wf_entry.get("active_days") or [])
+        if today_utc not in active_days:
+            active_days.append(today_utc)
+            active_days = active_days[-90:]
+        wf_entry["active_days"] = active_days
         wf_entry["last_elapsed_s"] = round(float(elapsed_s), 2)
 
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        except Exception:
-            pass
-        try:
-            from whole_body_compute.procedural_telemetry import track_wbc_event
+        in_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST"))
+        if (not in_pytest) or telemetry_path is not None or os.environ.get("WBC_DATA_DIR"):
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            except Exception:
+                pass
 
-            track_wbc_event(
-                "wbc_workflow_executed",
-                {
-                    "recipe_id": str(recipe_id),
-                    "tokens_saved": int(tokens_saved),
-                    "screen_mb_saved": float(screen_mb_saved),
-                    "elapsed_s": float(elapsed_s),
-                },
+        try:
+            from whole_body_compute.procedural_telemetry import (
+                export_sanitized_learning_card,
+                 sanitize_procedural_text,
+                track_wbc_event,
             )
+
+            anatomy = cls.summarize_recipe_anatomy(recipe) if recipe is not None else {}
+            safe_id = anatomy.get("recipe_id") or sanitize_procedural_text(str(recipe_id))
+            lifetime_runs = int(wf_entry.get("runs", 0))
+            event_props: Dict[str, Any] = {
+                "recipe_id": str(safe_id),
+                "outcome": str(outcome),
+                "tokens_saved": int(tokens_saved) if is_success else 0,
+                "screen_mb_saved": float(screen_mb_saved) if is_success else 0.0,
+                "elapsed_s": round(float(elapsed_s), 3),
+                "lifetime_runs_for_recipe": lifetime_runs,
+                "distinct_days_active": len(active_days),
+                "failed_runs_for_recipe": int(wf_entry.get("failed_runs", 0)),
+                "self_healed_steps": int(self_healed_steps),
+                **anatomy,
+            }
+            if failed_step_index is not None:
+                event_props["failed_step_index"] = int(failed_step_index)
+            if failed_action_type:
+                event_props["failed_action_type"] = str(failed_action_type)[:40]
+
+            track_wbc_event("wbc_workflow_executed", event_props)
+
+            # Promote recurring user workflow habits into zero-PII Procedural DNA skeleton cards
+            if (
+                is_success
+                and recipe is not None
+                and lifetime_runs in (1, 3, 10, 25)
+                and not in_pytest
+            ):
+                export_sanitized_learning_card(recipe, persist_to_outbox=True)
         except Exception:
             pass
         return data
@@ -526,12 +653,23 @@ class PalWorkflowRunner:
         # 1. Resolve & bind parameters
         bound_vars = cls._bind_parameters(recipe.parameters, raw_prompt, explicit_args or {})
         start_time = time.monotonic()
+        self_healed_steps = 0
 
         # 1b. Verify Hoare preconditions {P} before dispatching any OrganEyes / Hands step
         if recipe.preconditions:
             for pre in recipe.preconditions:
                 pre_ok, pre_msg = PalStateGetters.evaluate(pre, bound_vars)
                 if not pre_ok:
+                    if os.getenv("VOICEFI_HEADLESS") != "1":
+                        cls.record_cloud_savings(
+                            recipe_id=recipe_id,
+                            tokens_saved=0,
+                            screen_mb_saved=0.0,
+                            elapsed_s=round(time.monotonic() - start_time, 2),
+                            recipe=recipe,
+                            outcome="precondition_failed",
+                            failed_action_type=str(pre.getter_type),
+                        )
                     return PalCommandResult(
                         success=False,
                         command=f"{recipe_id}:precondition:{pre.getter_type}",
@@ -543,6 +681,18 @@ class PalWorkflowRunner:
         for idx, step in enumerate(steps):
             if (time.monotonic() - start_time) > total_timeout_s:
                 cls._unwind_failure()
+                if os.getenv("VOICEFI_HEADLESS") != "1":
+                    cls.record_cloud_savings(
+                        recipe_id=recipe_id,
+                        tokens_saved=0,
+                        screen_mb_saved=0.0,
+                        elapsed_s=round(time.monotonic() - start_time, 2),
+                        recipe=recipe,
+                        outcome="workflow_timeout",
+                        failed_step_index=idx + 1,
+                        failed_action_type=step.action.value,
+                        self_healed_steps=self_healed_steps,
+                    )
                 return PalCommandResult(
                     success=False,
                     command=recipe_id,
@@ -573,12 +723,25 @@ class PalWorkflowRunner:
                 if healed_ok:
                     success = True
                     err = ""
+                    self_healed_steps += 1
                 elif healed_err:
                     err = healed_err
 
             if not success:
                 if step.on_failure == "abort":
                     cls._unwind_failure()
+                    if os.getenv("VOICEFI_HEADLESS") != "1":
+                        cls.record_cloud_savings(
+                            recipe_id=recipe_id,
+                            tokens_saved=0,
+                            screen_mb_saved=0.0,
+                            elapsed_s=round(time.monotonic() - start_time, 2),
+                            recipe=recipe,
+                            outcome="step_failed",
+                            failed_step_index=idx + 1,
+                            failed_action_type=step.action.value,
+                            self_healed_steps=self_healed_steps,
+                        )
                     err_summary = recipe.error_summary.format(
                         step_name=step.name or f"step {idx + 1}"
                     )
@@ -596,6 +759,17 @@ class PalWorkflowRunner:
                 pc_ok, pc_msg = PalStateGetters.evaluate(pc, bound_vars)
                 if not pc_ok:
                     cls._unwind_failure()
+                    if os.getenv("VOICEFI_HEADLESS") != "1":
+                        cls.record_cloud_savings(
+                            recipe_id=recipe_id,
+                            tokens_saved=0,
+                            screen_mb_saved=0.0,
+                            elapsed_s=round(time.monotonic() - start_time, 2),
+                            recipe=recipe,
+                            outcome="postcondition_failed",
+                            failed_action_type=str(pc.getter_type),
+                            self_healed_steps=self_healed_steps,
+                        )
                     return PalCommandResult(
                         success=False,
                         command=f"{recipe_id}:postcondition:{pc.getter_type}",
@@ -617,6 +791,9 @@ class PalWorkflowRunner:
                 tokens_saved=tokens_saved,
                 screen_mb_saved=screen_mb_saved,
                 elapsed_s=elapsed_s,
+                recipe=recipe,
+                outcome="success",
+                self_healed_steps=self_healed_steps,
             )
 
         success_msg = recipe.success_summary
@@ -1373,16 +1550,24 @@ class PalWorkflowRegistry:
 
     @classmethod
     def get_search_directories(cls) -> List[Path]:
-        dirs = []
+        dirs: List[Path] = []
         # 1. Project-local
-        cwd_wf = Path.cwd() / ".voicefi" / "workflows"
-        if cwd_wf.exists():
-            dirs.append(cwd_wf)
+        for local_sub in (
+            Path.cwd() / ".whole_body_compute" / "workflows",
+            Path.cwd() / ".voicefi" / "workflows",
+        ):
+            if local_sub.exists() and local_sub not in dirs:
+                dirs.append(local_sub)
 
-        # 2. User-global
-        home_wf = Path.home() / ".voicefi" / "workflows"
-        if home_wf.exists():
-            dirs.append(home_wf)
+        # 2. User-global (~/.whole_body_compute/workflows + recipes, with ~/.voicefi/workflows fallback)
+        wbc_root = get_wbc_data_dir()
+        for global_sub in (wbc_root / "workflows", wbc_root / "recipes"):
+            if global_sub.exists() and global_sub not in dirs:
+                dirs.append(global_sub)
+        if "WBC_DATA_DIR" not in os.environ:
+            legacy_wf = Path.home() / ".voicefi" / "workflows"
+            if legacy_wf.exists() and legacy_wf not in dirs:
+                dirs.append(legacy_wf)
 
         # 3. Built-in bundled
         bundled = Path(__file__).parent / "pal_recipes"
@@ -1550,7 +1735,11 @@ class PalWorkflowRegistry:
         try:
             import sqlite3
 
-            db_path = Path.home() / ".voicefi" / "dot_memory.db"
+            db_path = Path(
+                os.environ.get("WBC_DOT_MEMORY_PATH")
+                or os.environ.get("VOICEFI_DOT_MEMORY_DB")
+                or str(get_wbc_data_dir() / "dot_memory.db")
+            ).expanduser()
             if db_path.is_file():
                 with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0) as conn:
                     conn.row_factory = sqlite3.Row

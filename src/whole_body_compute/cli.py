@@ -65,8 +65,13 @@ def _dispatch_main(
 ) -> int:
     if cmd != "immune-hook":
         try:
-            from whole_body_compute.procedural_telemetry import track_wbc_event
+            from whole_body_compute.procedural_telemetry import (
+                maybe_emit_first_run_telemetry_notice,
+                track_wbc_event,
+            )
 
+            if cmd not in ("telemetry", "dna", "learnings"):
+                maybe_emit_first_run_telemetry_notice(is_json=bool(getattr(args, "json", False)))
             track_wbc_event("wbc_cli_command", {"command": cmd})
         except Exception:
             pass
@@ -77,7 +82,7 @@ def _dispatch_main(
             get_comprehensive_usage_stats_report,
         )
 
-        report = get_comprehensive_usage_stats_report()
+        report = get_comprehensive_usage_stats_report(include_cloud=bool(getattr(args, "cloud", False)))
         if getattr(args, "json", False):
             print(json.dumps(report, indent=2))
         else:
@@ -536,6 +541,19 @@ def _dispatch_main(
                 print("\n" + format_telemetry_status(report) + "\n")
             return 0
 
+        if action == "show":
+            from whole_body_compute.procedural_telemetry import (
+                format_telemetry_show_report,
+                get_telemetry_show_report,
+            )
+
+            report = get_telemetry_show_report()
+            if is_json:
+                print(json.dumps(report, indent=2))
+            else:
+                print("\n" + format_telemetry_show_report(report) + "\n")
+            return 0
+
         if action == "stats":
             from whole_body_compute.procedural_telemetry import (
                 format_usage_stats_table,
@@ -643,10 +661,19 @@ def _dispatch_main(
                 )
             return 0
 
-        if action in ("opt-in", "opt-out"):
+        if action == "reset-id":
+            mgr = TelemetryConsentManager()
+            status = mgr.reset_cohort_salt()
+            if is_json:
+                print(json.dumps(status, indent=2))
+            else:
+                print(f"🔄 Rotated anonymous cohort salt -> New Cohort ID: `{status['cohort_id']}`")
+            return 0
+
+        if action in ("opt-in", "opt-out", "enable", "disable"):
             mgr = TelemetryConsentManager()
             tier_arg = getattr(args, "tier", None)
-            if action == "opt-out":
+            if action in ("opt-out", "disable"):
                 status = mgr.opt_out()
             else:
                 status = mgr.opt_in(tier=tier_arg if tier_arg is not None else 2)

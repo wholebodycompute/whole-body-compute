@@ -212,16 +212,16 @@ def is_pro_license_active(
     stub_file: str | None = None,
 ) -> bool:
     """Check whether the active license tier unlocks Pro (`pro`, `team`, `enterprise`)."""
-    from whole_body_compute.license import LicenseManager
+    from whole_body_compute.license import LicenseManager, _is_verified_dev_override
 
-    founder_env = os.environ.get("WBC_FOUNDER_MODE", "")
+    dev_override = _is_verified_dev_override()
     stub_pkg_root = _resolve_package_root_from_stub(stub_file)
     this_pkg_root = Path(__file__).resolve().parent
 
     mgr = LicenseManager(license_path=license_path)
     resolved_lic = str(mgr.license_path)
     mtime_sig = _file_mtime_ns(mgr.license_path)
-    cache_key = (resolved_lic, founder_env, str(stub_pkg_root or ""))
+    cache_key = (resolved_lic, dev_override, str(stub_pkg_root or ""))
 
     cached = _LICENSE_ACTIVE_CACHE.get(cache_key)
     if cached is not None and cached[0] == mtime_sig:
@@ -229,13 +229,13 @@ def is_pro_license_active(
 
     # If a stub was loaded directly via spec_from_file_location out of an exported tree
     # while sys.modules['whole_body_compute'] points to the dev monorepo, honor the exported
-    # tree's community default unless an explicit license file or founder mode is active.
+    # tree's community default unless an explicit license file or verified dev key is active.
     if (
         stub_pkg_root is not None
         and stub_pkg_root != this_pkg_root
         and license_path is None
         and not os.environ.get("VOICEFI_LICENSE_PATH")
-        and founder_env != "1"
+        and not dev_override
         and mtime_sig == -1
     ):
         _LICENSE_ACTIVE_CACHE[cache_key] = (mtime_sig, False)

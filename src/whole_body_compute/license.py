@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import hmac
 import json
 import os
 import socket
@@ -164,12 +165,28 @@ def _is_seat_limit_error(detail: str) -> bool:
     )
 
 
+_LEGACY_OVERRIDE_ENV_SHA256 = "ae683b5902b471ce5e982e8f93eae9917d40993acb0e2bfeee157b015382c5d2"
+
+
+def _has_legacy_override_env() -> bool:
+    """Detect removed legacy override env vars via SHA-256 without exposing their names in source."""
+    for env_key, env_val in os.environ.items():
+        if env_val and hashlib.sha256(env_key.encode("utf-8")).hexdigest() == _LEGACY_OVERRIDE_ENV_SHA256:
+            return True
+    return False
+
+
+def _is_verified_dev_override() -> bool:
+    """Environment overrides are disabled in Open-Core exports."""
+    return False
+
+
 def _is_isolated_home_env() -> bool:
     """
     Return True when `$HOME`, `WBC_HOME`, or `WBC_DATA_DIR` points to an isolated/temp
     new-user sandbox different from the real host user account's home directory.
     """
-    if os.environ.get("WBC_FOUNDER_MODE") == "1":
+    if _is_verified_dev_override():
         return False
     if os.environ.get("WBC_FORCE_COMMUNITY") == "1":
         return True
@@ -197,9 +214,7 @@ def _is_isolated_home_env() -> bool:
 
 
 def _is_open_core_enforced() -> bool:
-    """Return True when running in an exported Open-Core installation or explicit Community sandbox without founder override."""
-    if os.environ.get("WBC_FOUNDER_MODE") == "1":
-        return False
+    """Return True when running in an exported Open-Core installation or explicit Community sandbox."""
     if os.environ.get("WBC_FORCE_COMMUNITY") == "1":
         return True
     try:
@@ -479,24 +494,20 @@ class LicenseManager:
 
     def get_active_tier(self) -> str:
         """Fast `<0.05ms` active tier resolution without scanning `.dist-info` plugin metadata."""
-        founder_mode = os.environ.get("WBC_FOUNDER_MODE") == "1"
-        if founder_mode and "PYTEST_CURRENT_TEST" not in os.environ:
+        open_core_enforced = _is_open_core_enforced()
+        if open_core_enforced and "PYTEST_CURRENT_TEST" not in os.environ and _has_legacy_override_env():
             try:
-                from whole_body_compute.pro_loader import is_open_core_stubbed
+                from whole_body_compute.procedural_telemetry import track_wbc_event
 
-                if is_open_core_stubbed(package_root=Path(__file__).resolve().parent):
-                    from whole_body_compute.procedural_telemetry import track_wbc_event
-
-                    track_wbc_event(
-                        "wbc_quota_bypass_detected",
-                        {
-                            "bypass_type": "founder_mode_env_in_open_core",
-                        },
-                    )
+                track_wbc_event(
+                    "wbc_quota_bypass_detected",
+                    {
+                        "bypass_type": "legacy_env_override_in_open_core",
+                    },
+                )
             except Exception:
                 pass
-        is_comm_default = (not founder_mode) and (_is_open_core_enforced() or _is_isolated_home_env())
-        default_tier = "community" if is_comm_default else "enterprise"
+        default_tier = "community"
         if self.license_path.is_file():
             try:
                 loaded = json.loads(self.license_path.read_text(encoding="utf-8"))
@@ -509,12 +520,11 @@ class LicenseManager:
         return default_tier
 
     def get_status(self) -> Dict[str, Any]:
-        """Return current license configuration (defaulting to `community` tier in open-core export)."""
-        founder_mode = os.environ.get("WBC_FOUNDER_MODE") == "1"
-        default_tier = "enterprise" if founder_mode else "community"
+        """Return current license configuration (defaulting strictly to `community` tier in open-core export)."""
+        default_tier = "community"
         data: Dict[str, Any] = {
-            "tier": "enterprise" if founder_mode else "community",
-            "mode": "founder_enterprise" if founder_mode else "community_default",
+            "tier": "community",
+            "mode": "community_default",
             "updated_at": int(time.time()),
         }
         if self.license_path.is_file():
