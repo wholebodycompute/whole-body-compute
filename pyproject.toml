@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "whole-body-compute"
-version = "0.1.0"
+version = "0.1.1"
 description = "Cut agent token burn with zero accuracy loss on SWE-bench Verified. Local <3ms AST shield, Apple Silicon vision & memory runtime for Claude Code, Cursor & Antigravity."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -57,7 +57,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://wholebodycompute.org"
+Homepage = "https://wholebodycompute.com/open-core"
 Commercial = "https://wholebodycompute.com"
 Repository = "https://github.com/wholebodycompute/whole-body-compute"
 Issues = "https://github.com/wholebodycompute/whole-body-compute/issues"

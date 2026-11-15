@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Welcome to Whole Body Compute Pro - Activate Your License</title>
+  <meta name="robots" content="noindex, nofollow" />
+  <link rel="icon" type="image/svg+xml" href="assets/logo-wbc-character-light.svg" />
+  <style>
+    :root {
+      --bg: #FBF9F5;
+      --card: #FFFFFF;
+      --ink: #141413;
+      --muted: #5C5A54;
+      --border: #E5E0D5;
+      --accent: #D9381E;
+      --green: #059669;
+      --term-bg: #121316;
+      --term-fg: #F3F4F6;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: var(--sans);
+      line-height: 1.55;
+      padding: 48px 20px 80px;
+    }
+    .wrap {
+      max-width: 680px;
+      margin: 0 auto;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(5, 150, 105, 0.12);
+      color: var(--green);
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 700;
+      padding: 5px 12px;
+      border-radius: 999px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    h1 {
+      font-size: clamp(1.9rem, 4vw, 2.5rem);
+      letter-spacing: -0.03em;
+      margin: 14px 0 8px;
+      line-height: 1.15;
+    }
+    p.lead {
+      color: var(--muted);
+      font-size: 16px;
+      margin: 0 0 28px;
+    }
+    .step-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 22px 24px;
+      margin-bottom: 18px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.03);
+    }
+    .step-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    .step-num {
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 800;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .step-title {
+      font-weight: 700;
+      font-size: 17px;
+      margin: 0 0 8px;
+    }
+    .key-input-row {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .key-input {
+      flex: 1;
+      min-width: 240px;
+      font-family: var(--mono);
+      font-size: 13.5px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #F8F6F1;
+      color: var(--ink);
+    }
+    .term-box {
+      background: var(--term-bg);
+      color: var(--term-fg);
+      font-family: var(--mono);
+      font-size: 13px;
+      padding: 14px 16px;
+      border-radius: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      overflow-x: auto;
+    }
+    .copy-btn {
+      background: #272A30;
+      color: #FFFFFF;
+      border: 1px solid #3E424B;
+      border-radius: 8px;
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 700;
+      padding: 6px 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .copy-btn:hover { background: #353942; }
+    .footer-nav {
+      margin-top: 28px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13.5px;
+      color: var(--muted);
+    }
+    .footer-nav a {
+      color: var(--ink);
+      font-weight: 600;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <span class="badge" id="tierBadge">✓ Polar Checkout Complete</span>
+    <h1 id="welcomeHeading">Activate Whole Body Compute in 10 Seconds</h1>
+    <p class="lead">
+      Your Polar.sh license key is in your confirmation email and Polar receipt page. Run the commands below in your terminal to unlock unlimited Blood-Brain Barrier shielding, <code>$0</code> skill promotion, and Pro daemons.
+    </p>
+
+    <section class="step-card">
+      <div class="step-head"><span class="step-num">Step 1 &bull; Install or Upgrade CLI</span></div>
+      <div class="step-title">Make sure <code>whole-body-compute</code> is installed</div>
+      <div class="term-box">
+        <code id="installCmd">uv tool install --upgrade whole-body-compute &amp;&amp; body begin</code>
+        <button class="copy-btn" type="button" onclick="copyText('installCmd', this, 'welcome_install')">Copy</button>
+      </div>
+    </section>
+
+    <section class="step-card">
+      <div class="step-head"><span class="step-num">Step 2 &bull; Activate Polar License Key</span></div>
+      <div class="step-title">Paste your Polar license key below (or directly in terminal)</div>
+      <div class="key-input-row">
+        <input
+          id="polarKeyInput"
+          class="key-input"
+          type="text"
+          placeholder="Paste Polar key here (e.g. WBC-PRO-XXXX-XXXX)"
+          autocomplete="off"
+          spellcheck="false"
+          oninput="updateActivateCmd()"
+        />
+      </div>
+      <div class="term-box">
+        <code id="activateCmd">body license --activate &lt;YOUR_POLAR_KEY&gt;</code>
+        <button class="copy-btn" type="button" onclick="copyActivateCmd(this)">Copy Command</button>
+      </div>
+    </section>
+
+    <section class="step-card">
+      <div class="step-head"><span class="step-num">Step 3 &bull; Verify Active Tier &amp; Pro Plugin</span></div>
+      <div class="step-title">Confirm your Pro / Team wheel and unlimited quotas</div>
+      <div class="term-box">
+        <code id="verifyCmd">body license</code>
+        <button class="copy-btn" type="button" onclick="copyText('verifyCmd', this, 'welcome_verify')">Copy</button>
+      </div>
+    </section>
+
+    <div class="footer-nav">
+      <a href="/">&larr; Back to wholebodycompute.com</a>
+      <a href="mailto:hello@wholebodycompute.com">Need help? hello@wholebodycompute.com</a>
+    </div>
+  </main>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const tier = (params.get("tier") || "pro").toLowerCase();
+    const checkoutId = params.get("checkout_id") || params.get("order_id") || undefined;
+    const cohortId = params.get("cohort_id") || undefined;
+
+    if (tier === "team" || tier === "enterprise") {
+      const badge = document.getElementById("tierBadge");
+      if (badge) badge.textContent = "✓ Whole Body Compute " + tier.toUpperCase() + " Ready";
+    }
+
+    function emitWelcomeEvent(eventName, extraProps) {
+      try {
+        if (navigator.doNotTrack === "1" || navigator.globalPrivacyControl) return;
+        let visitorId = cohortId || localStorage.getItem("wbc_anon_vid");
+        if (!visitorId) {
+          visitorId = "web_" + Math.random().toString(16).slice(2, 10) + Date.now().toString(16).slice(-6);
+          localStorage.setItem("wbc_anon_vid", visitorId);
+        }
+        const body = JSON.stringify({
+          api_key: "phc_D3TxQWXwnd9Z6wBBK3DpnsdKQAHdLpSSMxup4qL8djc2",
+          event: eventName,
+          distinct_id: visitorId,
+          properties: Object.assign({
+            product: "whole_body_compute",
+            source: "web_welcome",
+            surface: "polar_welcome_page",
+            tier: tier,
+            checkout_id: checkoutId,
+            cohort_id: cohortId,
+            host: window.location.hostname,
+            pathname: window.location.pathname
+          }, extraProps || {})
+        });
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon("https://us.i.posthog.com/capture/", new Blob([body], { type: "application/json" }));
+        } else {
+          fetch("https://us.i.posthog.com/capture/", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: body,
+            keepalive: true
+          }).catch(function () {});
+        }
+      } catch (_) {}
+    }
+
+    // Emit wbc_checkout_completed once per session when landing from Polar checkout
+    try {
+      const dedupKey = "wbc_welcome_seen_" + (checkoutId || tier);
+      if (!sessionStorage.getItem(dedupKey)) {
+        sessionStorage.setItem(dedupKey, "1");
+        emitWelcomeEvent("wbc_checkout_completed", { has_checkout_id: Boolean(checkoutId) });
+      }
+    } catch (_) {}
+
+    function updateActivateCmd() {
+      const raw = (document.getElementById("polarKeyInput").value || "").trim();
+      const target = document.getElementById("activateCmd");
+      if (!target) return;
+      target.textContent = "body license --activate " + (raw || "<YOUR_POLAR_KEY>");
+    }
+
+    function copyActivateCmd(btn) {
+      const raw = (document.getElementById("polarKeyInput").value || "").trim();
+      const cmd = "body license --activate " + (raw || "<YOUR_POLAR_KEY>");
+      emitWelcomeEvent("wbc_web_install_copied", {
+        command_tab: "welcome_activate_key",
+        key_entered: Boolean(raw)
+      });
+      navigator.clipboard.writeText(cmd).then(function () {
+        btn.textContent = "Copied ✓";
+        setTimeout(function () { btn.textContent = "Copy Command"; }, 2000);
+      });
+    }
+
+    function copyText(elId, btn, tabName) {
+      const el = document.getElementById(elId);
+      if (!el) return;
+      emitWelcomeEvent("wbc_web_install_copied", { command_tab: tabName });
+      navigator.clipboard.writeText(el.textContent).then(function () {
+        const prev = btn.textContent;
+        btn.textContent = "Copied ✓";
+        setTimeout(function () { btn.textContent = prev; }, 2000);
+      });
+    }
+  </script>
+</body>
+</html>
