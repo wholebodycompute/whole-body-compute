@@ -330,6 +330,7 @@ def test_track_wbc_event_and_usage_stats_cli(
     monkeypatch.setenv("WBC_USAGE_STATS_PATH", str(stats_file))
     monkeypatch.setenv("WBC_TELEMETRY_CONFIG_PATH", str(cfg_file))
     monkeypatch.setenv("WBC_TEST_TELEMETRY_PING", "1")
+    monkeypatch.setenv("WBC_INTERNAL_DEV", "1")
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
     monkeypatch.delenv("BODY_TELEMETRY", raising=False)
     monkeypatch.delenv("CI", raising=False)
@@ -584,6 +585,7 @@ def test_first_run_telemetry_notice_and_tier_enforcement(
     monkeypatch.setenv("VOICEFI_ANALYTICS_DB", str(adb_file))
     monkeypatch.setenv("WBC_TEST_SYNC", "1")
     monkeypatch.setenv("WBC_TEST_TELEMETRY_PING", "1")
+    monkeypatch.setenv("WBC_INTERNAL_DEV", "1")
     for k in (
         "DO_NOT_TRACK",
         "WBC_TELEMETRY_DISABLED",
