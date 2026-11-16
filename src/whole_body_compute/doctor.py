@@ -1471,7 +1471,7 @@ def check_organ_prefrontal() -> Dict[str, Any]:
 
 
 def check_organ_nervous_system() -> Dict[str, Any]:
-    """Organ 05: The Nervous System — Active Listening Engine & Sub-50ms Vagus Brake."""
+    """Organ 03 (Nervous Reflex): Active Listening Engine & Sub-50ms Vagus Brake."""
     t0 = time.perf_counter()
     try:
         from whole_body_compute.integrations.active_listening import ActiveListeningEngine
@@ -1486,7 +1486,7 @@ def check_organ_nervous_system() -> Dict[str, Any]:
             f"<50ms Vagus Brake armed ({lat:.2f}ms) • 'stop' intercept: {'PASS' if interrupted else 'FAIL'}"
         )
         return {
-            "organ_num": "05",
+            "organ_num": "03",
             "name": "The Nervous System",
             "subsystem": "Active Listening & Vagus Brake",
             "status": status,
@@ -1501,7 +1501,7 @@ def check_organ_nervous_system() -> Dict[str, Any]:
     except Exception as exc:
         lat = round((time.perf_counter() - t0) * 1000.0, 2)
         return {
-            "organ_num": "05",
+            "organ_num": "03",
             "name": "The Nervous System",
             "subsystem": "Active Listening & Vagus Brake",
             "status": "warn",
@@ -1772,7 +1772,7 @@ def check_organ_the_hands() -> Dict[str, Any]:
 
 
 def check_organ_immune_system(workspace: Optional[Path] = None) -> Dict[str, Any]:
-    """Organ 05: The Immune System - Blood-Brain Barrier, CoW Sandbox & Polyglot 3-Stage AST SecGate."""
+    """Organ 05: The Blood-Brain Barrier - Pre/Post Hooks, AST Slicer, CoW Sandbox & 3-Stage AST SecGate."""
     t0 = time.perf_counter()
     cow_ok = False
     cow_note = "APFS CoW fallback"
@@ -1823,7 +1823,7 @@ def check_organ_immune_system(workspace: Optional[Path] = None) -> Dict[str, Any
 
     return {
         "organ_num": "05",
-        "name": "The Immune System",
+        "name": "The Blood-Brain Barrier",
         "subsystem": "BBB Hook, AST SecGate & CoW",
         "status": status,
         "details": details,
@@ -1840,6 +1840,10 @@ def check_organ_immune_system(workspace: Optional[Path] = None) -> Dict[str, Any
             "hooks_status": hooks_tag,
         },
     }
+
+
+check_organ_blood_brain_barrier = check_organ_immune_system
+check_organ_bbb = check_organ_immune_system
 
 
 def check_organ_circadian() -> Dict[str, Any]:
@@ -1953,7 +1957,7 @@ def check_5_organs(max_workers: int = 5) -> Dict[str, Any]:
       02. The Brainstem (Local Metal, Router & Radix KV)
       03. The Eyes (Foveal DOM, Tactile & Vagus)
       04. The Hippocampus (DotMemory WAL, Flush & REM)
-      05. The Immune System (BBB Hook, AST SecGate & CoW)
+      05. The Blood-Brain Barrier (BBB Hook, AST SecGate & CoW)
     """
     t_global = time.perf_counter()
     check_funcs = [
@@ -2081,14 +2085,14 @@ def exercise_5_organ_reflex_loop() -> Dict[str, Any]:
         "details": hippo_details,
     })
 
-    # Step 5: 05 The Immune System
+    # Step 5: 05 The Blood-Brain Barrier
     t0 = time.perf_counter()
     from whole_body_compute.integrations.goose_runner import run_three_stage_ast_secgate
 
     secgate_res = run_three_stage_ast_secgate("def fn(): pass", "def fn(): return 1")
     steps.append({
         "step": 5,
-        "organ": "The Immune System",
+        "organ": "The Blood-Brain Barrier",
         "subsystem": "3-Stage AST SecGate",
         "passed": secgate_res.get("passed", False),
         "latency_ms": round((time.perf_counter() - t0) * 1000.0, 2),
@@ -2120,10 +2124,10 @@ def format_organ_doctor_table(organ_report: Dict[str, Any]) -> str:
     organs = organ_report.get("organs", [])
 
     lines = []
-    lines.append("\n🫀 Whole Body Compute — 5-Organ Anatomical Health Audit (Sovereign OS)")
+    lines.append("\n🫀 Whole Body Compute - 5-Organ Anatomical Health Audit (Sovereign OS)")
 
     col_num = 4
-    col_organ = 19
+    col_organ = 23
     col_sub = 30
     col_status = 8
     col_lat = 9
@@ -2160,10 +2164,10 @@ def format_reflex_exercise_table(exercise_report: Dict[str, Any]) -> str:
     """Render a clean ASCII/Unicode table for the synthetic reflex loop exercise."""
     steps = exercise_report.get("steps", [])
     lines = []
-    lines.append("\n⚡ Whole Body Compute — 5-Organ Closed-Loop Physiological Reflex Exercise")
+    lines.append("\n⚡ Whole Body Compute - 5-Organ Closed-Loop Physiological Reflex Exercise")
 
     col_step = 4
-    col_organ = 19
+    col_organ = 23
     col_sub = 28
     col_status = 8
     col_lat = 9

@@ -48,8 +48,8 @@ Cloud coding agents burn massive context windows re-ingesting full files, noisy 
 │ 01. THE HEART            │ 02. THE BRAINSTEM        │ 03. THE EYES & HANDS             │
 │ Thermal, Perfusion & CSI │ Local Metal, Router & KV │ Foveal AX DOM, Tactile & Vagus   │
 ├──────────────────────────┼──────────────────────────┴──────────────────────────────────┤
-│ 04. THE HIPPOCAMPUS      │ 05. THE IMMUNE SYSTEM (BLOOD-BRAIN BARRIER)                 │
-│ Memory WAL, Flush & REM  │ Pre/Post Hooks, SensoryVector, <3ms AST Slicer & SecGate    │
+│ 04. THE HIPPOCAMPUS      │ 05. THE BLOOD-BRAIN BARRIER                                 │
+│ Memory WAL, Flush & REM  │ Pre/Post Hooks, <3ms AST Slicer, CLI Digests & SecGate      │
 └──────────────────────────┴─────────────────────────────────────────────────────────────┘
 ```
 
@@ -92,7 +92,7 @@ body doctor         # Sub-second 5-organ health check (--exercise runs closed-lo
 body heart          # Thermal state, Unified RAM headroom & model perfusion status
 body eyes           # Live macOS AXUIElement Foveal DOM snapshot + on-demand Apple Vision OCR
 body hands          # Deterministic UI actuation (ax_act) & <50ms tactile git/file delta sensor
-body immune         # Blood-Brain Barrier audit log (--window 24h --tools --blocked), APFS CoW & SecGate
+body bbb            # Blood-Brain Barrier audit (--window 24h --tools --blocked --blob; alias: body immune)
 body telemetry show # Inspect exact zero-PII outbound payload or opt out (`body telemetry disable`)
 body daemon status  # Manage portable macOS LaunchAgents (install / status / logs)
 

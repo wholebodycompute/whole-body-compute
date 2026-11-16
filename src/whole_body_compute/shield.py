@@ -1,5 +1,5 @@
 """
-Whole Body Compute - Organ 05 Blood-Brain Barrier Shield Installer & Live Savings Ledger (`body shield` & `body savings`).
+Whole Body Compute - The Blood-Brain Barrier Shield Installer & Live Savings Ledger (`body shield` & `body savings`).
 # [direct-edit]
 
 Provides:
@@ -2021,7 +2021,7 @@ def format_shield_status(report: Dict[str, Any]) -> str:
     total_bots = int(report.get("total_bots", len(bots)))
 
     lines = [
-        "🛡️  WHOLE BODY COMPUTE - ORGAN 05 BLOOD-BRAIN BARRIER SHIELD",
+        "🛡️  WHOLE BODY COMPUTE - THE BLOOD-BRAIN BARRIER SHIELD",
         "─" * 76,
         f"  • Scope:               {scope} ({report.get('workspace_dir', '')})",
         f"  • Hook Handler:        {hook_cmd}",

@@ -1,7 +1,7 @@
 """
 Whole Body Compute - 60-Second Workspace Awakening (`body begin` / `init` / `awaken` / `start`).
 
-Wires the Organ 05 Blood-Brain Barrier (`PreInvocation` + `PreToolUse` AST Slicer,
+Wires The Blood-Brain Barrier (`PreInvocation` + `PreToolUse` AST Slicer,
 Shell Anti-Bloat Shield, and Vascular Traffic Monitor), installs the Bicameral Compute
 Context-Shield rule, checks core physiological organs, runs a live `<5ms` reflex self-test,
 and delivers an instant 30-day retroactive FinOps ROI receipt.
@@ -45,9 +45,9 @@ MULTI_HARNESS_TOOL_MATCHER = (
 BBB_SHIELD_MARKER = "<!-- WBC-BBB-SHIELD -->"
 BBB_SHIELD_END_MARKER = "<!-- /WBC-BBB-SHIELD -->"
 
-FALLBACK_AGENT_EFFICIENCY_RULE = """# Whole Body Compute: Bicameral Compute & Blood Brain Barrier (Organ 05)
+FALLBACK_AGENT_EFFICIENCY_RULE = """# Whole Body Compute: Bicameral Compute & The Blood-Brain Barrier
 
-This workspace uses **Whole Body Compute (WBC)** (**Bicameral Compute** & **Organ 05 Blood Brain Barrier**) to give frontier cloud models fast local Apple Silicon reflexes, `<5ms` crash/log triage, and hardware/git safety—**without restricting frontier intelligence or starving the model of source code context**.
+This workspace uses **Whole Body Compute (WBC)** (**Bicameral Compute** & **The Blood-Brain Barrier**) to give frontier cloud models fast local Apple Silicon reflexes, `<5ms` crash/log triage, and hardware/git safety - **without restricting frontier intelligence or starving the model of source code context**.
 
 ## 1. Zero-Polling on Background Tasks
 - **NEVER poll background task status in a loop.** Wait for reactive completion notifications when a task runs asynchronously.
@@ -56,7 +56,7 @@ This workspace uses **Whole Body Compute (WBC)** (**Bicameral Compute** & **Orga
 ## 2. Full-Context Code Reading & `<5ms` Log/Monster-File Triage
 - **Normal Source Files (`<= 800 lines` in Antigravity / `<= 2,000 lines` in Claude Code)**: Read normal code files directly in a single turn so you have full visibility into imports, cross-function state, and edge cases before editing. Do not artificially page through small or medium files.
 - **Monster Files (`> 800` / `> 2,000` lines)**: Unbounded reads on oversized files are automatically sliced inline with a `<3ms` AST Symbol Map (`class`/`def` line ranges) so symbols at the bottom of large files are never silently truncated. Jump straight to the exact symbol with bounded line ranges (`StartLine`/`EndLine` or `offset`/`limit`).
-- **Raw Log & Crash Files (`*.log`, `*.err`, `transcript.jsonl`)**: Organ 05 (`Blood Brain Barrier`) automatically extracts `Traceback`/`ERROR` blocks inline in `<5ms` and attaches the referenced source slice. For targeted log queries, run:
+- **Raw Log & Crash Files (`*.log`, `*.err`, `transcript.jsonl`)**: **The Blood-Brain Barrier** automatically extracts `Traceback`/`ERROR` blocks inline in `<5ms` and attaches the referenced source slice. For targeted log queries, run:
   ```bash
   body scout <log_path> -q "<question/objective>"
   ```
@@ -1218,8 +1218,8 @@ def run_body_begin(
 ) -> Dict[str, Any]:
     """
     Execute the complete 60-second `body begin` awakening sequence:
-    1. Wire Organ 05 Blood-Brain Barrier hooks & Bicameral Compute rule.
-    2. Check core physiological vitals (Heart, Brainstem, Immune System).
+    1. Wire The Blood-Brain Barrier hooks & Bicameral Compute rule.
+    2. Check core physiological vitals (Heart, Brainstem, Blood-Brain Barrier).
     3. Run live <5ms AST & Secret Guard reflex self-test on this machine.
     4. Compute instant 30-day retroactive FinOps ROI audit receipt.
     5. Query Sovereign Telemetry & Ethical Procedural DNA policy.

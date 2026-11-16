@@ -6,6 +6,8 @@ Exposes the 5 Core Organs (`check_5_organs`) and closed-loop reflex checks.
 from whole_body_compute.doctor import (
     check_5_organs,
     check_10_organs,
+    check_organ_bbb,
+    check_organ_blood_brain_barrier,
     check_organ_brainstem,
     check_organ_circadian,
     check_organ_heart,
@@ -60,6 +62,8 @@ __all__ = [
     "check_organ_the_eyes",
     "check_organ_hippocampus",
     "check_organ_the_hands",
+    "check_organ_blood_brain_barrier",
+    "check_organ_bbb",
     "check_organ_immune_system",
     "check_organ_circadian",
     "exercise_5_organ_reflex_loop",

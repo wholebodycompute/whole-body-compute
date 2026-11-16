@@ -33,6 +33,7 @@ SINGLE_ORGAN_DISPATCH = {
     "hippocampus": check_organ_hippocampus,
     "memory": check_organ_hippocampus,
     "hands": check_organ_the_hands,
+    "bbb": check_organ_immune_system,
     "immune": check_organ_immune_system,
     "circadian": check_organ_circadian,
     "sleep": check_organ_circadian,
@@ -970,7 +971,7 @@ def build_parser() -> argparse.ArgumentParser:
                 metavar="TRANSCRIPT",
                 help="Decompose voice memo transcript into atomic notes, tickets, and questions",
             )
-        if organ_key == "immune":
+        if organ_key in ("bbb", "immune"):
             p_org.add_argument(
                 "--window",
                 default="all",

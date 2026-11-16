@@ -455,7 +455,7 @@ def get_anonymous_system_envelope(*, refresh: bool = False) -> dict[str, Any]:
     os_name = sys.platform.lower()
     arch = os.uname().machine.lower() if hasattr(os, "uname") else platform.machine().lower() or "unknown"
 
-    wbc_version = "0.1.1"
+    wbc_version = "0.1.2"
     try:
         from whole_body_compute import __version__ as _ver
 

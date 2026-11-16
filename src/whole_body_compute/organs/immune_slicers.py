@@ -1810,6 +1810,8 @@ def _build_test_suite_stdout_digest(lines: List[str], max_bytes: int = 8000) -> 
 
     in_failure_section = False
     in_inline_failure = False
+    in_noise_section = False
+    warning_lines_collapsed = 0
     pending_run_header: Optional[Tuple[int, str]] = None
     recent_context_buf: List[Tuple[int, str]] = []
     failure_lines: List[str] = []
@@ -1827,17 +1829,26 @@ def _build_test_suite_stdout_digest(lines: List[str], max_bytes: int = 8000) -> 
         if _FINAL_TEST_SUMMARY_RE.match(stripped):
             in_failure_section = False
             in_inline_failure = False
+            in_noise_section = False
             summary_lines.append(f"L{idx}: {ln}")
             continue
 
         if _FAILURE_SECTION_START_RE.match(stripped):
             in_failure_section = True
             in_inline_failure = False
+            in_noise_section = False
             _emit_failure_line(idx, ln)
             continue
 
-        if in_failure_section and _FAILURE_SECTION_STOP_RE.match(stripped):
+        if _FAILURE_SECTION_STOP_RE.match(stripped):
             in_failure_section = False
+            in_inline_failure = False
+            in_noise_section = True
+            continue
+
+        if in_noise_section:
+            if stripped:
+                warning_lines_collapsed += 1
             continue
 
         if in_failure_section:
@@ -1995,9 +2006,12 @@ def _build_test_suite_stdout_digest(lines: List[str], max_bytes: int = 8000) -> 
             if lines[idx - 1].strip():
                 summary_lines.append(f"L{idx}: {lines[idx - 1]}")
 
+    warn_suffix = (
+        f" | {warning_lines_collapsed:,} warning-lines collapsed" if warning_lines_collapsed > 0 else ""
+    )
     header = (
         f"[Test Suite Semantic Digest: {passed_count:,} passed collapsed | "
-        f"{failed_count} failed | {error_count} error(s) | {skipped_count} skipped]"
+        f"{failed_count} failed | {error_count} error(s) | {skipped_count} skipped{warn_suffix}]"
     )
     out_parts: List[str] = [header]
     if failure_lines:
@@ -2228,19 +2242,6 @@ def slice_post_tool_output_buffer(
             "airlock_receipt": "",
         }
 
-    airlock_blob_id = ""
-    airlock_receipt = ""
-    if os.environ.get("WBC_AIRLOCK_VAULT_DISABLED") != "1":
-        try:
-            from whole_body_compute.organs.immune_vault import store_airlock_blob
-
-            vault_info = store_airlock_blob(raw_text)
-            airlock_blob_id = str(vault_info.get("blob_id") or "")
-            airlock_receipt = str(vault_info.get("receipt") or "")
-        except Exception:
-            airlock_blob_id = ""
-            airlock_receipt = ""
-
     if fmt_name == "git_diff_status":
         outline = _build_git_diff_status_digest(lines, max_bytes=max_bytes)
         compressed_str = (
@@ -2299,11 +2300,46 @@ def slice_post_tool_output_buffer(
                 f"{tail_preview}\n"
             )
 
+    # Strict Monotonicity Guard: never inflate or waste Airlock vault writes on buffers that
+    # are already >=92% pure failure tracebacks / dense signal.
+    airlock_enabled = os.environ.get("WBC_AIRLOCK_VAULT_DISABLED") != "1"
+    est_receipt_bytes = 210 if airlock_enabled else 0
+    candidate_bytes = len(compressed_str.encode("utf-8", errors="replace")) + est_receipt_bytes
+    if candidate_bytes >= int(byte_len * 0.92):
+        return {
+            "sliced": False,
+            "tool_name": tool_name,
+            "target_path": str(target_path or virtual_path),
+            "format_detected": fmt_name,
+            "original_lines": total_lines,
+            "original_bytes": byte_len,
+            "structural_map": "",
+            "content": raw_text if isinstance(raw_output, (bytes, bytearray)) else raw_output,
+            "direct_tokens_saved": 0,
+            "quadratic_tokens_saved": 0,
+            "airlock_blob_id": "",
+            "airlock_receipt": "",
+        }
+
+    airlock_blob_id = ""
+    airlock_receipt = ""
+    if airlock_enabled:
+        try:
+            from whole_body_compute.organs.immune_vault import store_airlock_blob
+
+            vault_info = store_airlock_blob(raw_text)
+            airlock_blob_id = str(vault_info.get("blob_id") or "")
+            airlock_receipt = str(vault_info.get("receipt") or "")
+        except Exception:
+            airlock_blob_id = ""
+            airlock_receipt = ""
+
     if airlock_receipt:
         compressed_str += f"{airlock_receipt}\n"
 
+    sliced_byte_len = len(compressed_str.encode("utf-8", errors="replace"))
     full_tokens_est = max(1, byte_len // 4)
-    sliced_tokens_est = max(1, len(compressed_str.encode("utf-8", errors="replace")) // 4)
+    sliced_tokens_est = max(1, sliced_byte_len // 4)
     direct_tokens_saved = max(0, full_tokens_est - sliced_tokens_est)
     remaining_turns = max(1, 25 - int(step_idx or 0))
     quadratic_tokens_saved = direct_tokens_saved * remaining_turns

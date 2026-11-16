@@ -653,7 +653,7 @@ def format_immune_scorecard_table(
     )
     win_label = f"Window: {window}" if window and window.lower() != "all" else "All Time"
     lines = [
-        f"🛡️  Organ 05 (Blood-Brain Barrier) - Pre/Post Immune Gate, Context Shield & Vascular Scorecard ({win_label})",
+        f"🛡️  The Blood-Brain Barrier (BBB) - Pre/Post Context Shield, AST Gate & Vascular Scorecard ({win_label})",
         "┌──────────────────────────────┬──────────────────────────────────────────────────────────┐",
         f"│ Pre-Tool Checks / Post-Audits│ {sc['total_pre_checks']} pre-checks ({sc['fast_path_count']} fast-sh / {sc['deep_ast_count']} deep-AST) • {sc['total_post_verifications']} post │",
         f"│ Avg Overhead (Pre / Post)    │ {sc['avg_pre_latency_ms']:.2f}ms pre-gate  •  {sc['avg_post_latency_ms']:.2f}ms post-tactile{'':<19}│",
@@ -702,7 +702,7 @@ def format_immune_scorecard_table(
 
 class OrganImmuneSystem:
     """
-    Organ 05: Blood-Brain Barrier (BBB), Adaptive Immune System & Context Shield.
+    Organ 05: The Blood-Brain Barrier (BBB) - Context Shield, AST Gate & Vascular Defense.
     Provides PreToolUse / PostToolUse security gates, AST-aware file inspection,
     Vascular traffic egress monitoring, shell bloat prevention, and audit telemetry.
     """

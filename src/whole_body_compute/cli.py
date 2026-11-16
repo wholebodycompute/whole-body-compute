@@ -45,11 +45,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     if (
         len(raw_argv) >= 2
-        and raw_argv[0] == "immune"
+        and raw_argv[0] in ("immune", "bbb")
         and any(tok == "--blob" or tok.startswith("--blob=") for tok in raw_argv[1:])
         and not any(tok in ("-h", "--help") for tok in raw_argv[1:])
     ):
-        fast_p = argparse.ArgumentParser(prog="body immune", add_help=False)
+        fast_p = argparse.ArgumentParser(prog=f"body {raw_argv[0]}", add_help=False)
         fast_p.add_argument("--blob", dest="blob", default=None)
         fast_p.add_argument("--lines", dest="lines", default=None)
         fast_p.add_argument("--json", action="store_true")
@@ -77,7 +77,7 @@ def _dispatch_main(
     args: argparse.Namespace,
     parser: argparse.ArgumentParser,
 ) -> int:
-    if cmd != "immune-hook" and not (cmd == "immune" and getattr(args, "blob", None)):
+    if cmd != "immune-hook" and not (cmd in ("immune", "bbb") and getattr(args, "blob", None)):
         try:
             from whole_body_compute.procedural_telemetry import (
                 maybe_emit_first_run_telemetry_notice,

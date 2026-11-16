@@ -108,7 +108,7 @@ def render_pro_upgrade_card(
 
 
 def cmd_immune(args: argparse.Namespace) -> int:
-    """Execute Organ 05 (Immune System) check or `<5ms` Airlock Blob Vault lookup."""
+    """Execute The Blood-Brain Barrier (`body bbb` / `body immune`) check or `<5ms` Airlock Blob Vault lookup."""
     blob_id = getattr(args, "blob", None)
     is_json = getattr(args, "json", False)
     if blob_id:
@@ -169,6 +169,9 @@ def cmd_immune(args: argparse.Namespace) -> int:
         print()
 
     return 0 if organ_res.get("status") != "fail" else 1
+
+
+cmd_bbb = cmd_immune
 
 
 def cmd_commit(args: argparse.Namespace) -> int:
@@ -465,7 +468,7 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
 
         return 0
 
-    if cmd == "immune":
+    if cmd in ("bbb", "immune"):
         return cmd_immune(args)
 
     if cmd in ("brief", "duet", "morning"):
@@ -1214,7 +1217,7 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
                 raise ProUpgradeRequiredError(UPGRADE_MESSAGE)
         organ_res = SINGLE_ORGAN_DISPATCH[cmd]()
         if getattr(args, "json", False):
-            if cmd == "immune":
+            if cmd in ("bbb", "immune"):
                 from whole_body_compute.organs.immune import get_immune_pre_post_scorecard
 
                 organ_res["pre_post_scorecard"] = get_immune_pre_post_scorecard()
@@ -1228,7 +1231,7 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
                 "organs": [organ_res],
             }
             print(format_organ_doctor_table(fake_report))
-            if cmd == "immune":
+            if cmd in ("bbb", "immune"):
                 from whole_body_compute.organs.immune import format_immune_scorecard_table
 
                 print(format_immune_scorecard_table())

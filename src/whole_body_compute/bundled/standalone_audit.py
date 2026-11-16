@@ -95,7 +95,7 @@ def _evaluate_step_sequence(
 ) -> Dict[str, Any]:
     """
     Evaluate a sequence of `(is_planner_turn, step_effective_bytes, is_truncated)` tuples
-    using Whole Body Compute's 200k-window-capped FinOps & Organ 05 BBB model.
+    using Whole Body Compute's 200k-window-capped FinOps & Blood-Brain Barrier (BBB) model.
     """
     steps = len(step_Tuples)
     planner_turns = sum(1 for is_p, _, _ in step_Tuples if is_p)
@@ -2097,7 +2097,7 @@ def audit_turn0_static_overhead(
     in_price_per_m: float = 5.0,
 ) -> Dict[str, Any]:
     """
-    Organ 05 Phase 3 - Turn-0 Fixed Context Tax Audit (<50ms, 100% stdlib, 0 PII leaks):
+    Blood-Brain Barrier - Turn-0 Fixed Context Tax Audit (<50ms, 100% stdlib, 0 PII leaks):
     Scans static instruction files (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`, etc.)
     and MCP server tool configurations/schemas vs `0` MCP schema tokens for `body` OS hooks.
     """
