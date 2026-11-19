@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -197,9 +198,13 @@ def store_airlock_blob(
         except OSError:
             pass
     else:
-        tmp_file = vdir / f".tmp_{blob_id}_{os.getpid()}.txt"
+        fd, tmp_name = tempfile.mkstemp(prefix=f".tmp_{blob_id}_", suffix=".txt", dir=str(vdir))
+        tmp_file = Path(tmp_name)
         try:
-            fd = os.open(str(tmp_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+            except (AttributeError, OSError):
+                pass
             with os.fdopen(fd, "wb") as fh:
                 fh.write(encoded)
             os.replace(str(tmp_file), str(target_file))

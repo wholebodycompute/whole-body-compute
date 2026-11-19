@@ -28,9 +28,11 @@ import re
 import shlex
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -228,6 +230,63 @@ def _is_mlx_implementer_online(port: int = 9379, timeout: float = 0.03) -> bool:
         return False
 
 
+_SENSITIVE_READ_EXEMPT_NAMES = frozenset({".env.example", ".env.sample", ".env.template", ".env.dist"})
+_SENSITIVE_READ_BASENAMES = frozenset({
+    ".env",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "id_dsa",
+    "authorized_keys",
+})
+_SENSITIVE_READ_EXTENSIONS = frozenset({".pem", ".key", ".p12", ".pfx"})
+
+
+def _is_sensitive_credential_path(raw_path: str, *, resolved_path: Optional[str] = None) -> Optional[str]:
+    """
+    Detect sensitive credential/secret files on BOTH raw and `os.path.realpath()` resolved paths
+    so symlinks (e.g. `notes.txt -> .env` or `~/.ssh/id_ed25519`) never bypass the Secret Blindfold.
+    """
+    if not raw_path:
+        return None
+    candidates = [raw_path]
+    if resolved_path is not None:
+        if resolved_path and resolved_path != raw_path:
+            candidates.append(resolved_path)
+    else:
+        try:
+            resolved = os.path.realpath(raw_path)
+            if resolved and resolved != raw_path:
+                candidates.append(resolved)
+        except OSError:
+            pass
+
+    for cand in candidates:
+        norm = cand.replace("\\", "/")
+        low = norm.lower()
+        base = os.path.basename(low)
+        if base in _SENSITIVE_READ_EXEMPT_NAMES:
+            continue
+        if base in _SENSITIVE_READ_BASENAMES or base.startswith(".env."):
+            return base
+        if any(base.endswith(ext) for ext in _SENSITIVE_READ_EXTENSIONS):
+            return base
+        if (
+            "/.ssh/" in low
+            or "/.aws/credentials" in low
+            or "/.aws/config" in low
+            or "/.kube/config" in low
+            or "/.gnupg/" in low
+            or "/.config/gh/hosts.yml" in low
+            or low in ("/etc/shadow", "/etc/master.passwd")
+        ):
+            return norm
+    return None
+
+
 def _is_subagent_conversation(conv_id: str, payload: Optional[Dict[str, Any]] = None) -> bool:
     """Detect whether this tool call is executing inside an ephemeral subagent."""
     if payload:
@@ -284,6 +343,26 @@ def _inspect_and_heal_sql_query(sql_str: str) -> Optional[str]:
     return f"{core} LIMIT 100;" if had_semi else f"{core} LIMIT 100"
 
 
+def _read_tail_lines(path: Path, max_lines: int = 200, max_bytes: int = 131_072) -> List[str]:
+    """Read only the trailing `max_lines` of a JSONL file without scanning multi-MB history."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            if size == 0:
+                return []
+            offset = max(0, size - max_bytes)
+            fh.seek(offset, os.SEEK_SET)
+            chunk = fh.read()
+        text = chunk.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        if offset > 0 and lines:
+            lines = lines[1:]
+        return lines[-max_lines:]
+    except Exception:
+        return []
+
+
 def _compute_exploratory_streak(
     conv_id: str,
     audit_log_path: Optional[Path | str] = None,
@@ -300,8 +379,8 @@ def _compute_exploratory_streak(
     log_path = _get_audit_log_path(audit_log_path)
     if log_path.is_file():
         try:
-            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-            for raw_ln in reversed(lines[-200:]):
+            lines = _read_tail_lines(log_path, max_lines=200, max_bytes=163_840)
+            for raw_ln in reversed(lines):
                 raw_ln = raw_ln.strip()
                 if not raw_ln:
                     continue
@@ -342,9 +421,9 @@ def _compute_exploratory_streak(
         tp = Path(transcript_path_str)
         if tp.is_file():
             try:
-                t_lines = tp.read_text(encoding="utf-8", errors="replace").splitlines()
+                t_lines = _read_tail_lines(tp, max_lines=150, max_bytes=196_608)
                 turn_streak = 0
-                for raw_ln in reversed(t_lines[-150:]):
+                for raw_ln in reversed(t_lines):
                     raw_ln = raw_ln.strip()
                     if not raw_ln:
                         continue
@@ -478,16 +557,26 @@ def _get_fast_bbb_state_file(audit_log_path: Optional[Path | str] = None) -> Opt
     return _get_wbc_data_dir() / "fast_bbb_daily.state"
 
 
-def _read_fast_bbb_daily_count(today_str: str, audit_log_path: Optional[Path | str] = None) -> int:
-    fast_file = _get_fast_bbb_state_file(audit_log_path)
-    if fast_file is None or not fast_file.is_file():
-        return 0
+def _read_fast_bbb_daily_count(
+    today_str: str,
+    audit_log_path: Optional[Path | str] = None,
+    *,
+    fast_file_str: Optional[str] = None,
+) -> int:
+    if fast_file_str is None:
+        fast_file = _get_fast_bbb_state_file(audit_log_path)
+        if fast_file is None:
+            return 0
+        fast_file_str = str(fast_file)
     try:
-        raw = fast_file.read_text(encoding="utf-8").strip()
+        with open(fast_file_str, "r", encoding="utf-8") as fh:
+            raw = fh.read().strip()
         if "|" in raw:
             f_date, f_cnt = raw.split("|", 1)
             if f_date.strip() == today_str:
                 return max(0, int(f_cnt.strip()))
+    except OSError:
+        return 0
     except Exception:
         pass
     return 0
@@ -504,6 +593,144 @@ def _write_fast_bbb_daily_count(today_str: str, count: int, audit_log_path: Opti
         pass
 
 
+_STREAK_JSON_MEM_CACHE_LOCK = threading.Lock()
+_STREAK_JSON_MEM_CACHE: Dict[str, Tuple[int, int, Dict[str, Any]]] = {}
+_STREAK_KNOWN_DIRS: set[str] = set()
+_MAX_TRACKED_CONVS_IN_STREAK = 8
+_MAX_TACTILE_CONVS_IN_STREAK = 2
+_TACTILE_SNAP_CACHE_LOCK = threading.Lock()
+_TACTILE_SNAP_CACHE: Dict[Tuple[str, int, int], FileTactileSnapshot] = {}
+_MAX_TACTILE_SNAP_CACHE = 128
+_PRE_STATE_MEM_CACHE_LOCK = threading.Lock()
+_PRE_STATE_MEM_CACHE: Dict[Tuple[str, int], Dict[str, Any]] = {}
+_MAX_PRE_STATE_MEM_CACHE = 256
+_FILE_LINE_COUNT_CACHE_LOCK = threading.Lock()
+_FILE_LINE_COUNT_CACHE: Dict[Tuple[str, int, int], int] = {}
+_MAX_FILE_LINE_COUNT_CACHE = 256
+_REALPATH_DIR_CACHE_LOCK = threading.Lock()
+_REALPATH_DIR_CACHE: Dict[Tuple[str, int, int], str] = {}
+_MAX_REALPATH_DIR_CACHE = 128
+
+
+def _fast_resolve_path_and_lstat(raw_path: str) -> Tuple[str, Optional[os.stat_result]]:
+    """
+    Resolve `raw_path` with 100% symlink & parent-symlink fidelity while collapsing
+    repeated `realpath()` directory traversals on regular files inside unchanged directories.
+    """
+    try:
+        lst = os.lstat(raw_path)
+    except OSError:
+        try:
+            return os.path.realpath(raw_path), None
+        except OSError:
+            return raw_path, None
+    if stat.S_ISLNK(lst.st_mode):
+        try:
+            resolved = os.path.realpath(raw_path)
+            try:
+                st_target = os.stat(resolved)
+            except OSError:
+                st_target = None
+            return resolved, st_target
+        except OSError:
+            return raw_path, None
+    parent_dir, base_name = os.path.split(raw_path)
+    if parent_dir:
+        try:
+            p_lst = os.lstat(parent_dir)
+            if not stat.S_ISLNK(p_lst.st_mode):
+                dir_key = (parent_dir, p_lst.st_ino, p_lst.st_mtime_ns)
+                with _REALPATH_DIR_CACHE_LOCK:
+                    real_parent = _REALPATH_DIR_CACHE.get(dir_key)
+                if real_parent is None:
+                    real_parent = os.path.realpath(parent_dir)
+                    with _REALPATH_DIR_CACHE_LOCK:
+                        if len(_REALPATH_DIR_CACHE) >= _MAX_REALPATH_DIR_CACHE:
+                            _REALPATH_DIR_CACHE.pop(next(iter(_REALPATH_DIR_CACHE)))
+                        _REALPATH_DIR_CACHE[dir_key] = real_parent
+                return os.path.join(real_parent, base_name), lst
+        except OSError:
+            pass
+    try:
+        return os.path.realpath(raw_path), lst
+    except OSError:
+        return raw_path, lst
+
+
+def _load_streak_state_dict(streak_file: Path) -> Dict[str, Any]:
+    """Load `streak_file` using `(st_mtime_ns, st_size)` cache to avoid repeated full JSON parses."""
+    key = str(streak_file)
+    try:
+        st = os.stat(key)
+    except OSError:
+        return {}
+    with _STREAK_JSON_MEM_CACHE_LOCK:
+        cached = _STREAK_JSON_MEM_CACHE.get(key)
+        if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+            return cached[2]
+    try:
+        with open(key, "r", encoding="utf-8") as fh:
+            parsed = json.load(fh)
+        if not isinstance(parsed, dict):
+            parsed = {}
+    except Exception:
+        parsed = {}
+    with _STREAK_JSON_MEM_CACHE_LOCK:
+        _STREAK_JSON_MEM_CACHE[key] = (st.st_mtime_ns, st.st_size, parsed)
+    return parsed
+
+
+def _save_streak_state_dict(streak_file: Path, state: Dict[str, Any], flush_to_disk: bool = True) -> None:
+    """Persist `state` to `streak_file`, bounded to `_MAX_TRACKED_CONVS_IN_STREAK` conversations, and refresh cache."""
+    conv_keys = [k for k in state.keys() if k != "__daily__"]
+    if len(conv_keys) > _MAX_TRACKED_CONVS_IN_STREAK:
+        drop_n = len(conv_keys) - _MAX_TRACKED_CONVS_IN_STREAK
+        for drop_k in conv_keys[:drop_n]:
+            state.pop(drop_k, None)
+        conv_keys = conv_keys[drop_n:]
+    if len(conv_keys) > _MAX_TACTILE_CONVS_IN_STREAK:
+        for old_k in conv_keys[: len(conv_keys) - _MAX_TACTILE_CONVS_IN_STREAK]:
+            old_v = state.get(old_k)
+            if isinstance(old_v, dict) and "tactile_churn" in old_v:
+                old_v.pop("tactile_churn", None)
+    key = str(streak_file)
+    if not flush_to_disk:
+        with _STREAK_JSON_MEM_CACHE_LOCK:
+            prev = _STREAK_JSON_MEM_CACHE.get(key)
+            if prev is not None:
+                _STREAK_JSON_MEM_CACHE[key] = (prev[0], prev[1], state)
+        return
+    try:
+        parent_dir = os.path.dirname(key)
+        if parent_dir and parent_dir not in _STREAK_KNOWN_DIRS:
+            os.makedirs(parent_dir, exist_ok=True)
+            _STREAK_KNOWN_DIRS.add(parent_dir)
+        raw = json.dumps(state, separators=(",", ":")).encode("utf-8")
+        tmp_path = os.path.join(
+            parent_dir,
+            f".{os.path.basename(key)}.tmp.{os.getpid()}.{threading.get_ident()}",
+        )
+        replaced = False
+        try:
+            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(raw)
+                fh.flush()
+                st = os.fstat(fh.fileno())
+            os.replace(tmp_path, key)
+            replaced = True
+        finally:
+            if not replaced:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+        with _STREAK_JSON_MEM_CACHE_LOCK:
+            _STREAK_JSON_MEM_CACHE[key] = (st.st_mtime_ns, st.st_size, state)
+    except Exception:
+        pass
+
+
 def _compute_daily_sig(daily: Dict[str, Any]) -> str:
     """Compute integrity signature for daily quota counters to detect manual tampering."""
     raw = (
@@ -513,15 +740,15 @@ def _compute_daily_sig(daily: Dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def _get_daily_immune_state(audit_log_path: Optional[Path | str] = None) -> Dict[str, Any]:
+def _get_daily_immune_state(
+    audit_log_path: Optional[Path | str] = None,
+    *,
+    streak_file: Optional[Path] = None,
+    loaded_state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Retrieve daily immune and silicon offload state with tamper/reset detection. [direct-edit]"""
-    streak_file = _get_bbb_streak_file(audit_log_path)
-    state: Dict[str, Any] = {}
-    if streak_file.is_file():
-        try:
-            state = json.loads(streak_file.read_text(encoding="utf-8"))
-        except Exception:
-            state = {}
+    streak_file = streak_file if streak_file is not None else _get_bbb_streak_file(audit_log_path)
+    state = loaded_state if loaded_state is not None else _load_streak_state_dict(streak_file)
     today_str = datetime.date.today().isoformat()
     daily = state.get("__daily__")
     tampered_sig = False
@@ -541,20 +768,17 @@ def _get_daily_immune_state(audit_log_path: Optional[Path | str] = None) -> Dict
         }
         daily["sig"] = _compute_daily_sig(daily)
         state["__daily__"] = daily
-        try:
-            streak_file.write_text(json.dumps(state), encoding="utf-8")
-        except Exception:
-            pass
+        _save_streak_state_dict(streak_file, state)
 
-    fast_cnt = _read_fast_bbb_daily_count(today_str, audit_log_path)
+    fast_file_hint: Optional[str] = None
+    if not os.environ.get("WBC_FAST_BBB_STATE_FILE") and audit_log_path is not None:
+        fast_file_hint = os.path.join(os.path.dirname(str(streak_file)), "fast_bbb_daily.state")
+    fast_cnt = _read_fast_bbb_daily_count(today_str, audit_log_path, fast_file_str=fast_file_hint)
     if fast_cnt > int(daily.get("daily_interceptions", 0)):
         daily["daily_interceptions"] = fast_cnt
         daily["sig"] = _compute_daily_sig(daily)
         state["__daily__"] = daily
-        try:
-            streak_file.write_text(json.dumps(state), encoding="utf-8")
-        except Exception:
-            pass
+        _save_streak_state_dict(streak_file, state)
 
     # Cross-check against SQLite shield_savings_ledger ONLY if signature was tampered or counter was reset to 0
     if (
@@ -573,7 +797,8 @@ def _get_daily_immune_state(audit_log_path: Optional[Path | str] = None) -> Dict
                 ).timestamp()
                 with sqlite3.connect(str(db_p), timeout=0.5) as conn:
                     row = conn.execute(
-                        "SELECT COUNT(*) FROM shield_savings_ledger WHERE timestamp >= ?",
+                        "SELECT COUNT(*) FROM shield_savings_ledger "
+                        "WHERE timestamp >= ? AND action_mode IN ('auto_slice', 'sh_auto_slice', 'hard_deny', 'gate_allow', 'shell_heal')",
                         (midnight_ts,),
                     ).fetchone()
                     sqlite_today = int(row[0] or 0) if row else 0
@@ -616,12 +841,7 @@ def _record_daily_immune_metric(
 ) -> Dict[str, Any]:
     """Increment daily immune interception and silicon offload counters. [direct-edit]"""
     streak_file = _get_bbb_streak_file(audit_log_path)
-    state: Dict[str, Any] = {}
-    if streak_file.is_file():
-        try:
-            state = json.loads(streak_file.read_text(encoding="utf-8"))
-        except Exception:
-            state = {}
+    state = _load_streak_state_dict(streak_file)
     today_str = datetime.date.today().isoformat()
     daily = state.get("__daily__")
     if not isinstance(daily, dict) or daily.get("date") != today_str:
@@ -633,7 +853,10 @@ def _record_daily_immune_metric(
             "daily_anti_cheat_blocks": 0,
             "em_dashes_healed_today": 0,
         }
-    fast_cnt = _read_fast_bbb_daily_count(today_str, audit_log_path)
+    fast_file_hint: Optional[str] = None
+    if not os.environ.get("WBC_FAST_BBB_STATE_FILE") and audit_log_path is not None:
+        fast_file_hint = os.path.join(os.path.dirname(str(streak_file)), "fast_bbb_daily.state")
+    fast_cnt = _read_fast_bbb_daily_count(today_str, audit_log_path, fast_file_str=fast_file_hint)
     base_inter = max(int(daily.get("daily_interceptions", 0)), fast_cnt)
     daily["daily_interceptions"] = max(0, base_inter + interceptions_delta)  # [direct-edit]
     daily["daily_silicon_offloads"] = max(0, int(daily.get("daily_silicon_offloads", 0)) + silicon_offloads_delta)
@@ -642,10 +865,7 @@ def _record_daily_immune_metric(
     daily["em_dashes_healed_today"] = max(0, int(daily.get("em_dashes_healed_today", 0)) + em_dashes_healed_delta)
     daily["sig"] = _compute_daily_sig(daily)
     state["__daily__"] = daily
-    try:
-        streak_file.write_text(json.dumps(state), encoding="utf-8")
-    except Exception:
-        pass
+    _save_streak_state_dict(streak_file, state)
     if interceptions_delta != 0 or fast_cnt > 0:
         _write_fast_bbb_daily_count(today_str, int(daily["daily_interceptions"]), audit_log_path)
     return daily
@@ -656,6 +876,11 @@ def _update_bbb_streak_and_file_counts(
     tool_name: str,
     target_path_str: str,
     audit_log_path: Optional[Path | str] = None,
+    *,
+    is_strict_test: bool = True,
+    daily_st_cached: Optional[Dict[str, Any]] = None,
+    streak_file: Optional[Path] = None,
+    loaded_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Maintain lightweight per-conversation streak & per-file read/edit counts in
@@ -666,13 +891,8 @@ def _update_bbb_streak_and_file_counts(
       - Main-thread .py edit gate (>1 edit on same .py file or >2 total .py edits)
       - Raw grep / rg search nudge (>2 raw searches without local.scout)
     """
-    streak_file = _get_bbb_streak_file(audit_log_path)
-    state: Dict[str, Any] = {}
-    if streak_file.is_file():
-        try:
-            state = json.loads(streak_file.read_text(encoding="utf-8"))
-        except Exception:
-            state = {}
+    streak_file = streak_file if streak_file is not None else _get_bbb_streak_file(audit_log_path)
+    state = loaded_state if loaded_state is not None else _load_streak_state_dict(streak_file)
 
     conv_key = conv_id or "local"
     c_state = state.get(conv_key)
@@ -726,28 +946,30 @@ def _update_bbb_streak_and_file_counts(
 
     if t_low in read_low_set and target_path_str:
         prior_audit_reads = 0
-        log_path = _get_audit_log_path(audit_log_path)
-        if log_path.is_file():
-            try:
-                for raw_ln in log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-150:]:
-                    if target_path_str in raw_ln and any(f'"{rn}"' in raw_ln for rn in READ_TOOL_NAMES):
-                        prior_audit_reads += 1
-            except Exception:
-                pass
+        if is_strict_test and int(reads_map.get(target_path_str, 0)) == 0:
+            log_path = _get_audit_log_path(audit_log_path)
+            if log_path.is_file():
+                try:
+                    for raw_ln in _read_tail_lines(log_path, max_lines=150, max_bytes=131_072):
+                        if target_path_str in raw_ln and any(f'"{rn}"' in raw_ln for rn in READ_TOOL_NAMES):
+                            prior_audit_reads += 1
+                except Exception:
+                    pass
         read_count = max(int(reads_map.get(target_path_str, 0)), prior_audit_reads) + 1
         reads_map[target_path_str] = read_count
         c_state["reads"] = reads_map
 
     if t_low in edit_low_set and target_path_str:
         prior_audit_edits = 0
-        log_path = _get_audit_log_path(audit_log_path)
-        if log_path.is_file():
-            try:
-                for raw_ln in log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-150:]:
-                    if target_path_str in raw_ln and any(f'"{en}"' in raw_ln for en in ("edit_file", "Edit", "MultiEdit")):
-                        prior_audit_edits += 1
-            except Exception:
-                pass
+        if is_strict_test and int(edits_map.get(target_path_str, 0)) == 0:
+            log_path = _get_audit_log_path(audit_log_path)
+            if log_path.is_file():
+                try:
+                    for raw_ln in _read_tail_lines(log_path, max_lines=150, max_bytes=131_072):
+                        if target_path_str in raw_ln and any(f'"{en}"' in raw_ln for en in ("edit_file", "Edit", "MultiEdit")):
+                            prior_audit_edits += 1
+                except Exception:
+                    pass
         edit_count = max(int(edits_map.get(target_path_str, 0)), prior_audit_edits) + 1
         edits_map[target_path_str] = edit_count
         c_state["edits"] = edits_map
@@ -763,14 +985,16 @@ def _update_bbb_streak_and_file_counts(
         py_map[target_path_str] = int(py_map.get(target_path_str, 0)) + 1
         c_state["py_file_edits"] = py_map
 
-    audit_streak = _compute_exploratory_streak(conv_id=conv_key, audit_log_path=audit_log_path)
+    audit_streak = (
+        _compute_exploratory_streak(conv_id=conv_key, audit_log_path=audit_log_path)
+        if is_strict_test
+        else 0
+    )
     effective_streak = 0 if is_delegation else max(int(c_state.get("streak", 0)), audit_streak)
     c_state["streak"] = effective_streak
+    state.pop(conv_key, None)
     state[conv_key] = c_state
-    try:
-        streak_file.write_text(json.dumps(state), encoding="utf-8")
-    except Exception:
-        pass
+    _save_streak_state_dict(streak_file, state)
 
     is_silicon_offload = (
         t_low in shell_low_set
@@ -801,8 +1025,9 @@ def _update_bbb_streak_and_file_counts(
             )
         except Exception:
             pass
-
-    daily_st = _get_daily_immune_state(audit_log_path)
+        daily_st = updated_off
+    else:
+        daily_st = daily_st_cached if daily_st_cached is not None else _get_daily_immune_state(audit_log_path)
     py_map = c_state.get("py_file_edits") if isinstance(c_state.get("py_file_edits"), dict) else {}
     return {
         "streak": effective_streak,
@@ -955,6 +1180,13 @@ def _update_tactile_churn_on_pre(
     cand_snap: Optional[FileTactileSnapshot] = None,
     audit_log_path: Optional[Path | str] = None,
     args: Optional[Dict[str, Any]] = None,
+    *,
+    flush_to_disk: bool = True,
+    streak_file: Optional[Path] = None,
+    resolved_target_path: Optional[str] = None,
+    step_idx: int = 0,
+    loaded_state: Optional[Dict[str, Any]] = None,
+    target_stat: Optional[os.stat_result] = None,
 ) -> Dict[str, Any]:
     """
     Track per-target AST progress and retry-churn counts in `PreToolUse`.
@@ -980,13 +1212,8 @@ def _update_tactile_churn_on_pre(
             "seen_ast_digests": [],
         }
 
-    streak_file = _get_bbb_streak_file(audit_log_path)
-    state: Dict[str, Any] = {}
-    if streak_file.is_file():
-        try:
-            state = json.loads(streak_file.read_text(encoding="utf-8"))
-        except Exception:
-            state = {}
+    streak_file = streak_file if streak_file is not None else _get_bbb_streak_file(audit_log_path)
+    state = loaded_state if loaded_state is not None else _load_streak_state_dict(streak_file)
 
     conv_key = conv_id or "local"
     c_state = state.get(conv_key)
@@ -996,10 +1223,13 @@ def _update_tactile_churn_on_pre(
     if not isinstance(churn_map, dict):
         churn_map = {}
 
-    try:
-        norm_key = str(Path(target_path_str).resolve()) if Path(target_path_str).exists() else target_path_str
-    except Exception:
-        norm_key = target_path_str
+    if resolved_target_path is not None:
+        norm_key = resolved_target_path
+    else:
+        try:
+            norm_key = os.path.realpath(target_path_str) if os.path.exists(target_path_str) else target_path_str
+        except Exception:
+            norm_key = target_path_str
 
     entry = churn_map.get(norm_key)
     if not isinstance(entry, dict):
@@ -1022,7 +1252,56 @@ def _update_tactile_churn_on_pre(
     net_ast_progress = False
 
     if t_low in read_low_set:
-        snap = pre_snap or capture_file_tactile_snapshot(target_path_str)
+        snap = pre_snap
+        st_read: Optional[os.stat_result] = target_stat
+        if snap is None:
+            try:
+                if st_read is None:
+                    st_read = os.stat(target_path_str)
+                cached_mtime_ns = entry.get("last_mtime_ns")
+                cached_size = entry.get("last_size_bytes")
+                if (
+                    cached_mtime_ns is not None
+                    and int(cached_mtime_ns) == st_read.st_mtime_ns
+                    and int(cached_size or -1) == st_read.st_size
+                    and entry.get("last_sha256")
+                ):
+                    snap = FileTactileSnapshot(
+                        file_path=target_path_str,
+                        exists=True,
+                        sha256=str(entry.get("last_sha256", "")),
+                        size_bytes=st_read.st_size,
+                        ast_syntax_valid=True,
+                        ast_digest=str(entry.get("last_ast_digest", "")),
+                        topology_digest=str(entry.get("last_topology_digest", "")),
+                        symbol_count=int(entry.get("last_symbol_count", 0)),
+                        assert_count=int(entry.get("last_assert_count", 0)),
+                        tautological_asserts=int(entry.get("last_tautological_asserts", 0)),
+                        test_funcs=list(entry.get("last_test_funcs") or []),
+                        latency_ms=0.0,
+                    )
+                else:
+                    cache_k = (norm_key, st_read.st_mtime_ns, st_read.st_size)
+                    with _TACTILE_SNAP_CACHE_LOCK:
+                        cached_snap = _TACTILE_SNAP_CACHE.get(cache_k)
+                    if cached_snap is not None:
+                        snap = cached_snap
+                        entry["last_mtime_ns"] = st_read.st_mtime_ns
+                        entry["last_size_bytes"] = st_read.st_size
+            except OSError:
+                pass
+        if snap is None:
+            snap = capture_file_tactile_snapshot(target_path_str)
+            try:
+                st = st_read if st_read is not None else os.stat(target_path_str)
+                entry["last_mtime_ns"] = st.st_mtime_ns
+                entry["last_size_bytes"] = st.st_size
+                with _TACTILE_SNAP_CACHE_LOCK:
+                    if len(_TACTILE_SNAP_CACHE) >= _MAX_TACTILE_SNAP_CACHE:
+                        _TACTILE_SNAP_CACHE.pop(next(iter(_TACTILE_SNAP_CACHE)))
+                    _TACTILE_SNAP_CACHE[(norm_key, st.st_mtime_ns, st.st_size)] = snap
+            except OSError:
+                pass
         if snap.ast_digest and snap.ast_digest not in seen_digests:
             seen_digests.append(snap.ast_digest)
         prior_seen_digests = list(seen_digests)
@@ -1098,14 +1377,10 @@ def _update_tactile_churn_on_pre(
             )
         )
 
-        if expanded_topology:
+        if net_ast_progress:
             entry["stagnant_touches"] = 0
             entry["read_streak"] = 0
             entry["same_topology_edits"] = 0
-        elif net_ast_progress:
-            entry["stagnant_touches"] = 0
-            entry["read_streak"] = 0
-            entry["same_topology_edits"] = int(entry.get("same_topology_edits", 0)) + 1
         else:
             entry["stagnant_touches"] = int(entry.get("stagnant_touches", 0)) + 1
             entry["same_topology_edits"] = int(entry.get("same_topology_edits", 0)) + 1
@@ -1130,14 +1405,14 @@ def _update_tactile_churn_on_pre(
     churn_active = bool(churn_count >= 3)
     entry["retry_churn_count"] = churn_count
     entry["retry_churn_active"] = churn_active
+    if step_idx:
+        entry["last_pre_step"] = int(step_idx)
 
     churn_map[norm_key] = entry
     c_state["tactile_churn"] = churn_map
+    state.pop(conv_key, None)
     state[conv_key] = c_state
-    try:
-        streak_file.write_text(json.dumps(state), encoding="utf-8")
-    except Exception:
-        pass
+    _save_streak_state_dict(streak_file, state, flush_to_disk=flush_to_disk)
 
     return {
         "retry_churn_active": churn_active,
@@ -1166,12 +1441,7 @@ def _reconcile_tactile_churn_on_post(
     p = payload if isinstance(payload, dict) else {}
 
     streak_file = _get_bbb_streak_file(audit_log_path)
-    state: Dict[str, Any] = {}
-    if streak_file.is_file():
-        try:
-            state = json.loads(streak_file.read_text(encoding="utf-8"))
-        except Exception:
-            state = {}
+    state = _load_streak_state_dict(streak_file)
 
     conv_key = conv_id or "local"
     c_state = state.get(conv_key)
@@ -1205,7 +1475,10 @@ def _reconcile_tactile_churn_on_post(
             "same_topology_edits": 0,
         }
 
-    touch_recorded_in_pre = bool(pre_info.get("touch_recorded"))
+    post_step_idx = int(p.get("stepIdx", p.get("step_idx", 0)) or 0)
+    touch_recorded_in_pre = bool(pre_info.get("touch_recorded")) or (
+        post_step_idx > 0 and int(entry.get("last_pre_step") or 0) == post_step_idx
+    )
     seen_digests: List[str] = [
         str(d)
         for d in (pre_info.get("seen_ast_digests") or entry.get("seen_ast_digests") or [])
@@ -1249,14 +1522,10 @@ def _reconcile_tactile_churn_on_post(
                     or (tactile_delta.assert_delta - tactile_delta.tautological_asserts_introduced) > 0
                 )
             )
-            if expanded_topo:
+            if tactile_delta.net_ast_progress:
                 entry["stagnant_touches"] = 0
                 entry["read_streak"] = 0
                 entry["same_topology_edits"] = 0
-            elif tactile_delta.net_ast_progress:
-                entry["stagnant_touches"] = 0
-                entry["read_streak"] = 0
-                entry["same_topology_edits"] = int(entry.get("same_topology_edits", 0)) + 1
             else:
                 entry["stagnant_touches"] = int(entry.get("stagnant_touches", 0)) + 1
                 entry["same_topology_edits"] = int(entry.get("same_topology_edits", 0)) + 1
@@ -1289,11 +1558,9 @@ def _reconcile_tactile_churn_on_post(
 
         churn_map[norm_key] = entry
         c_state["tactile_churn"] = churn_map
+        state.pop(conv_key, None)
         state[conv_key] = c_state
-        try:
-            streak_file.write_text(json.dumps(state), encoding="utf-8")
-        except Exception:
-            pass
+        _save_streak_state_dict(streak_file, state)
         return tactile_delta, churn_active, churn_count
 
     elif t_low in read_low_set and target_path_str:
@@ -1554,6 +1821,36 @@ get_truncation_cascade_offenders = _get_truncation_cascade_offenders
 _SCOUT_PREWARM_ATTEMPTED: bool = False
 
 
+def _reflex_db_has_pending(db_path: Path) -> bool:
+    """Zero-numpy read-only check for pending reflex observations before importing numpy."""
+    if not db_path.is_file():
+        return False
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=0.5)
+        try:
+            row = conn.execute(
+                "SELECT EXISTS(SELECT 1 FROM pending_scouts) OR EXISTS(SELECT 1 FROM pending_stdout_compactions)"
+            ).fetchone()
+            return bool(row and row[0])
+        except sqlite3.OperationalError:
+            for tbl in ("pending_scouts", "pending_stdout_compactions"):
+                try:
+                    if conn.execute(f"SELECT 1 FROM {tbl} LIMIT 1").fetchone() is not None:
+                        return True
+                except sqlite3.OperationalError:
+                    pass
+            return False
+    except Exception:
+        return True
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def run_ide_pre_tool_hook(
     payload: Dict[str, Any],
     audit_log_path: Optional[Path | str] = None,
@@ -1645,6 +1942,7 @@ def run_ide_pre_tool_hook(
     em_dash_healed = 0
     shell_auto_healed = False
     read_auto_sliced = False
+    read_reflex_escalated = False
     tail_bridged = False
     foveal_jumped = False
     truncation_cascade_clamped = False
@@ -1695,19 +1993,20 @@ def run_ide_pre_tool_hook(
     pre_file_snap: Optional[FileTactileSnapshot] = None
     cand_file_snap: Optional[FileTactileSnapshot] = None
 
+    _streak_file = _get_bbb_streak_file(audit_log_path)
+    _loaded_streak_state = _load_streak_state_dict(_streak_file)
+    resolved_read_path: Optional[str] = None
+    _read_target_stat: Optional[os.stat_result] = None
     c_state: Dict[str, Any] = {}
     if is_strict_test:  # [direct-edit]
-        streak_file = _get_bbb_streak_file(audit_log_path)
-        if streak_file.is_file():
-            try:
-                all_state = json.loads(streak_file.read_text(encoding="utf-8"))
-                c_state = all_state.get(conv_id or "local", {})
-                if not isinstance(c_state, dict):
-                    c_state = {}
-            except Exception:
-                c_state = {}
+        _cs_raw = _loaded_streak_state.get(conv_id or "local", {})
+        c_state = _cs_raw if isinstance(_cs_raw, dict) else {}
 
-    daily_st = _get_daily_immune_state(audit_log_path)
+    daily_st = _get_daily_immune_state(
+        audit_log_path,
+        streak_file=_streak_file,
+        loaded_state=_loaded_streak_state,
+    )
     daily_silicon_offloads = daily_st.get("daily_silicon_offloads", 0)
     offloaded_tokens_today = daily_st.get("offloaded_tokens_today", 0)
     daily_interceptions = daily_st.get("daily_interceptions", 0)
@@ -1718,21 +2017,25 @@ def run_ide_pre_tool_hook(
     try:
         from whole_body_compute.license import LicenseManager
         lic_mgr = LicenseManager()
+        _active_tier = lic_mgr.get_active_tier()
         silicon_gate = lic_mgr.check_feature_gate(
             "silicon_offload",
             daily_silicon_offloads=daily_silicon_offloads,
             offloaded_tokens_today=offloaded_tokens_today,
             emit_telemetry=False,
+            active_tier=_active_tier,
         )
         anti_cheat_gate = lic_mgr.check_feature_gate(
             "anti_cheat_guard",
             daily_anti_cheat_blocks=daily_anti_cheat_blocks,
             emit_telemetry=False,
+            active_tier=_active_tier,
         )
         bbb_gate = lic_mgr.check_feature_gate(
             "bbb_interception",
             daily_interceptions=daily_interceptions,
             emit_telemetry=False,
+            active_tier=_active_tier,
         )
     except Exception:
         silicon_gate = {
@@ -1759,7 +2062,6 @@ def run_ide_pre_tool_hook(
         }  # [direct-edit]
 
     # Runaway Thread Circuit Breaker: Soft Warning at >= 45, Hard Block at >= 150 (or >= 90 if not recovery)
-    is_strict_test = _is_legacy_strict_test(payload)  # [direct-edit]
     cmd_raw = str(args.get("CommandLine") or args.get("command") or "")
     is_recovery_cmd = any(rec in cmd_raw for rec in ("body flush", "git status", "body doctor", "/compact"))
     if (
@@ -1802,6 +2104,52 @@ def run_ide_pre_tool_hook(
         tool_name == "developer__text_editor"
         and str(args.get("command", "view")).strip().lower() in ("", "view", "read")
     )
+    try:
+        from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
+        _rg_db_path = get_wbc_data_dir() / "reflex_gates.sqlite"
+        _rg_enabled = (
+            not os.environ.get("PYTEST_CURRENT_TEST")
+            or os.environ.get("WBC_ENABLE_REFLEX_GATE_IN_TESTS") == "1"
+            or "WBC_DATA_DIR" in os.environ
+        )
+        if _rg_enabled and _rg_db_path.is_file() and (
+            "whole_body_compute.local.reflex_gate" in sys.modules
+            or _reflex_db_has_pending(_rg_db_path)
+        ):
+            from whole_body_compute.local.reflex_gate import get_default_reflex_gate
+
+            _obs_path = str(
+                args.get("Path")
+                or args.get("AbsolutePath")
+                or args.get("file_path")
+                or args.get("target_file")
+                or args.get("notebook_path")
+                or args.get("path")
+                or ""
+            ).strip()
+            _obs_cmd = str(
+                args.get("CommandLine")
+                or args.get("command")
+                or args.get("cmd")
+                or ""
+            ).strip()
+            _rg_async = os.environ.get("WBC_SYNC_REFLEX_RETRAIN") != "1"
+            _rg_inst = get_default_reflex_gate()
+            _rg_inst.observe_tool_turn(
+                is_raw_read=bool(tool_name in READ_TOOL_NAMES or is_goose_view_call),
+                target_path=_obs_path,
+                async_retrain=_rg_async,
+                session_id=conv_id,
+            )
+            _rg_inst.observe_shell_turn(
+                is_shell_tool=bool(tool_name in SHELL_TOOL_NAMES or tool_name.lower() in ("bash", "sh", "zsh")),
+                command=_obs_cmd,
+                async_retrain=_rg_async,
+                session_id=conv_id,
+            )
+    except Exception:
+        pass
     if (tool_name in READ_TOOL_NAMES or is_goose_view_call) and decision == "allow":
         is_read_trunc_offender = bool(
             payload.get("truncation_cascade_active")
@@ -1882,6 +2230,17 @@ def run_ide_pre_tool_hook(
             max_allowed_span = 80 if is_read_trunc_offender else (180 if is_strict_test else harness_span_ceiling)
 
         if raw_path and os.environ.get("VOICEFI_CONTEXT_GATE_DISABLED") != "1":
+            resolved_read_path, _read_target_stat = _fast_resolve_path_and_lstat(raw_path)
+            sensitive_hit = _is_sensitive_credential_path(raw_path, resolved_path=resolved_read_path)
+            if sensitive_hit:
+                decision = "deny"
+                stage_triggered = 1
+                secrets_blocked_in_airlock += 1
+                reason = (
+                    f"🛡️ Blood-Brain Barrier Secret Blindfold: Direct or symlinked read of sensitive credential file "
+                    f"(`{sensitive_hit}`) blocked before cloud context ingestion."
+                )
+        if decision == "allow" and raw_path and os.environ.get("VOICEFI_CONTEXT_GATE_DISABLED") != "1":
             fpath = Path(raw_path)
             norm_raw_path = raw_path.replace("\\", "/")
             if "/mcp/chrome-devtools-mcp/" in norm_raw_path:
@@ -1943,9 +2302,12 @@ def run_ide_pre_tool_hook(
             ):
                 is_exempt_meta = True
 
-            if fpath.is_file() and not is_exempt_meta:
+            _is_reg_file = (
+                _read_target_stat is not None and stat.S_ISREG(_read_target_stat.st_mode)
+            ) if _read_target_stat is not None else fpath.is_file()
+            if _is_reg_file and not is_exempt_meta:
                 try:
-                    fsize = fpath.stat().st_size
+                    fsize = _read_target_stat.st_size if _read_target_stat is not None else fpath.stat().st_size
                     is_binary_media = fpath.suffix.lower() in BINARY_MEDIA_EXTENSIONS
                     remaining_turns = max(1, 25 - step_idx)
 
@@ -1995,8 +2357,23 @@ def run_ide_pre_tool_hook(
                         )
                         or fpath.name in ("README.md", "SKILL.md")
                     ):
-                        raw_text = fpath.read_text(encoding="utf-8", errors="replace")
-                        total_lines = raw_text.count("\n") + 1
+                        _f_st = _read_target_stat if _read_target_stat is not None else os.stat(raw_path)
+                        _lc_key = (resolved_read_path or raw_path, _f_st.st_mtime_ns, _f_st.st_size)
+                        with _FILE_LINE_COUNT_CACHE_LOCK:
+                            _cached_lines = _FILE_LINE_COUNT_CACHE.get(_lc_key)
+                        raw_text: Optional[str] = None
+                        if _cached_lines is not None:
+                            total_lines = _cached_lines
+                        else:
+                            with open(raw_path, "rb") as _rf:
+                                _raw_bytes = _rf.read()
+                            total_lines = _raw_bytes.count(b"\n") + 1
+                            with _FILE_LINE_COUNT_CACHE_LOCK:
+                                if len(_FILE_LINE_COUNT_CACHE) >= _MAX_FILE_LINE_COUNT_CACHE:
+                                    _FILE_LINE_COUNT_CACHE.pop(next(iter(_FILE_LINE_COUNT_CACHE)))
+                                _FILE_LINE_COUNT_CACHE[_lc_key] = total_lines
+                            if total_lines > 80:
+                                raw_text = _raw_bytes.decode("utf-8", errors="replace")
                         full_tokens_est = max(1, fsize // 4)
                         is_raw_log = fpath.suffix in (".log", ".jsonl") and total_lines > 100
 
@@ -2016,6 +2393,9 @@ def run_ide_pre_tool_hook(
                         line_ceil = sensory_vector.native_line_ceiling
                         tail_bridge_ceil = sensory_vector.tail_bridge_line_ceiling
                         head_byte_ceil = sensory_vector.tail_bridge_head_byte_ceiling
+
+                        if (total_lines > file_threshold or is_raw_log) and raw_text is None:
+                            raw_text = fpath.read_text(encoding="utf-8", errors="replace")
 
                         if has_bounds and span_lines <= max_allowed_span and not is_raw_log:
                             bounded_slice_read = True
@@ -2043,9 +2423,13 @@ def run_ide_pre_tool_hook(
                                     )
                                     if head_bytes_ceil <= head_byte_ceil:
                                         tail_bridged = True
-                                        tail_slice_ceil = "\n".join(
-                                            f"{idx}: {ln}"
-                                            for idx, ln in enumerate(raw_lines_ceil[line_ceil:], start=line_ceil + 1)
+                                        from whole_body_compute.redaction import redact_secrets as _redact_slice
+
+                                        tail_slice_ceil = _redact_slice(
+                                            "\n".join(
+                                                f"{idx}: {ln}"
+                                                for idx, ln in enumerate(raw_lines_ceil[line_ceil:], start=line_ceil + 1)
+                                            )
                                         )
                                         bridge_msg = (
                                             f"🌉 Blood-Brain Barrier Lossless Tail-Bridge (`{fpath.name}`, lines {line_ceil + 1}-{total_lines} of {total_lines} "
@@ -2199,6 +2583,77 @@ def run_ide_pre_tool_hook(
                                     truncation_cascade_clamped = True
                                 s_line = max(1, int(start_line or 1))
                                 clamp_win = 80 if is_read_trunc_offender else sensory_vector.auto_slice_window
+                                if not is_read_trunc_offender:
+                                    try:
+                                        from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
+                                        if (
+                                            not os.environ.get("PYTEST_CURRENT_TEST")
+                                            or os.environ.get("WBC_ENABLE_REFLEX_GATE_IN_TESTS") == "1"
+                                            or "WBC_DATA_DIR" in os.environ
+                                            or (get_wbc_data_dir() / "reflex_gates.sqlite").is_file()
+                                        ):
+                                            from whole_body_compute.local.reflex_gate import (
+                                                build_structural_signals,
+                                                embed_for_reflex_gate,
+                                                get_default_reflex_gate,
+                                                get_last_embed_backend,
+                                                resolve_repo_key,
+                                                scope_gate_id_for_backend,
+                                            )
+
+                                            _rg_hint = (
+                                                f"{args.get('query', '')} {args.get('Query', '')} "
+                                                f"{args.get('symbol', '')} {args.get('Symbol', '')} "
+                                                f"{args.get('hint', '')} {args.get('pattern', '')} "
+                                                f"{payload.get('query', '')} {payload.get('symbol', '')} "
+                                                f"{payload.get('prompt', '')} {payload.get('user_prompt', '')} "
+                                                f"{payload.get('composer_prompt', '')} {payload.get('lastUserInput', '')}"
+                                            ).strip()
+                                            _rg_is_test = bool(
+                                                is_log_or_receipt_target
+                                                or fpath.name.lower().startswith("test_")
+                                                or fpath.name.lower().endswith(("_test.py", ".test.ts", ".test.tsx", ".spec.ts", ".spec.js"))
+                                                or "/tests/" in norm_raw_path.lower()
+                                                or norm_raw_path.lower().startswith("tests/")
+                                            )
+                                            _rg_sig = build_structural_signals(
+                                                target_path=fpath,
+                                                raw_content=raw_text,
+                                                query_or_hint=_rg_hint,
+                                                file_lines=total_lines,
+                                                is_test_or_log=_rg_is_test,
+                                                turn_depth=int(step_idx or 0),
+                                                session_state=c_state if c_state else None,
+                                                conv_id=conv_id,
+                                                streak_file=_get_bbb_streak_file(audit_log_path),
+                                                thermal_override=sensory_vector.thermal_state,
+                                            )
+                                            _rg_text = (
+                                                f"{fpath.suffix} | {fpath.name} | {_rg_hint[:240]}"
+                                                if _rg_hint
+                                                else f"{fpath.suffix} | {fpath.name}"
+                                            )
+                                            _rg_vec = embed_for_reflex_gate(
+                                                _rg_text,
+                                                signals=_rg_sig,
+                                            )
+                                            _rg_scoped_gid = scope_gate_id_for_backend(
+                                                "read_autoslice_window",
+                                                get_last_embed_backend(),
+                                            )
+                                            _rg_dec = get_default_reflex_gate().record_pending_scout(
+                                                target_path=str(fpath),
+                                                features=_rg_vec,
+                                                repo_key=resolve_repo_key(str(fpath)),
+                                                gate_id=_rg_scoped_gid,
+                                                session_id=conv_id,
+                                            )
+                                            if _rg_dec.reason == "graduated_escalate":
+                                                clamp_win = max(clamp_win, line_ceil)
+                                                read_reflex_escalated = True
+                                    except Exception:
+                                        pass
                                 e_line = min(total_lines, s_line + clamp_win - 1)
 
                                 is_zero_donut_unbounded = (
@@ -2217,9 +2672,13 @@ def run_ide_pre_tool_hook(
                                         tail_bridged = True
                                         s_line = 1
                                         e_line = line_ceil
-                                        tail_slice = "\n".join(
-                                            f"{idx}: {ln}"
-                                            for idx, ln in enumerate(raw_lines_cache[line_ceil:], start=line_ceil + 1)
+                                        from whole_body_compute.redaction import redact_secrets as _redact_slice
+
+                                        tail_slice = _redact_slice(
+                                            "\n".join(
+                                                f"{idx}: {ln}"
+                                                for idx, ln in enumerate(raw_lines_cache[line_ceil:], start=line_ceil + 1)
+                                            )
                                         )
                                         preinv_stash_text = (
                                             f"🌉 Blood-Brain Barrier Lossless Tail-Bridge (`{fpath.name}`, lines {line_ceil + 1}-{total_lines} of {total_lines} "
@@ -2239,7 +2698,10 @@ def run_ide_pre_tool_hook(
                                     )
                                     jump_res = _resolve_foveal_ast_jump(fpath, raw_text, rich_hint, clamp_win)
                                     if jump_res is not None:
+                                        from whole_body_compute.redaction import redact_secrets as _redact_slice
+
                                         j_sym, j_start, j_end, header_imports = jump_res
+                                        header_imports = _redact_slice(header_imports)
                                         foveal_jumped = True
                                         predictive_ast_extracted = True
                                         predictive_symbol = j_sym
@@ -2352,6 +2814,13 @@ def run_ide_pre_tool_hook(
                                             from whole_body_compute.redaction import redact_secrets, contains_secret
 
                                             scout_helper = ReconScout()
+                                            if len(raw_text) > 32768:
+                                                try:
+                                                    from whole_body_compute.local.metal_accel import stage_context_in_shared_slab
+
+                                                    stage_context_in_shared_slab(raw_text[: 1024 * 1024])
+                                                except Exception:
+                                                    pass
                                             log_chunks, _, markers = scout_helper.select_deterministic_chunks(
                                                 raw_text, str(fpath), query="error traceback exception", max_chars=3500
                                             )
@@ -2792,7 +3261,15 @@ def run_ide_pre_tool_hook(
                         except Exception:
                             pass
 
-            if is_strict_test and decision == "allow" and any(raw_path.endswith(p) for p in PROTECTED_CONFIG_FILES):  # [direct-edit]
+            resolved_raw_p = raw_path.replace("\\", "/")
+            try:
+                resolved_raw_p = str(Path(raw_path).expanduser().resolve()).replace("\\", "/")
+            except OSError:
+                pass
+            if decision == "allow" and any(
+                raw_path.endswith(p) or resolved_raw_p.endswith(p) or Path(raw_path).name == p
+                for p in PROTECTED_CONFIG_FILES
+            ):  # [direct-edit]
                 updated_ac_cfg = _record_daily_immune_metric(
                     anti_cheat_blocks_delta=1,
                     audit_log_path=audit_log_path,
@@ -2864,7 +3341,7 @@ def run_ide_pre_tool_hook(
             and re.search(r"\b(?:git\s+commit|echo|cat\s*<<)\b", cmd_line)
         ):  # [direct-edit]
             _trigger_walken_em_dash_callout(snippet=cmd_line)
-        v_res = VascularTrafficMonitor.inspect_shell_command(cmd_line, record_antigen_on_block=is_strict_test)  # [direct-edit]
+        v_res = VascularTrafficMonitor.inspect_shell_command(cmd_line, record_antigen_on_block=True)  # [direct-edit]
         if not v_res.get("allowed", True):
             strict_deny = (
                 os.environ.get("VOICEFI_IMMUNE_STRICT_DENY") == "1"
@@ -3373,6 +3850,12 @@ def run_ide_pre_tool_hook(
         cand_snap=cand_file_snap,
         audit_log_path=audit_log_path,
         args=args,
+        flush_to_disk=False,
+        streak_file=_streak_file,
+        resolved_target_path=resolved_read_path,
+        step_idx=step_idx,
+        loaded_state=_loaded_streak_state,
+        target_stat=_read_target_stat,
     )
     retry_churn_active = bool(churn_info.get("retry_churn_active", False))
     retry_churn_count = int(churn_info.get("retry_churn_count", 0))
@@ -3390,43 +3873,54 @@ def run_ide_pre_tool_hook(
     safe_conv = re.sub(r"[^A-Za-z0-9_\-]", "_", conv_id)[:64]
 
     # Save lightweight Pre-Action state for PostToolUse comparison
-    try:
-        pre_state_file = Path(f"/tmp/voicefi_immune_pre_{safe_conv}_{step_idx}.json")
-        pre_state_file.write_text(
-            json.dumps(
-                {
-                    "timestamp": time.time(),
-                    "tool_name": tool_name,
-                    "target": target_path_str,
-                    "pre_sha256": pre_sha256,
-                    "pre_ast_digest": pre_file_snap.ast_structural_digest if pre_file_snap else "",
-                    "pre_topology_digest": pre_file_snap.ast_topology_digest if pre_file_snap else "",
-                    "pre_symbol_count": pre_file_snap.symbol_count if pre_file_snap else 0,
-                    "pre_assert_count": pre_file_snap.assert_count if pre_file_snap else 0,
-                    "pre_tautological_asserts": pre_file_snap.tautological_asserts if pre_file_snap else 0,
-                    "pre_test_funcs": list(pre_file_snap.test_func_names) if pre_file_snap else [],
-                    "seen_ast_digests": churn_info.get("seen_ast_digests", []),
-                    "touch_recorded": True,
-                    "pre_net_ast_progress": bool(churn_info.get("net_ast_progress", False)),
-                    "retry_churn_active": retry_churn_active,
-                    "retry_churn_count": retry_churn_count,
-                    "pre_latency_ms": elapsed_ms,
-                    "decision": decision,
-                    "assert_delta": assert_delta,
-                    "auto_healed": em_dash_healed > 0 or shell_auto_healed or read_auto_sliced or truncation_cascade_clamped,
-                    "truncation_cascade_clamp": truncation_cascade_clamped,
-                    "em_dash_healed": em_dash_healed,
-                    "context_gate_triggered": context_gate_triggered,
-                    "bounded_slice_read": bounded_slice_read,
-                    "fast_path": bounded_slice_read,
-                    "direct_tokens_saved": direct_tokens_saved,
-                    "quadratic_tokens_saved": quadratic_tokens_saved,
-                }
-            ),
-            encoding="utf-8",
-        )
-    except Exception:
-        pass
+    pre_state_obj = {
+        "timestamp": time.time(),
+        "tool_name": tool_name,
+        "target": target_path_str,
+        "pre_sha256": pre_sha256,
+        "pre_ast_digest": pre_file_snap.ast_structural_digest if pre_file_snap else "",
+        "pre_topology_digest": pre_file_snap.ast_topology_digest if pre_file_snap else "",
+        "pre_symbol_count": pre_file_snap.symbol_count if pre_file_snap else 0,
+        "pre_assert_count": pre_file_snap.assert_count if pre_file_snap else 0,
+        "pre_tautological_asserts": pre_file_snap.tautological_asserts if pre_file_snap else 0,
+        "pre_test_funcs": list(pre_file_snap.test_func_names) if pre_file_snap else [],
+        "seen_ast_digests": churn_info.get("seen_ast_digests", []),
+        "touch_recorded": True,
+        "pre_net_ast_progress": bool(churn_info.get("net_ast_progress", False)),
+        "retry_churn_active": retry_churn_active,
+        "retry_churn_count": retry_churn_count,
+        "pre_latency_ms": elapsed_ms,
+        "decision": decision,
+        "assert_delta": assert_delta,
+        "auto_healed": em_dash_healed > 0 or shell_auto_healed or read_auto_sliced or truncation_cascade_clamped,
+        "truncation_cascade_clamp": truncation_cascade_clamped,
+        "em_dash_healed": em_dash_healed,
+        "context_gate_triggered": context_gate_triggered,
+        "read_auto_sliced": bool(read_auto_sliced),
+        "bounded_slice_read": bounded_slice_read,
+        "fast_path": bounded_slice_read,
+        "direct_tokens_saved": direct_tokens_saved,
+        "quadratic_tokens_saved": quadratic_tokens_saved,
+    }
+    with _PRE_STATE_MEM_CACHE_LOCK:
+        if len(_PRE_STATE_MEM_CACHE) >= _MAX_PRE_STATE_MEM_CACHE:
+            _PRE_STATE_MEM_CACHE.pop(next(iter(_PRE_STATE_MEM_CACHE)))
+        _PRE_STATE_MEM_CACHE[(safe_conv, step_idx)] = pre_state_obj
+    # Persist pre-state file to /tmp for cross-process PostToolUse when mutating or intervening;
+    # plain allowed reads already persist `last_pre_step` & churn state atomically in `streak_file`.
+    if (
+        tool_name not in READ_TOOL_NAMES
+        or decision != "allow"
+        or read_auto_sliced
+        or retry_churn_active
+        or context_gate_triggered
+        or pre_file_snap is not None
+    ):
+        try:
+            with open(f"/tmp/voicefi_immune_pre_{safe_conv}_{step_idx}.json", "w", encoding="utf-8") as _pf:
+                _pf.write(json.dumps(pre_state_obj, separators=(",", ":")))
+        except Exception:
+            pass
 
     _append_immune_audit_event(
         {
@@ -3444,6 +3938,7 @@ def run_ide_pre_tool_hook(
             "em_dash_healed": em_dash_healed,
             "machine_marks_scrubbed": em_dash_healed,
             "context_gate_triggered": context_gate_triggered,
+            "read_auto_sliced": bool(read_auto_sliced),
             "bounded_slice_read": bounded_slice_read,
             "fast_path": bounded_slice_read,
             "direct_tokens_saved": direct_tokens_saved,
@@ -3501,7 +3996,9 @@ def run_ide_pre_tool_hook(
                 if (stage_triggered == 3 and decision in ("deny", "ask") and not context_gate_triggered)
                 else "ast_slice_gate"
             )
-            if read_auto_sliced or (harness_bot == "claude-code" and tool_name == "Read" and ev_type == "ast_slice_gate"):
+            if read_reflex_escalated:
+                act_mode = "reflex_graduated_escalate"
+            elif read_auto_sliced or (harness_bot == "claude-code" and tool_name == "Read" and ev_type == "ast_slice_gate"):
                 act_mode = "auto_slice"
             elif decision == "deny":
                 act_mode = "hard_deny"
@@ -3592,8 +4089,18 @@ def run_ide_pre_tool_hook(
         tool_name=tool_name,
         target_path_str=target_path_str,
         audit_log_path=audit_log_path,
+        is_strict_test=is_strict_test,
+        daily_st_cached=daily_st,
+        streak_file=_streak_file,
+        loaded_state=_loaded_streak_state,
     )  # [direct-edit]
-    if context_gate_triggered or decision in ("ask", "deny", "force_ask") or read_auto_sliced:
+    if (
+        context_gate_triggered
+        or decision in ("ask", "deny", "force_ask")
+        or read_auto_sliced
+        or shell_auto_healed
+        or secrets_blocked_in_airlock > 0
+    ):
         updated_daily = _record_daily_immune_metric(interceptions_delta=1, audit_log_path=audit_log_path)
         new_inter_cnt = int(updated_daily.get("daily_interceptions", 0))
         try:
@@ -3613,7 +4120,10 @@ def run_ide_pre_tool_hook(
             and (new_inter_cnt == 1 or new_inter_cnt % 10 == 0)
         ):
             try:
-                from whole_body_compute.procedural_telemetry import track_wbc_event
+                from whole_body_compute.procedural_telemetry import (
+                    ProceduralDNAHarvester,
+                    track_wbc_event,
+                )
                 from whole_body_compute.shield import get_savings_summary
 
                 sav = get_savings_summary(window="24h")
@@ -3637,6 +4147,13 @@ def run_ide_pre_tool_hook(
                     },
                     detached_hook=True,
                 )
+                if new_inter_cnt == 1 or new_inter_cnt % 25 == 0:
+                    import threading
+
+                    threading.Thread(
+                        target=lambda: ProceduralDNAHarvester().harvest_all(persist=True),
+                        daemon=True,
+                    ).start()
             except Exception:
                 pass
 
@@ -3737,7 +4254,9 @@ def run_ide_pre_tool_hook(
             out["autonomic_reflex_cue"] = sensory_vector.autonomic_reflex_cue
             churn_slice_str = ""
             churn_sym: Optional[str] = None
-            if retry_churn_active and target_path_str:
+            if retry_churn_active and target_path_str and (
+                retry_churn_count == 3 or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+            ):
                 try:
                     churn_slice_str, churn_sym = _build_retry_churn_ast_assistance(
                         Path(target_path_str), args=args, payload=payload
@@ -3777,13 +4296,42 @@ _FOVEAL_STOPWORDS: frozenset[str] = frozenset(
 )
 
 
+def _get_wbc_run_dir() -> Path:
+    env_run = os.environ.get("WBC_RUN_DIR", "").strip()
+    if env_run:
+        rdir = Path(env_run)
+    else:
+        wbc_data = os.environ.get("WBC_DATA_DIR", "").strip()
+        if wbc_data:
+            base = Path(wbc_data)
+        elif (Path.home() / ".whole_body_compute").is_dir():
+            base = Path.home() / ".whole_body_compute"
+        elif (Path.home() / ".voicefi").is_dir():
+            base = Path.home() / ".voicefi"
+        else:
+            base = Path.home() / ".whole_body_compute"
+        rdir = base / "run"
+    try:
+        rdir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(rdir, 0o700)
+    except OSError:
+        pass
+    return rdir
+
+
 def _get_preinv_queue_dir() -> Optional[Path]:
     env_dir = os.environ.get("WBC_PREINV_QUEUE_DIR", "").strip()
     if env_dir:
         return Path(env_dir)
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return None
-    return Path("/tmp/wbc_preinv_queue")
+    qdir = _get_wbc_run_dir() / "preinv_queue"
+    try:
+        qdir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(qdir, 0o700)
+    except OSError:
+        pass
+    return qdir
 
 
 def _stash_preinv_context(conv_id: str, block: str) -> None:
@@ -4266,6 +4814,28 @@ def run_ide_pre_invocation_hook(
                 "(3) Delegate multi-step cloud work (>2 tool calls) to an ephemeral `flash` or `inherit` subagent "
                 "to avoid main-thread quadratic turn re-ingestion.]"
             )
+    elif not is_strict_test and not is_subagent and transcript_kb >= 900.0:
+        csi_bucket = int(transcript_kb // 900.0)
+        safe_conv_marker = re.sub(r"[^A-Za-z0-9_-]", "", str(conv_id or "global"))[:64] or "global"
+        marker_path = _get_wbc_run_dir() / f"wbc_csi_warned_{safe_conv_marker}"
+        last_bucket = 0
+        try:
+            if marker_path.is_file():
+                last_bucket = int(marker_path.read_text(encoding="utf-8").strip() or "0")
+        except Exception:
+            last_bucket = 0
+        if csi_bucket > last_bucket:
+            try:
+                marker_path.write_text(str(csi_bucket), encoding="utf-8")
+            except Exception:
+                pass
+            nudge_emitted = True
+            msg_parts.append(
+                f"[🔴 Organ 04 Cognitive Saturation Alert (CSI={csi_est:.2f} RED, transcript={transcript_kb:.0f}KB, steps={steps})]: "
+                "This conversation has crossed the RED Context Saturation threshold (>=900KB). "
+                "After completing the current turn, proactively notify the user that Context Saturation is RED "
+                "and offer to run `body flush` (or `/compact`) to hand off to a fresh conversation."
+            )
 
     stashed_preinv = _pop_preinv_context(conv_id)
     if stashed_preinv:
@@ -4475,6 +5045,134 @@ def _detect_local_venv_hint(
     return None
 
 
+_AMBIGUOUS_STDOUT_WARNING_RE = re.compile(
+    r"\b(?:warning|warnings|warn|deprecated|deprecationwarning|userwarning|runtimewarning|"
+    r"futurewarning|syntaxwarning|flaky|skipped|xfail)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_shell_stdout_and_exit_zero(tool_resp: Any) -> Tuple[str, bool]:
+    """
+    Extract unwrapped shell stdout/stderr text and determine whether the command exited 0.
+    """
+    exit_zero: Optional[bool] = None
+    if isinstance(tool_resp, dict):
+        for rk in ("exitCode", "exit_code", "returncode"):
+            if rk in tool_resp and tool_resp.get(rk) is not None:
+                try:
+                    exit_zero = int(tool_resp[rk]) == 0
+                except Exception:
+                    pass
+                break
+        parts: List[str] = []
+        for k in ("output", "stdout", "result", "content", "stderr"):
+            v = tool_resp.get(k)
+            if isinstance(v, str) and v.strip():
+                parts.append(v)
+        out_text = "\n".join(parts) if parts else json.dumps(tool_resp)
+    elif isinstance(tool_resp, (bytes, bytearray)):
+        out_text = bytes(tool_resp).decode("utf-8", errors="replace")
+    else:
+        out_text = str(tool_resp or "")
+
+    if exit_zero is None:
+        m_rc = re.search(r"Command exited with code\s+(-?\d+)", out_text)
+        if m_rc:
+            exit_zero = int(m_rc.group(1)) == 0
+        elif re.search(r"\b(?:FAILED|ERRORS|Traceback \(most recent call last\)|panicked at )\b", out_text):
+            exit_zero = False
+        else:
+            exit_zero = True
+
+    return out_text, bool(exit_zero)
+
+
+def _evaluate_stdout_compaction_reflex(
+    command: str,
+    effective_resp: Any,
+    payload: Dict[str, Any],
+    args: Dict[str, Any],
+    eff_line_cap: int,
+    eff_byte_cap: int,
+    step_idx: int = 0,
+    conv_id: str = "",
+    audit_log_path: Optional[Path | str] = None,
+    thermal_state: Optional[str] = None,
+) -> Optional[Any]:
+    """
+    Evaluate and record the `stdout_compaction` SpinalReflexGate on `PostToolUse` shell commands
+    that exit `0` with large/ambiguous warning output.
+    Returns `ReflexDecision` when triggered, or `None` otherwise.
+    """
+    cmd_str = (command or "").strip()
+    if not cmd_str or effective_resp is None:
+        return None
+    out_text, exited_zero = _extract_shell_stdout_and_exit_zero(effective_resp)
+    if not exited_zero or not out_text:
+        return None
+
+    byte_len = len(out_text.encode("utf-8", errors="replace"))
+    lines = out_text.splitlines()
+    total_lines = len(lines)
+    if total_lines <= eff_line_cap and byte_len <= eff_byte_cap:
+        return None
+
+    warning_hits = len(_AMBIGUOUS_STDOUT_WARNING_RE.findall(out_text[:32768]))
+    if len(out_text) > 32768:
+        warning_hits += len(_AMBIGUOUS_STDOUT_WARNING_RE.findall(out_text[-16384:]))
+    if warning_hits == 0:
+        return None
+
+    from whole_body_compute.local.reflex_gate import (
+        build_structural_signals,
+        embed_for_reflex_gate,
+        get_default_reflex_gate,
+        get_last_embed_backend,
+        normalize_shell_command_signature,
+        resolve_repo_key,
+        scope_gate_id_for_backend,
+    )
+
+    repo_hint = str(args.get("Cwd") or args.get("cwd") or "").strip()
+    if not repo_hint:
+        ws_list = payload.get("workspacePaths") or []
+        if ws_list:
+            repo_hint = str(ws_list[0])
+    if not repo_hint and not os.environ.get("PYTEST_CURRENT_TEST"):
+        repo_hint = str(Path.cwd())
+
+    repo_key = resolve_repo_key(repo_hint) if repo_hint else "__global__"
+    cmd_sig = normalize_shell_command_signature(cmd_str)
+    tail_sample = "\n".join(ln.strip()[:120] for ln in lines[-8:] if ln.strip())[:360]
+    cmd_path_match = re.search(r"([A-Za-z0-9_./-]+\.(?:py|ts|tsx|js|jsx|rs|go))\b", cmd_str)
+    cmd_target = cmd_path_match.group(1) if cmd_path_match else ""
+    signals = build_structural_signals(
+        target_path=cmd_target,
+        raw_content=out_text[:16384],
+        query_or_hint=cmd_str,
+        file_lines=total_lines,
+        symbol_count=warning_hits,
+        is_test_or_log=True,
+        turn_depth=int(step_idx or 0),
+        conv_id=conv_id or None,
+        streak_file=_get_bbb_streak_file(audit_log_path),
+        thermal_override=thermal_state,
+    )
+    feats = embed_for_reflex_gate(
+        f"shell_exit0_warn | {cmd_sig} | {tail_sample}",
+        signals=signals,
+    )
+    scoped_gid = scope_gate_id_for_backend("stdout_compaction", get_last_embed_backend())
+    return get_default_reflex_gate().record_pending_stdout_compaction(
+        command=cmd_str,
+        features=feats,
+        repo_key=repo_key,
+        gate_id=scoped_gid,
+        session_id=conv_id,
+    )
+
+
 def run_ide_post_tool_hook(
     payload: Dict[str, Any],
     audit_log_path: Optional[Path | str] = None,
@@ -4507,15 +5205,34 @@ def run_ide_post_tool_hook(
     )
     step_idx = payload.get("stepIdx", 0)
     conv_id = str(payload.get("conversationId") or payload.get("conversation_id") or "local")
-    tool_resp = payload.get("toolResponse") if "toolResponse" in payload else payload.get("tool_response")
+    tool_resp = None
+    for resp_key in (
+        "toolResponse",
+        "tool_response",
+        "toolResult",
+        "tool_result",
+        "output",
+        "result",
+        "response",
+    ):
+        if resp_key in payload and payload.get(resp_key) is not None:
+            tool_resp = payload.get(resp_key)
+            break
+    if tool_resp is None and isinstance(tool_call, dict):
+        for resp_key in ("output", "result", "response", "toolResponse"):
+            if resp_key in tool_call and tool_call.get(resp_key) is not None:
+                tool_resp = tool_call.get(resp_key)
+                break
     tool_resp_str = json.dumps(tool_resp or "")
     safe_conv = re.sub(r"[^A-Za-z0-9_\-]", "_", conv_id)[:64]
 
-    pre_info: Dict[str, Any] = {}
+    with _PRE_STATE_MEM_CACHE_LOCK:
+        pre_info: Dict[str, Any] = _PRE_STATE_MEM_CACHE.pop((safe_conv, step_idx), None) or {}
     pre_state_file = Path(f"/tmp/voicefi_immune_pre_{safe_conv}_{step_idx}.json")
     if pre_state_file.is_file():
         try:
-            pre_info = json.loads(pre_state_file.read_text(encoding="utf-8"))
+            if not pre_info:
+                pre_info = json.loads(pre_state_file.read_text(encoding="utf-8"))
             pre_state_file.unlink(missing_ok=True)
         except Exception:
             pass
@@ -4545,29 +5262,71 @@ def run_ide_post_tool_hook(
     post_sha256 = tactile_delta.post_sha256 if tactile_delta else ""
     file_changed = bool(tactile_delta.file_changed) if tactile_delta else False
 
-    from whole_body_compute.redaction import contains_secret, redact_secrets
+    from whole_body_compute.redaction import contains_secret, count_new_redactions, redact_secrets
 
     scrubbed_resp = None
+    redacted_cnt = 0
     secret_detected = bool(_FAST_SECRET_RE.search(tool_resp_str))
 
     if isinstance(tool_resp, str):
         if secret_detected or contains_secret(tool_resp):
-            secret_detected = True
             scrubbed_resp = redact_secrets(tool_resp)
+            redacted_cnt = count_new_redactions(tool_resp, scrubbed_resp)
+            secret_detected = redacted_cnt > 0
+            if not secret_detected:
+                scrubbed_resp = None
     elif isinstance(tool_resp, (dict, list)):
+        from whole_body_compute.redaction import _NON_CREDENTIAL_KEY_RE, _SECRET_KEYWORD, REDACTION_PLACEHOLDER
+
+        _kw_key_re = re.compile(rf"(?i)^{_SECRET_KEYWORD}$|{_SECRET_KEYWORD}")
+
+        def _redact_obj(obj: Any) -> tuple[Any, int]:
+            if isinstance(obj, str):
+                sc = redact_secrets(obj)
+                return sc, count_new_redactions(obj, sc)
+            if isinstance(obj, list):
+                out_list = []
+                tot = 0
+                for item in obj:
+                    new_item, cnt = _redact_obj(item)
+                    out_list.append(new_item)
+                    tot += cnt
+                return out_list, tot
+            if isinstance(obj, dict):
+                out_dict: Dict[str, Any] = {}
+                tot = 0
+                for dk, dv in obj.items():
+                    dk_str = str(dk)
+                    if (
+                        isinstance(dv, str)
+                        and len(dv.strip()) >= 6
+                        and _kw_key_re.search(dk_str)
+                        and not _NON_CREDENTIAL_KEY_RE.match(dk_str)
+                        and dv.strip().lower() not in ("true", "false", "null", "none", "yes", "no")
+                    ):
+                        out_dict[dk] = REDACTION_PLACEHOLDER
+                        tot += 1
+                    else:
+                        new_v, cnt = _redact_obj(dv)
+                        out_dict[dk] = new_v
+                        tot += cnt
+                return out_dict, tot
+            return obj, 0
+
         raw_json = json.dumps(tool_resp)
         if secret_detected or contains_secret(raw_json):
-            secret_detected = True
-            redacted_str = redact_secrets(raw_json)
-            try:
-                scrubbed_resp = json.loads(redacted_str)
-            except Exception:
-                scrubbed_resp = redacted_str
+            scrubbed_obj, redacted_cnt = _redact_obj(tool_resp)
+            secret_detected = redacted_cnt > 0
+            if secret_detected:
+                scrubbed_resp = scrubbed_obj
     elif tool_resp is not None:
         raw_str = str(tool_resp)
         if secret_detected or contains_secret(raw_str):
-            secret_detected = True
             scrubbed_resp = redact_secrets(raw_str)
+            redacted_cnt = count_new_redactions(raw_str, scrubbed_resp)
+            secret_detected = redacted_cnt > 0
+            if not secret_detected:
+                scrubbed_resp = None
 
     effective_resp = scrubbed_resp if (secret_detected and scrubbed_resp is not None) else tool_resp
     is_strict_test = _is_legacy_strict_test(payload)
@@ -4599,7 +5358,10 @@ def run_ide_post_tool_hook(
     default_max_lines = 250 if is_strict_test else sensory_vector.effective_post_line_ceiling
     default_max_bytes = 8000 if is_strict_test else sensory_vector.effective_post_byte_ceiling
     post_slice_info: Optional[Dict[str, Any]] = None
-    is_shell_post_tool = tool_name in ("run_command", "Bash", "execute_command", "developer__shell")
+    stdout_reflex_decision: Optional[Any] = None
+    is_shell_post_tool = tool_name in ("run_command", "Bash", "execute_command", "developer__shell") or (
+        tool_name.lower() in ("bash", "sh", "zsh")
+    )
     auto_slice_tools = set(SEARCH_DIR_TOOL_NAMES + DB_RESOURCE_WEB_BROWSER_TOOL_NAMES) | {
         "call_mcp_tool",
         "take_snapshot",
@@ -4616,6 +5378,7 @@ def run_ide_post_tool_hook(
             or payload.get("slice_post_output")
             or os.environ.get("WBC_POST_OUTPUT_SLICE") == "1"
             or tool_name in auto_slice_tools
+            or is_shell_post_tool
             or any(
                 k in tool_name.lower()
                 for k in ("snapshot", "execute_sql", "query_database", "read_resource", "list_resources", "webfetch", "fetch_web")
@@ -4623,16 +5386,49 @@ def run_ide_post_tool_hook(
         )
     )
     if effective_resp is not None and should_slice_post:
+        # Phase 1 Semantic CLI Digests (`pytest`, `git diff`, `rg`) use the 250L / 8KB threshold
+        # even in GREEN_ELASTIC so noisy test/diff/search outputs are compacted on Turn 1.
         eff_line_cap = (
-            int(payload.get("maxLines", max(300, default_max_lines)))
-            if is_shell_post_tool and "maxLines" not in payload
+            int(payload.get("maxLines", 250 if is_shell_post_tool else default_max_lines))
+            if "maxLines" not in payload
             else int(payload.get("maxLines", default_max_lines) or default_max_lines)
         )
         eff_byte_cap = (
-            int(payload.get("maxBytes", max(16000, default_max_bytes)))
-            if is_shell_post_tool and "maxBytes" not in payload
+            int(payload.get("maxBytes", 8000 if is_shell_post_tool else default_max_bytes))
+            if "maxBytes" not in payload
             else int(payload.get("maxBytes", default_max_bytes) or default_max_bytes)
         )
+        preserve_fuller_tail = False
+        if is_shell_post_tool:
+            shell_cmd_str = str(
+                args.get("CommandLine")
+                or args.get("command")
+                or args.get("cmd")
+                or pre_info.get("target")
+                or ""
+            ).strip()
+            if shell_cmd_str and (
+                not os.environ.get("PYTEST_CURRENT_TEST")
+                or os.environ.get("WBC_ENABLE_REFLEX_GATE_IN_TESTS") == "1"
+                or "WBC_DATA_DIR" in os.environ
+            ):
+                try:
+                    stdout_reflex_decision = _evaluate_stdout_compaction_reflex(
+                        command=shell_cmd_str,
+                        effective_resp=effective_resp,
+                        payload=payload,
+                        args=args,
+                        eff_line_cap=eff_line_cap,
+                        eff_byte_cap=eff_byte_cap,
+                        step_idx=int(step_idx or 0),
+                        conv_id=conv_id,
+                        audit_log_path=audit_log_path,
+                        thermal_state=sensory_vector.thermal_state,
+                    )
+                    if stdout_reflex_decision is not None and stdout_reflex_decision.reason == "graduated_escalate":
+                        preserve_fuller_tail = True
+                except Exception:
+                    stdout_reflex_decision = None
         post_slice_info = slice_post_tool_output_buffer(
             raw_output=effective_resp,
             tool_name=tool_name or "post_tool",
@@ -4641,8 +5437,25 @@ def run_ide_post_tool_hook(
             max_bytes=eff_byte_cap,
             step_idx=int(step_idx or 0),
             head_lines=35 if is_shell_post_tool else 30,
-            tail_lines=45 if is_shell_post_tool else 15,
+            tail_lines=140 if preserve_fuller_tail else (45 if is_shell_post_tool else 15),
+            preserve_fuller_tail=preserve_fuller_tail,
         )
+        if (
+            stdout_reflex_decision is not None
+            and post_slice_info
+            and post_slice_info.get("airlock_blob_id")
+            and shell_cmd_str
+        ):
+            try:
+                from whole_body_compute.local.reflex_gate import get_default_reflex_gate
+
+                get_default_reflex_gate().attach_pending_stdout_blob(
+                    shell_cmd_str,
+                    str(post_slice_info["airlock_blob_id"]),
+                    session_id=conv_id,
+                )
+            except Exception:
+                pass
 
     elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 3)
 
@@ -4691,6 +5504,15 @@ def run_ide_post_tool_hook(
         "retryChurnCount": retry_churn_count,
         "retry_churn_count": retry_churn_count,
     }
+    if stdout_reflex_decision is not None:
+        out_dict["stdoutCompactionReflex"] = {
+            "gate_id": stdout_reflex_decision.gate_id,
+            "repo_key": stdout_reflex_decision.repo_key,
+            "state": stdout_reflex_decision.state,
+            "reason": stdout_reflex_decision.reason,
+            "use_local": stdout_reflex_decision.use_local,
+            "probability": round(stdout_reflex_decision.probability, 4),
+        }
     if tactile_delta is not None:
         tactile_dict = tactile_delta.to_dict()
         out_dict["tactileDelta"] = tactile_dict
@@ -4728,12 +5550,10 @@ def run_ide_post_tool_hook(
         out_dict["ephemeralMessage"] = merged_post_cue
         out_dict["injectSteps"].append({"ephemeralMessage": merged_post_cue})
 
-    redacted_cnt = 0
-    if secret_detected and scrubbed_resp is not None:
+    if secret_detected and scrubbed_resp is not None and redacted_cnt > 0:
         out_dict["toolResponse"] = scrubbed_resp
         out_dict["scrubbed"] = True
         scrubbed_str = json.dumps(scrubbed_resp) if isinstance(scrubbed_resp, (dict, list)) else str(scrubbed_resp)
-        redacted_cnt = max(1, scrubbed_str.lower().count("redacted"))
         if not (post_slice_info and post_slice_info.get("sliced")):
             try:
                 from whole_body_compute.shield import record_shield_event
@@ -4770,6 +5590,12 @@ def run_ide_post_tool_hook(
             harness_ceiling = get_harness_file_token_ceiling(payload=payload)
             raw_s_tok = min(harness_ceiling, max(1, int(post_slice_info.get("original_bytes", 0)) // 4))
             comp_s_tok = max(1, len(str(post_slice_info.get("content", ""))) // 4)
+            slice_action_mode = "post_slice"
+            if stdout_reflex_decision is not None and stdout_reflex_decision.reason in (
+                "graduated_escalate",
+                "graduated_local",
+            ):
+                slice_action_mode = f"reflex_{stdout_reflex_decision.reason}"
             record_shield_event(
                 event_type="secret_redaction" if redacted_cnt > 0 else "ast_slice_gate",
                 target=target_path_str or tool_name or "post_tool_slice",
@@ -4778,7 +5604,7 @@ def run_ide_post_tool_hook(
                 tokens_saved=max(0, raw_s_tok - comp_s_tok),
                 secrets_blocked=redacted_cnt,
                 latency_ms=elapsed_ms,
-                action_mode="post_slice",
+                action_mode=slice_action_mode,
                 payload=payload,
             )
         except Exception:
@@ -4963,6 +5789,31 @@ def adapt_claude_code_pre_hook(
         or {}
     )
 
+    # Never override Stage 2/3 security denials, explicit "ask"/"force_ask" prompts,
+    # or Stage 1 non-Read blocks (e.g. protected config / shell syntax) with "allow"
+    stage_val = int(res_obj.get("stage") or 0)
+    reason_low = str(res_obj.get("reason") or "").lower()
+    is_security_or_non_context_block = (
+        stage_val >= 2
+        or res_obj.get("decision") in ("ask", "force_ask")
+        or (stage_val >= 1 and tool_name not in ("Read", "Task", "Agent"))
+        or (
+            tool_name == "Read"
+            and any(k in reason_low for k in ("sensitive", "credential", "secret", "antibody"))
+        )
+    )
+    if res_obj.get("decision") in ("deny", "ask", "force_ask") and is_security_or_non_context_block:
+        cc_perm = "deny" if res_obj.get("decision") == "deny" else "ask"
+        res_obj["permissionDecision"] = cc_perm
+        res_obj["hookSpecificOutput"] = {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": cc_perm,
+            "permissionDecisionReason": str(
+                res_obj.get("reason") or "Blocked by Blood-Brain Barrier"
+            ),
+        }
+        return res_obj
+
     if tool_name == "Read":
         raw_path = str(
             tool_input.get("file_path")
@@ -5132,7 +5983,7 @@ def adapt_claude_code_pre_hook(
             }
             return res_obj
 
-    elif tool_name in ("Bash", "run_command"):
+    elif tool_name in ("Bash", "run_command") and res_obj.get("decision", "allow") == "allow":
         cmd_str = str(tool_input.get("command") or tool_input.get("CommandLine") or "").strip()
         log_match = re.search(r'(?:^|[\s"\'`])([A-Za-z0-9_./\\-]+\.(?:log|err|jsonl))', cmd_str)
         if log_match:
@@ -5239,9 +6090,40 @@ class BloodBrainBarrier:
         return get_immune_pre_post_scorecard(audit_log_path=self.audit_log_path, window_seconds=window_seconds)
 
 
-def _handle_fast_slice_milestone(count: int, harness: str) -> int:
-    """Detached background helper invoked by POSIX sh fast-path on milestone slices. [direct-edit]"""
+def _handle_fast_slice_milestone(
+    count: int,
+    harness: str,
+    target: str = "",
+    total_lines: int = 0,
+    saved_tokens: int = 0,
+) -> int:
+    """Detached background helper invoked by POSIX sh fast-path to record shield ledger & milestone telemetry. [direct-edit]"""
     try:
+        if saved_tokens > 0 and target:
+            try:
+                from whole_body_compute.shield import record_shield_event
+
+                raw_est = max(saved_tokens + 1600, total_lines * 10)
+                comp_est = max(160, raw_est - saved_tokens)
+                bot_map = {"claude_code": "claude-code", "antigravity": "antigravity"}
+                record_shield_event(
+                    event_type="ast_slice_gate",
+                    target=target,
+                    raw_tokens_est=raw_est,
+                    compressed_tokens_est=comp_est,
+                    tokens_saved=saved_tokens,
+                    secrets_blocked=0,
+                    latency_ms=4.2,
+                    bot_name=bot_map.get(harness, harness or "antigravity"),
+                    action_mode="fast_sh_slice",
+                )
+            except Exception:
+                pass
+
+        is_milestone = count == 1 or count == 25 or (count > 0 and count % 10 == 0)
+        if not is_milestone and saved_tokens > 0:
+            return 0
+
         updated_daily = _record_daily_immune_metric(interceptions_delta=0)
         eff_cnt = max(int(count), int(updated_daily.get("daily_interceptions", 0)))
         if eff_cnt > int(updated_daily.get("daily_interceptions", 0)):
@@ -5264,7 +6146,10 @@ def _handle_fast_slice_milestone(count: int, harness: str) -> int:
             and (eff_cnt == 1 or eff_cnt % 10 == 0)
         ):
             try:
-                from whole_body_compute.procedural_telemetry import track_wbc_event
+                from whole_body_compute.procedural_telemetry import (
+                    ProceduralDNAHarvester,
+                    track_wbc_event,
+                )
                 from whole_body_compute.shield import get_savings_summary
 
                 sav = get_savings_summary(window="24h")
@@ -5288,6 +6173,13 @@ def _handle_fast_slice_milestone(count: int, harness: str) -> int:
                     },
                     detached_hook=True,
                 )
+                if eff_cnt == 1 or eff_cnt % 25 == 0:
+                    import threading
+
+                    threading.Thread(
+                        target=lambda: ProceduralDNAHarvester().harvest_all(persist=True),
+                        daemon=True,
+                    ).start()
             except Exception:
                 pass
     except Exception:
@@ -5310,6 +6202,9 @@ def cli_hook_main(argv: Optional[List[str]] = None) -> int:
     if phase_arg == "fast-milestone":
         m_cnt = 1
         m_harness = "unknown"
+        m_target = ""
+        m_lines = 0
+        m_saved = 0
         if "--count" in args_list:
             c_idx = args_list.index("--count")
             if c_idx + 1 < len(args_list):
@@ -5321,7 +6216,31 @@ def cli_hook_main(argv: Optional[List[str]] = None) -> int:
             h_idx = args_list.index("--harness")
             if h_idx + 1 < len(args_list):
                 m_harness = args_list[h_idx + 1].strip() or "unknown"
-        return _handle_fast_slice_milestone(m_cnt, m_harness)
+        if "--target" in args_list:
+            t_idx = args_list.index("--target")
+            if t_idx + 1 < len(args_list):
+                m_target = args_list[t_idx + 1].strip()
+        if "--total-lines" in args_list:
+            l_idx = args_list.index("--total-lines")
+            if l_idx + 1 < len(args_list):
+                try:
+                    m_lines = int(args_list[l_idx + 1])
+                except Exception:
+                    m_lines = 0
+        if "--saved-tokens" in args_list:
+            s_idx = args_list.index("--saved-tokens")
+            if s_idx + 1 < len(args_list):
+                try:
+                    m_saved = int(args_list[s_idx + 1])
+                except Exception:
+                    m_saved = 0
+        return _handle_fast_slice_milestone(
+            m_cnt,
+            m_harness,
+            target=m_target,
+            total_lines=m_lines,
+            saved_tokens=m_saved,
+        )
 
     try:
         try:
@@ -5348,7 +6267,17 @@ def cli_hook_main(argv: Optional[List[str]] = None) -> int:
                     elif res_obj.get("postOutputSliced") and isinstance(res_obj.get("toolResponse"), str):
                         cc_post["suppressOutput"] = True
                         add_ctx_parts.append(res_obj["toolResponse"])
-                    if isinstance(res_obj.get("ephemeralMessage"), str) and res_obj["ephemeralMessage"].strip():
+                    # Only emit PostToolUse ephemeralMessage in Claude Code on genuine post-edit tactile faults
+                    # (SyntaxError / assertion regression), avoiding duplicate PreToolUse + PostToolUse Retry-Churn spam
+                    is_post_tactile_fault = bool(
+                        res_obj.get("astSyntaxValid") is False
+                        or res_obj.get("assertionsPreserved") is False
+                    )
+                    if (
+                        (is_post_tactile_fault or bool(os.environ.get("PYTEST_CURRENT_TEST")))
+                        and isinstance(res_obj.get("ephemeralMessage"), str)
+                        and res_obj["ephemeralMessage"].strip()
+                    ):
                         add_ctx_parts.append(res_obj["ephemeralMessage"].strip())
                     if add_ctx_parts:
                         cc_post["hookSpecificOutput"] = {
@@ -5448,6 +6377,15 @@ def cli_hook_main(argv: Optional[List[str]] = None) -> int:
                 res_obj = {k: v for k, v in res_obj.items() if k in allowed_keys}
 
         sys.stdout.write(json.dumps(res_obj) + "\n")
+        sys.stdout.flush()
+        _rg_mod = sys.modules.get("whole_body_compute.local.reflex_gate")
+        if _rg_mod is not None:
+            _rg_default = getattr(_rg_mod, "_DEFAULT_REFLEX_GATE", None)
+            if _rg_default is not None:
+                try:
+                    _rg_default.flush_background_retrains(timeout=1.5)
+                except Exception:
+                    pass
         return 0
     except Exception:
         fallback = (

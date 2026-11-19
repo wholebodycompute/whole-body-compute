@@ -75,8 +75,18 @@ def estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def _resolve_circuit_breaker_file() -> Path:
+    run_dir = Path.home() / ".whole_body_compute" / "run"
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(run_dir, 0o700)
+    except OSError:
+        pass
+    return run_dir / "wbc_metal_circuit_breaker.json"
+
+
 _DAEMON_CIRCUIT_BREAKER: Dict[str, float] = {}
-_CIRCUIT_BREAKER_FILE = Path("/tmp/wbc_metal_circuit_breaker.json")
+_CIRCUIT_BREAKER_FILE = _resolve_circuit_breaker_file()
 _CIRCUIT_BREAKER_LOCK = threading.Lock()
 CIRCUIT_BREAKER_TTL: float = 60.0
 
@@ -868,7 +878,16 @@ class ReconScout:
                 continue
             if not self._is_port_open("127.0.0.1", port, timeout=0.025):
                 continue
-            payload = {
+            slab_ref = None
+            if len(prompt) > 32768:
+                try:
+                    from whole_body_compute.local.metal_accel import stage_context_in_shared_slab
+
+                    slab_ref = stage_context_in_shared_slab(prompt)
+                except Exception:
+                    slab_ref = None
+
+            payload: Dict[str, Any] = {
                 "model": model_id,
                 "messages": [
                     {"role": "system", "content": system_prompt},
@@ -877,7 +896,11 @@ class ReconScout:
                 "temperature": 0.2,
                 "max_tokens": max_toks,
                 "stream": False,
+                "kv_bits": 4,
+                "kv_group_size": 64,
             }
+            if slab_ref is not None:
+                payload["x_wbc_zero_copy_slab"] = slab_ref
             try:
                 req = urllib.request.Request(
                     endpoint,
@@ -912,6 +935,45 @@ class ReconScout:
         Execute an on-device scout run on the target file/directory.
         """
         start_time = time.perf_counter()
+        raw_content: str = ""
+        cached_rg_signals: Any = None
+        cached_rg_feats: Any = None
+
+        def _get_or_build_reflex_features(fallback_lines: int = 0) -> tuple[Any, Any]:
+            nonlocal cached_rg_signals, cached_rg_feats
+            if cached_rg_feats is not None:
+                return cached_rg_signals, cached_rg_feats
+            from whole_body_compute.local.reflex_gate import (
+                build_structural_signals,
+                embed_for_reflex_gate,
+            )
+
+            t_str = str(target_path)
+            is_log_or_test = bool(
+                self._is_log_or_trace(raw_content[:2048] if raw_content else "", t_str)
+                or Path(t_str).name.lower().startswith("test_")
+                or Path(t_str).name.lower().endswith(("_test.py", ".test.ts", ".test.tsx", ".spec.ts", ".spec.js"))
+                or "/tests/" in t_str.replace("\\", "/").lower()
+                or t_str.replace("\\", "/").lower().startswith("tests/")
+            )
+            eff_lines = (
+                max(1, raw_content.count("\n") + 1)
+                if raw_content
+                else max(1, int(fallback_lines))
+            )
+            cached_rg_signals = build_structural_signals(
+                target_path=t_str,
+                raw_content=raw_content,
+                query_or_hint=query,
+                file_lines=eff_lines,
+                is_test_or_log=is_log_or_test,
+                supervisor=default_supervisor,
+            )
+            cached_rg_feats = embed_for_reflex_gate(
+                f"{Path(t_str).suffix} | {query}",
+                signals=cached_rg_signals,
+            )
+            return cached_rg_signals, cached_rg_feats
 
         def _record_and_return(result: ScoutResult) -> ScoutResult:
             try:
@@ -950,6 +1012,11 @@ class ReconScout:
                     comp_out = max(1, int(result.output_tokens))
                     capped_saved = max(0, capped_raw - comp_out)
                     if capped_saved > 0:
+                        scout_action_mode = (
+                            "reflex_graduated_escalate"
+                            if result.ingress_mode == "airlock_reflex_escalate"
+                            else ("warm_cache" if result.ingress_mode == "warm_digest_cache" else "local_exec")
+                        )
                         record_shield_event(
                             event_type="local_metal_scout",
                             target=str(target_path),
@@ -958,7 +1025,7 @@ class ReconScout:
                             tokens_saved=capped_saved,
                             secrets_blocked=0,
                             latency_ms=round(float(result.duration_seconds) * 1000.0, 2),
-                            action_mode="warm_cache" if result.ingress_mode == "warm_digest_cache" else "local_exec",
+                            action_mode=scout_action_mode,
                         )  # [direct-edit]
             except Exception:
                 pass
@@ -966,6 +1033,33 @@ class ReconScout:
                 from whole_body_compute.local.supervisor import default_supervisor
 
                 default_supervisor.maybe_opportunistic_reap()
+            except Exception:
+                pass
+            try:
+                if (
+                    record_shield
+                    and not os.environ.get("WBC_SPECULATIVE_PRESCOUT") == "1"
+                    and result.error is None
+                    and (
+                        not os.environ.get("PYTEST_CURRENT_TEST")
+                        or os.environ.get("WBC_ENABLE_REFLEX_GATE_IN_TESTS") == "1"
+                        or "WBC_DATA_DIR" in os.environ
+                    )
+                ):
+                    from whole_body_compute.local.reflex_gate import (
+                        get_default_reflex_gate,
+                        resolve_repo_key,
+                    )
+
+                    t_str = str(target_path)
+                    _, feats = _get_or_build_reflex_features(
+                        fallback_lines=max(1, int(result.input_tokens_est // 8)),
+                    )
+                    get_default_reflex_gate().record_pending_scout(
+                        target_path=t_str,
+                        features=feats,
+                        repo_key=resolve_repo_key(t_str),
+                    )
             except Exception:
                 pass
             return result
@@ -1253,6 +1347,58 @@ class ReconScout:
                 )
             )
 
+        # Phase 3 SpinalReflexGate Fast-Path: When graduated (>=95% CV) and confident that an LLM
+        # prose summary will lose exact code detail (`graduated_escalate`), bypass slow local LLM
+        # generation and return expanded verbatim AST slices in <5ms.
+        try:
+            from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
+            if (get_wbc_data_dir() / "reflex_gates.sqlite").is_file():
+                from whole_body_compute.local.reflex_gate import (
+                    get_default_reflex_gate,
+                    resolve_repo_key,
+                )
+
+                t_str = str(target_path)
+                _, rg_feats = _get_or_build_reflex_features(
+                    fallback_lines=max(1, raw_content.count("\n") + 1),
+                )
+                rg_dec = get_default_reflex_gate().predict(
+                    "recon_scout_sufficiency",
+                    rg_feats,
+                    repo_key=resolve_repo_key(t_str),
+                    sample_key=t_str,
+                )
+                if rg_dec.reason == "graduated_escalate":
+                    expanded_chunks, _, _ = self.select_deterministic_chunks(
+                        raw_content,
+                        t_str,
+                        query,
+                        max_chars=24_000,
+                    )
+                    output_tokens = estimate_tokens(expanded_chunks)
+                    tokens_saved = max(0, input_tokens - output_tokens)
+                    savings_pct = round((tokens_saved / max(1, input_tokens)) * 100, 1)
+                    duration = time.perf_counter() - start_time
+                    return _record_and_return(
+                        ScoutResult(
+                            target=t_str,
+                            query=query,
+                            findings=expanded_chunks,
+                            input_tokens_est=input_tokens,
+                            output_tokens=output_tokens,
+                            tokens_saved=tokens_saved,
+                            savings_pct=savings_pct,
+                            duration_seconds=round(duration, 4),
+                            model_name="deterministic-airlock [reflex-gate-escalate]",
+                            is_local=True,
+                            read_latency_ms=read_latency_ms,
+                            ingress_mode="airlock_reflex_escalate",
+                        )
+                    )
+        except Exception:
+            pass
+
         _structured_code_exts = {
             ".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".rs", ".go",
             ".c", ".cpp", ".h", ".hpp", ".java", ".kt", ".swift",
@@ -1525,7 +1671,7 @@ class ReconScout:
                 "recommended_keep_alive", "30m"
             )
         except Exception:
-            keep_alive_val = "5m" if self._is_thermally_throttled() else -1
+            keep_alive_val = "5m"
 
         payload = {
             "model": selected_model,
@@ -1596,8 +1742,9 @@ class ReconScout:
     def prewarm(self, background: bool = True) -> Dict[str, Any]:
         """
         Prewarm the on-device scout engine in Apple Silicon Unified RAM.
-        Pings :9379 (voicefi-coder-mlx) and pins Ollama scout model weights (keep_alive: -1)
-        when thermally safe so initial scout executions avoid cold-start penalties.
+        Pings :9379 (voicefi-coder-mlx) and warms Ollama scout model weights (keep_alive: "5m")
+        when thermally safe so initial scout executions avoid cold-start penalties without
+        pinning external model drives indefinitely.
         # [direct-edit]
         """
         if self._is_thermally_throttled():
@@ -1621,7 +1768,7 @@ class ReconScout:
                 except Exception:
                     results["metal_daemons"][model_id] = False
 
-            # 2. Ping Ollama scout model with keep_alive: -1
+            # 2. Warm Ollama scout model with a 5m idle TTL (so it unloads automatically when idle)
             try:
                 base_url = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
                 req_tags = urllib.request.Request(f"{base_url}/api/tags")
@@ -1642,9 +1789,7 @@ class ReconScout:
                             target_model = installed[0]
 
                         if target_model:
-                            keep_alive_val: Union[int, str] = (
-                                "5m" if self._is_thermally_throttled() else -1
-                            )
+                            keep_alive_val: Union[int, str] = "5m"
                             ping_payload = {
                                 "model": target_model,
                                 "messages": [],

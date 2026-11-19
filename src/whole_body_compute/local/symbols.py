@@ -169,6 +169,13 @@ class LocalSymbolIndex:
     def _get_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=5.0)
         conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA mmap_size=134217728;")  # 128 MB Unified Memory mmap for 71.5MB+ symbols.db
+            conn.execute("PRAGMA temp_store=MEMORY;")
+        except sqlite3.Error:
+            pass
         return conn
 
     def _init_db(self) -> None:

@@ -103,6 +103,7 @@ import Foundation
 import AVFoundation
 import ScreenCaptureKit
 import CoreMedia
+import Speech
 
 final class UtteranceSegmenter {
     let speaker: String
@@ -207,13 +208,65 @@ final class UtteranceSegmenter {
             silenceSamplesCount = 0
             return
         }
-        let byteCount = samples.count * MemoryLayout<Int16>.size
-        let b64 = samples.withUnsafeBytes { rawPtr -> String in
-            Data(bytes: rawPtr.baseAddress!, count: byteCount).base64EncodedString()
-        }
+        let captured = samples
         samples.removeAll(keepingCapacity: true)
         speechActive = false
         silenceSamplesCount = 0
+
+        if CommandLine.arguments.contains("--ane-stt"),
+           let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
+           recognizer.supportsOnDeviceRecognition,
+           SFSpeechRecognizer.authorizationStatus() == .authorized,
+           let pcmFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false),
+           let buf = AVAudioPCMBuffer(pcmFormat: pcmFmt, frameCapacity: AVAudioFrameCount(captured.count)),
+           let ch0 = buf.floatChannelData?[0] {
+            buf.frameLength = AVAudioFrameCount(captured.count)
+            for i in 0..<captured.count {
+                ch0[i] = Float(captured[i]) / 32768.0
+            }
+            let req = SFSpeechAudioBufferRecognitionRequest()
+            req.requiresOnDeviceRecognition = true
+            req.shouldReportPartialResults = false
+            req.append(buf)
+            req.endAudio()
+            let spk = self.speaker
+            recognizer.recognitionTask(with: req) { result, error in
+                if let res = result, res.isFinal {
+                    let txt = res.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !txt.isEmpty {
+                        let payload: [String: Any] = [
+                            "ts": Date().timeIntervalSince1970,
+                            "speaker": spk,
+                            "text": txt,
+                            "backend": "ane_sfspeech"
+                        ]
+                        if let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+                           let line = String(data: data, encoding: .utf8) {
+                            FileHandle.standardOutput.write((line + "\n").data(using: .utf8)!)
+                        }
+                        return
+                    }
+                }
+                if error != nil {
+                    // Fallback to base64 PCM for faster-whisper if ANE recognizer fails on utterance
+                    let byteCount = captured.count * MemoryLayout<Int16>.size
+                    let b64 = captured.withUnsafeBytes { rawPtr -> String in
+                        Data(bytes: rawPtr.baseAddress!, count: byteCount).base64EncodedString()
+                    }
+                    let payload: [String: Any] = ["ts": Date().timeIntervalSince1970, "speaker": spk, "pcm16_b64": b64]
+                    if let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+                       let line = String(data: data, encoding: .utf8) {
+                        FileHandle.standardOutput.write((line + "\n").data(using: .utf8)!)
+                    }
+                }
+            }
+            return
+        }
+
+        let byteCount = captured.count * MemoryLayout<Int16>.size
+        let b64 = captured.withUnsafeBytes { rawPtr -> String in
+            Data(bytes: rawPtr.baseAddress!, count: byteCount).base64EncodedString()
+        }
 
         let payload: [String: Any] = [
             "ts": Date().timeIntervalSince1970,
@@ -396,6 +449,8 @@ class ActiveMeetingSession:
     action_items: List[str] = field(default_factory=list)
     markdown_path: str = ""
     dot_memory_ids: List[int] = field(default_factory=list)
+    deja_vu_hits: List[Dict[str, Any]] = field(default_factory=list)
+    _seen_deja_vu_ids: set[int] = field(default_factory=set)
 
     @property
     def duration_seconds(self) -> float:
@@ -574,6 +629,8 @@ def ensure_swift_audio_tap_binary(force_rebuild: bool = False) -> Optional[Path]
             "ScreenCaptureKit",
             "-framework",
             "CoreMedia",
+            "-framework",
+            "Speech",
             "-o",
             str(tmp_bin),
         ],
@@ -824,6 +881,66 @@ def is_meaningful_meeting_session(session: ActiveMeetingSession) -> bool:
     return session.duration_seconds >= 60.0 and len(session.utterances) >= 4
 
 
+def check_live_deja_vu(
+    utterance: MeetingUtterance,
+    seen_ids: Optional[set[int]] = None,
+    min_score: float = 0.42,
+    dot_db_path: Optional[Path] = None,
+    notify_hud: bool = True,
+) -> Optional[Dict[str, Any]]:
+    """
+    Real-Time In-Call "Whisper in Your Ear" (Roadmap H3):
+    Queries `dot_memory.db` via ANE + AMX/Metal Q4_0 (~13-21ms, 0% GPU contention)
+    on incoming `[Them]` utterances and surfaces a silent HUD card (`:9381`) when
+    a teammate mentions a prior decision, bug, or architecture fact.
+    """
+    if utterance.speaker != "Them":
+        return None
+    clean = (utterance.text or "").strip()
+    if len(clean) < 20:
+        return None
+
+    try:
+        from whole_body_compute.local.dot_memory import MemoryStore, get_dot_store
+
+        store = MemoryStore(db_path=dot_db_path, auto_seed=False) if dot_db_path is not None else get_dot_store()
+        hits = store.search(clean, top_k=2, use_embeddings=True)
+    except Exception:
+        return None
+
+    for hit in hits:
+        mem_id = int(hit.get("id") or 0)
+        score = float(hit.get("score") or 0.0)
+        if score < min_score:
+            continue
+        if seen_ids is not None and mem_id in seen_ids:
+            continue
+        if seen_ids is not None:
+            seen_ids.add(mem_id)
+        card = {
+            "memory_id": mem_id,
+            "score": round(score, 4),
+            "category": str(hit.get("category") or "general"),
+            "fact": str(hit.get("fact") or ""),
+            "triggered_by": clean[:160],
+            "ts": utterance.timestamp,
+        }
+        if notify_hud and not os.environ.get("PYTEST_CURRENT_TEST"):
+            try:
+                req = urllib.request.Request(
+                    "http://127.0.0.1:9381/hud/deja-vu",
+                    data=json.dumps(card).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=0.12):
+                    pass
+            except Exception:
+                pass
+        return card
+    return None
+
+
 def should_persist_to_dot_memory(session: ActiveMeetingSession) -> bool:
     """Quality gate preventing short smoke tests or filler chatter from polluting Hippocampus."""
     if not session.utterances:
@@ -958,8 +1075,18 @@ def _get_cached_whisper_model() -> Optional[Any]:
         if _CACHED_WHISPER_MODEL is None:
             try:
                 from faster_whisper import WhisperModel
+                from whole_body_compute.procedural_telemetry import get_wbc_data_dir
 
-                for model_name in ("small.en", "base.en"):
+                wbc_models_dir = get_wbc_data_dir() / "models"
+                candidates = [
+                    str(wbc_models_dir / "faster-whisper-small.en"),
+                    str(wbc_models_dir / "faster-whisper-base.en"),
+                    "small.en",
+                    "base.en",
+                ]
+                for model_name in candidates:
+                    if model_name.startswith("/") and not Path(model_name).is_dir():
+                        continue
                     try:
                         _CACHED_WHISPER_MODEL = WhisperModel(
                             model_name,
@@ -1043,6 +1170,8 @@ class _EphemeralAudioTextTap:
             cmd = [str(bin_path)]
             if not self._capture_system_audio:
                 cmd.append("--mic-only")
+            if os.environ.get("WBC_ANE_STT", "1") == "1":
+                cmd.append("--ane-stt")
             try:
                 self._proc = subprocess.Popen(
                     cmd,
@@ -1255,6 +1384,22 @@ class AutoMeetingMemoryWatcher:
             utt = MeetingUtterance(timestamp=ts, speaker=speaker, text=clean)
             session.utterances.append(utt)
             app_name = session.app_name
+            seen_dv = session._seen_deja_vu_ids
+
+        # Non-blocking [Them] Déjà Vu recall (runs on ANE+AMX in ~13-21ms, 0% GPU contention)
+        if speaker == "Them" and os.environ.get("WBC_DISABLE_LIVE_DEJA_VU") != "1":
+            try:
+                dv_card = check_live_deja_vu(
+                    utt,
+                    seen_ids=seen_dv,
+                    dot_db_path=self.dot_db_path,
+                )
+                if dv_card is not None:
+                    with self._lock:
+                        if self._active_session is not None:
+                            self._active_session.deja_vu_hits.append(dv_card)
+            except Exception:
+                pass
 
         try:
             from whole_body_compute.integrations.foveal_memory import record_foveal_audio_transcription
@@ -1616,6 +1761,14 @@ def _call_daemon_meeting_api(
     url = f"http://127.0.0.1:9382{path}"
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     headers = {"Content-Type": "application/json"} if data is not None else {}
+    try:
+        from whole_body_compute.integrations.foveal_memory import get_or_create_foveal_http_token
+
+        tok = get_or_create_foveal_http_token(create=False)
+        if tok:
+            headers["Authorization"] = f"Bearer {tok}"
+    except Exception:
+        pass
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

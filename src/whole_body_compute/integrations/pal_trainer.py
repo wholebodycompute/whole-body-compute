@@ -1232,6 +1232,32 @@ class PalTrainer:
         except Exception as exp_err:
             print(f"[PalTrainer] Goose/JSONL export notice: {exp_err}")
 
+        # Export sanitized Procedural DNA learning cards & emit zero-PII training completion event
+        try:
+            from whole_body_compute.procedural_telemetry import (
+                export_sanitized_learning_card,
+                sanitize_procedural_text,
+                track_wbc_event,
+            )
+
+            dna_bundle = export_sanitized_learning_card(recipe, persist_to_outbox=True)
+            tier_sum = dict(recipe.tier_summary or {})
+            track_wbc_event(
+                "wbc_pal_training_completed",
+                {
+                    "recipe_id": sanitize_procedural_text(str(recipe.id)),
+                    "raw_step_count": len(raw_steps),
+                    "compiled_step_count": len(recipe.steps or []),
+                    "parameters_count": len(recipe.parameters or {}),
+                    "triggers_count": len(recipe.triggers or []),
+                    "dominant_tier": str(tier_sum.get("dominant_tier") or "TIER_0_LOCAL"),
+                    "archetype": str(tier_sum.get("archetype") or "demonstrated_workflow"),
+                    "ir_signature_hash": str(dna_bundle.get("ir_signature_hash") or ""),
+                },
+            )
+        except Exception:
+            pass
+
         return recipe
 
     def _export_goose_recipe_and_training_pair(

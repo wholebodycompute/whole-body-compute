@@ -141,9 +141,12 @@ class _SafeWheelRedirectHandler(urllib.request.HTTPRedirectHandler):
         return new_req
 
 
+_DEFAULT_PACKAGE_ROOT_STR = str(Path(__file__).resolve().parent)
+
+
 @functools.lru_cache(maxsize=8)
 def _is_open_core_stubbed_cached(root_str: str) -> bool:
-    probe = Path(root_str) / "local" / "dot_memory.py"
+    probe = Path(root_str).resolve() / "local" / "dot_memory.py"
     if not probe.is_file():
         return False
     try:
@@ -155,8 +158,8 @@ def _is_open_core_stubbed_cached(root_str: str) -> bool:
 
 def is_open_core_stubbed(package_root: Path | None = None) -> bool:
     """Return True if the installed `whole_body_compute` tree uses Open-Core Pro stubs."""
-    root = (Path(package_root) if package_root else Path(__file__).resolve().parent).resolve()
-    return _is_open_core_stubbed_cached(str(root))
+    root_str = str(package_root) if package_root is not None else _DEFAULT_PACKAGE_ROOT_STR
+    return _is_open_core_stubbed_cached(root_str)
 
 
 def _get_user_pro_site_packages() -> Path:
@@ -182,8 +185,13 @@ def _ensure_pro_install_paths() -> None:
     added = False
     for cand in candidates:
         cand_str = str(cand)
-        if cand.is_dir() and cand_str not in sys.path:
-            sys.path.insert(0, cand_str)
+        if cand.is_dir() and not cand.is_symlink() and cand_str not in sys.path:
+            try:
+                if hasattr(os, "getuid") and cand.stat().st_uid not in (os.getuid(), 0):
+                    continue
+            except OSError:
+                continue
+            sys.path.append(cand_str)
             added = True
     if added:
         importlib.invalidate_caches()
@@ -520,73 +528,80 @@ def install_pro_wheel(
     target_dir: Path | str | None = None,
 ) -> dict[str, Any]:
     """Audit and install a `whole-body-compute-pro` `.whl` archive into the active environment."""
-    whl = Path(wheel_path).expanduser().resolve()
-    if not whl.is_file():
-        raise ValueError(f"Pro wheel file not found: {whl}")
-    if whl.suffix.lower() != ".whl":
-        raise ValueError(f"Expected a .whl archive, got: {whl.name}")
-    if not zipfile.is_zipfile(whl):
-        raise ValueError(f"Invalid wheel archive (not a valid zip file): {whl.name}")
-
-    # Mandatory pre-install cryptographic & namespace confinement verification on ALL paths
-    verify_pro_wheel_archive(whl)
+    src_whl = Path(wheel_path).expanduser().resolve()
+    if not src_whl.is_file():
+        raise ValueError(f"Pro wheel file not found: {src_whl}")
+    if src_whl.suffix.lower() != ".whl":
+        raise ValueError(f"Expected a .whl archive, got: {src_whl.name}")
 
     py_exe = python_executable or sys.executable
     env_target = target_dir or os.environ.get("WBC_PRO_INSTALL_TARGET")
     installer_used = "purelib_pep427"
 
-    if env_target:
-        dest_dir = Path(env_target).expanduser().resolve()
-        _verify_and_extract_wheel_purelib(whl, dest_dir)
-        if str(dest_dir) not in sys.path:
-            sys.path.insert(0, str(dest_dir))
-        installer_used = "target_pep427"
-    else:
-        installed_ok = False
-        uv_bin = shutil.which("uv")
-        if uv_bin:
-            proc_uv = subprocess.run(
-                [uv_bin, "pip", "install", "--python", py_exe, "--no-deps", "--reinstall", str(whl)],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if proc_uv.returncode == 0:
-                installed_ok = True
-                installer_used = "uv_pip"
+    with tempfile.TemporaryDirectory(prefix="wbc-pro-whl-stage-") as stage_tmp:
+        os.chmod(stage_tmp, 0o700)
+        whl = Path(stage_tmp) / src_whl.name
+        shutil.copy2(src_whl, whl)
+        os.chmod(whl, 0o600)
 
-        if not installed_ok:
-            proc_pip = subprocess.run(
-                [py_exe, "-m", "pip", "install", "--no-deps", "--force-reinstall", "--no-index", str(whl)],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if proc_pip.returncode == 0:
-                installed_ok = True
-                installer_used = "pip"
+        if not zipfile.is_zipfile(whl):
+            raise ValueError(f"Invalid wheel archive (not a valid zip file): {src_whl.name}")
 
-        if not installed_ok:
-            # Fallback for minimal/pip-less venvs or PEP 668 externally-managed environments
-            if Path(py_exe).resolve() == Path(sys.executable).resolve():
-                purelib = Path(sysconfig.get_path("purelib"))
-            else:
-                probe = subprocess.run(
-                    [py_exe, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        # Mandatory pre-install cryptographic & namespace confinement verification on isolated staged copy
+        verify_pro_wheel_archive(whl)
+
+        if env_target:
+            dest_dir = Path(env_target).expanduser().resolve()
+            _verify_and_extract_wheel_purelib(whl, dest_dir)
+            if str(dest_dir) not in sys.path:
+                sys.path.append(str(dest_dir))
+            installer_used = "target_pep427"
+        else:
+            installed_ok = False
+            uv_bin = shutil.which("uv")
+            if uv_bin:
+                proc_uv = subprocess.run(
+                    [uv_bin, "pip", "install", "--python", py_exe, "--no-deps", "--reinstall", str(whl)],
                     capture_output=True,
                     text=True,
-                    check=True,
+                    check=False,
                 )
-                purelib = Path(probe.stdout.strip())
-            try:
-                _verify_and_extract_wheel_purelib(whl, purelib)
-                installer_used = "purelib_pep427"
-            except PermissionError:
-                user_sp = _get_user_pro_site_packages()
-                _verify_and_extract_wheel_purelib(whl, user_sp)
-                if str(user_sp) not in sys.path:
-                    sys.path.insert(0, str(user_sp))
-                installer_used = "user_site_pep427"
+                if proc_uv.returncode == 0:
+                    installed_ok = True
+                    installer_used = "uv_pip"
+
+            if not installed_ok:
+                proc_pip = subprocess.run(
+                    [py_exe, "-m", "pip", "install", "--no-deps", "--force-reinstall", "--no-index", str(whl)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if proc_pip.returncode == 0:
+                    installed_ok = True
+                    installer_used = "pip"
+
+            if not installed_ok:
+                # Fallback for minimal/pip-less venvs or PEP 668 externally-managed environments
+                if Path(py_exe).resolve() == Path(sys.executable).resolve():
+                    purelib = Path(sysconfig.get_path("purelib"))
+                else:
+                    probe = subprocess.run(
+                        [py_exe, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                    purelib = Path(probe.stdout.strip())
+                try:
+                    _verify_and_extract_wheel_purelib(whl, purelib)
+                    installer_used = "purelib_pep427"
+                except PermissionError:
+                    user_sp = _get_user_pro_site_packages()
+                    _verify_and_extract_wheel_purelib(whl, user_sp)
+                    if str(user_sp) not in sys.path:
+                        sys.path.append(str(user_sp))
+                    installer_used = "user_site_pep427"
 
     clear_pro_module_cache(unload_sys_modules=True)
     plugin_state = discover_pro_plugin_status()
@@ -594,7 +609,7 @@ def install_pro_wheel(
         "installed": True,
         "status": "installed",
         "installer": installer_used,
-        "wheel_name": whl.name,
+        "wheel_name": src_whl.name,
         "version": plugin_state.get("version"),
         "entry_points": plugin_state.get("entry_points", []),
     }
@@ -687,12 +702,13 @@ def download_and_install_pro_wheel(
 
     raw_expected_sha = (resp_headers.get("X-Wheel-SHA256") if resp_headers else None) or ""
     expected_sha256 = raw_expected_sha.strip().lower()
-    if expected_sha256:
-        if not _SHA256_HEX_RE.match(expected_sha256):
-            raise RuntimeError("Pro wheel gate returned malformed X-Wheel-SHA256 header.")
-        actual_sha256 = hashlib.sha256(wheel_bytes).hexdigest().lower()
-        if actual_sha256 != expected_sha256:
-            raise RuntimeError("Downloaded Pro wheel failed SHA-256 integrity verification.")
+    if not expected_sha256:
+        raise RuntimeError("Pro wheel gate response missing required X-Wheel-SHA256 integrity header.")
+    if not _SHA256_HEX_RE.match(expected_sha256):
+        raise RuntimeError("Pro wheel gate returned malformed X-Wheel-SHA256 header.")
+    actual_sha256 = hashlib.sha256(wheel_bytes).hexdigest().lower()
+    if actual_sha256 != expected_sha256:
+        raise RuntimeError("Downloaded Pro wheel failed SHA-256 integrity verification.")
 
     wheel_filename = _extract_wheel_filename_from_headers(resp_headers, default_version=target_ver)
     with tempfile.TemporaryDirectory(prefix="wbc_pro_wheel_") as tmp_dir:

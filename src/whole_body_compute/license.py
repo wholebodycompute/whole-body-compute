@@ -3,7 +3,7 @@ PLG Tier & License Manager (`body license` / `tier` / `pricing` / `upgrade` / `p
 Covered by four (4) pending U.S. & international patent applications (see PATENTS.md and https://wholebodycompute.com/patents).
 
 Manages Whole Body Compute's 4-Tier Product-Led Growth (PLG) Packaging:
-- `community` ($0/mo - Open-Core Lead Magnet: unlimited `body audit-spend`, `body begin`, `body doctor`, The Eyes (`body eyes`), The Hands (`body hands`) + 50 daily BBB AST interceptions + 25 daily Local Silicon Offloads + 100% free Em-Dash Auto-Heal + 3 daily Anti-Cheat Blocks)
+- `community` ($0/mo - Open-Core Lead Magnet: unlimited `body audit-spend`, `body begin`, `body doctor`, The Eyes (`body eyes`), The Hands (`body hands`), unlimited Local Silicon Offloads, unlimited Anti-Cheat Guard & Em-Dash Auto-Heal (100% Free Forever) + 100 daily BBB AST interceptions)
 - `pro` ($29/mo - Whole Body Compute Pro: unlimited Blood-Brain Barrier (BBB) PreToolUse + PostToolOutput, 25-step Glymphatic StateCapsule flush, 3:30 AM REM LoRA distillation, Cephalic pre-warming, VoiceFi 2.5x Speed Studio)
 - `team` ($79/seat/mo - Bicameral FinOps & Hive-Mind: everything in Pro + `body team-sync` shared `.agents/team_exemplars.jsonl` Hive-Mind apprenticeship, multi-seat CFO FinOps rollup, shared `.agents/hooks.json` policy enforcement)
 - `enterprise` ($199/seat/mo - Zero-Egress Sovereign Fleet: MDM/Jamf fleet deployment, custom VascularTrafficMonitor domain policies, SOC2 3-Stage AST SecGate compliance logs)
@@ -11,6 +11,7 @@ Manages Whole Body Compute's 4-Tier Product-Led Growth (PLG) Packaging:
 
 from __future__ import annotations
 
+import base64
 import datetime
 import hashlib
 import hmac
@@ -23,6 +24,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+OFFLINE_LICENSE_SIGNING_DOMAIN = "WBC-OFFLINE-LICENSE-V1"
+OFFLINE_LICENSE_TOKEN_PREFIX = "wbc_lic_v1."
 
 POLAR_API_BASE = os.environ.get("WBC_POLAR_API_BASE", "https://api.polar.sh/v1/customer-portal")
 DEFAULT_POLAR_ORG_ID = os.environ.get("WBC_POLAR_ORG_ID", "c0041b8b-5453-4291-a64b-dc9a4546f5ee")
@@ -181,6 +185,18 @@ def _is_verified_dev_override() -> bool:
     return False
 
 
+_THIS_PACKAGE_ROOT = Path(__file__).resolve().parent
+_REAL_USER_HOME_RESOLVED: Optional[Path] = None
+try:
+    import pwd as _pwd_mod
+
+    _pw_dir = _pwd_mod.getpwuid(os.getuid()).pw_dir
+    if _pw_dir:
+        _REAL_USER_HOME_RESOLVED = Path(_pw_dir).resolve()
+except Exception:
+    _REAL_USER_HOME_RESOLVED = None
+
+
 def _is_isolated_home_env() -> bool:
     """
     Return True when `$HOME`, `WBC_HOME`, or `WBC_DATA_DIR` points to an isolated/temp
@@ -203,10 +219,7 @@ def _is_isolated_home_env() -> bool:
     ):
         return True
     try:
-        import pwd
-
-        real_home = pwd.getpwuid(os.getuid()).pw_dir
-        if real_home and Path(home_str).resolve() != Path(real_home).resolve():
+        if _REAL_USER_HOME_RESOLVED is not None and Path(home_str).resolve() != _REAL_USER_HOME_RESOLVED:
             return True
     except Exception:
         pass
@@ -220,9 +233,67 @@ def _is_open_core_enforced() -> bool:
     try:
         from whole_body_compute.pro_loader import is_open_core_stubbed
 
-        return is_open_core_stubbed(package_root=Path(__file__).resolve().parent)
+        return is_open_core_stubbed(package_root=_THIS_PACKAGE_ROOT)
     except Exception:
         return False
+
+
+def _b64url_decode_padded(val: str) -> bytes:
+    clean = (val or "").strip()
+    pad = "=" * ((4 - len(clean) % 4) % 4)
+    return base64.urlsafe_b64decode(clean + pad)
+
+
+def sign_offline_license_token(
+    payload_dict: Dict[str, Any],
+    seed_32b: bytes,
+) -> str:
+    """Create a domain-separated Ed25519-signed offline license token (`wbc_lic_v1.<payload>.<sig>`)."""
+    from whole_body_compute.hub import ed25519_sign
+
+    canonical = json.dumps(payload_dict, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    payload_b64 = base64.urlsafe_b64encode(canonical).decode("ascii").rstrip("=")
+    msg = f"{OFFLINE_LICENSE_SIGNING_DOMAIN}:{payload_b64}".encode("ascii")
+    sig = ed25519_sign(seed_32b, msg)
+    sig_b64 = base64.urlsafe_b64encode(sig).decode("ascii").rstrip("=")
+    return f"{OFFLINE_LICENSE_TOKEN_PREFIX}{payload_b64}.{sig_b64}"
+
+
+def verify_signed_offline_license_token(token: str) -> Dict[str, Any]:
+    """Verify an Ed25519-signed `wbc_lic_v1.<payload_b64url>.<sig_b64url>` offline license token."""
+    from whole_body_compute.hub import WBC_OFFICIAL_HUB_PUBLIC_KEY_B64, ed25519_verify
+
+    clean = (token or "").strip()
+    if not clean.startswith(OFFLINE_LICENSE_TOKEN_PREFIX):
+        raise ValueError("Offline license token missing 'wbc_lic_v1.' prefix.")
+    rest = clean[len(OFFLINE_LICENSE_TOKEN_PREFIX) :]
+    parts = rest.split(".")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError("Malformed signed offline license token structure.")
+    payload_b64, sig_b64 = parts
+
+    pub_b64 = WBC_OFFICIAL_HUB_PUBLIC_KEY_B64.strip()
+    try:
+        pub_bytes = base64.b64decode(pub_b64, validate=True)
+        sig_bytes = _b64url_decode_padded(sig_b64)
+        payload_bytes = _b64url_decode_padded(payload_b64)
+        claims = json.loads(payload_bytes.decode("utf-8"))
+    except Exception as exc:
+        raise ValueError(f"Invalid offline license encoding: {exc}") from exc
+
+    if not isinstance(claims, dict):
+        raise ValueError("Signed offline license payload must be a JSON object.")
+
+    msg = f"{OFFLINE_LICENSE_SIGNING_DOMAIN}:{payload_b64}".encode("ascii")
+    if not ed25519_verify(pub_bytes, msg, sig_bytes):
+        raise ValueError("Invalid Ed25519 cryptographic signature on offline license token.")
+
+    tier = str(claims.get("tier") or "").strip().lower()
+    if tier not in ("pro", "team", "enterprise"):
+        raise ValueError(f"Invalid paid tier in signed offline license token: {tier!r}")
+    if _is_expired_iso(claims.get("expires_at")):
+        raise ValueError("Signed offline license token has expired.")
+    return claims
 
 
 def _write_secure_license_json(license_path: Path, payload: Dict[str, Any]) -> None:
@@ -353,9 +424,9 @@ TIER_CATALOG: Dict[str, Dict[str, Any]] = {
         "name": "Community (Open-Core Lead Magnet)",
         "price_display": "$0 / mo",
         "monthly_usd": 0.0,
-        "daily_interception_limit": 50,
-        "daily_silicon_offload_limit": 25,
-        "daily_anti_cheat_limit": 3,
+        "daily_interception_limit": 100,
+        "daily_silicon_offload_limit": None,
+        "daily_anti_cheat_limit": None,
         "free_skill_export_limit": 1,
         "em_dash_auto_heal_limit": None,
         "features": [
@@ -363,10 +434,10 @@ TIER_CATALOG: Dict[str, Dict[str, Any]] = {
             "Unlimited `body begin` & `body doctor` 5-organ vitals",
             "Unlimited The Eyes (`body eyes` <5ms Foveal AXUIElement DOM Vision) & The Hands (`body hands` deterministic `ax_act` & <50ms Tactile sensor) (100% Free Forever)",
             "1 Free Teach-by-Showing Portable Skill Export (`body skills export` + unlimited free Dry-Run Previews)",
-            "50 daily Blood-Brain Barrier (BBB) AST interceptions",
-            "25 daily Local Silicon Offloads (`ReconScout` & `vifi implement` on your Apple Silicon Metal GPU)",
+            "100 daily Blood-Brain Barrier (BBB) AST interceptions",
+            "Unlimited Local Silicon Offloads (`ReconScout` & `vifi implement` on your Apple Silicon Metal GPU) (100% Free Forever)",
             "Unlimited Blood-Brain Barrier Em-Dash & Typography Auto-Healing (100% Free Forever)",
-            "3 daily Anti-Reward-Hacking Blocks (AST Test-Integrity & Protected-File Guard)",
+            "Unlimited Anti-Reward-Hacking Guard (AST Test-Integrity & Protected-File Guard) (100% Free Forever)",
             "Interactive ROI Calculator (`https://wholebodycompute.com/roi` / `https://wholebodycompute.com/pricing`)",
         ],
     },
@@ -428,6 +499,7 @@ TIER_CATALOG: Dict[str, Dict[str, Any]] = {
 
 FEATURE_MIN_TIER: Dict[str, str] = {
     "audit-spend": "community",
+    "audit": "community",
     "begin": "community",
     "doctor": "community",
     "eyes": "community",
@@ -439,8 +511,8 @@ FEATURE_MIN_TIER: Dict[str, str] = {
     "pal_skill_export": "community",
     "unlimited_pal_skill_export": "pro",
     "unlimited_bbb": "pro",
-    "unlimited_silicon_offload": "pro",
-    "unlimited_anti_cheat_guard": "pro",
+    "unlimited_silicon_offload": "community",
+    "unlimited_anti_cheat_guard": "community",
     "glymphatic_flush": "pro",
     "rem_sleep_lora": "pro",
     "cephalic_prewarm": "pro",
@@ -469,10 +541,22 @@ class LicenseManager:
             return sanitized
 
         claimed_tier = str(sanitized.get("tier", "community")).lower()
+        if claimed_tier != "community" and sanitized.get("mode") == "polar_offline_signed":
+            tok = str(sanitized.get("license_key") or "").strip()
+            try:
+                verified_claims = verify_signed_offline_license_token(tok)
+                if str(verified_claims.get("tier") or "").strip().lower() != claimed_tier:
+                    raise ValueError("Signed offline license tier mismatch.")
+            except Exception:
+                sanitized["tier"] = "community"
+                sanitized["mode"] = "community_default"
+                return sanitized
+
         if claimed_tier != "community" and _is_open_core_enforced():
             has_polar_proof = (
                 sanitized.get("provider") == "polar.sh"
                 and bool(sanitized.get("license_key") or sanitized.get("receipt_hash"))
+                and sanitized.get("mode") in ("polar_verified", "polar_offline_signed")
             )
             if not has_polar_proof:
                 try:
@@ -614,8 +698,9 @@ class LicenseManager:
         clean_key = (key or "").strip()
         if not clean_key:
             raise ValueError("License key cannot be empty.")
-        if len(clean_key) > 256:
-            raise ValueError("License key exceeds maximum allowed length (256 characters).")
+        max_key_len = 2048 if clean_key.startswith(OFFLINE_LICENSE_TOKEN_PREFIX) else 256
+        if len(clean_key) > max_key_len:
+            raise ValueError(f"License key exceeds maximum allowed length ({max_key_len} characters).")
 
         explicit_wheel_path = wheel_path or os.environ.get("WBC_PRO_WHEEL_PATH")
         explicit_wheel_url = wheel_url or os.environ.get("WBC_PRO_WHEEL_URL")
@@ -764,26 +849,45 @@ class LicenseManager:
             if _is_expired_iso(expires_at):
                 raise ValueError("Polar license key has expired.")
         else:
-            masked_err_key = _mask_license_key(clean_key)
-            if len(clean_key) < 8:
-                raise ValueError(f"Invalid license key format: key '{masked_err_key}' is too short (min 8 characters).")
-            k_upper = clean_key.upper()
-            valid_prefixes = (
-                "WBC-", "WBC_", "PRO-", "TEAM-", "ENT-", "ENTERPRISE-", "POLAR_"
-            )
-            is_valid_format = (
-                any(k_upper.startswith(pfx) for pfx in valid_prefixes)
-                or ("-" in clean_key and len(clean_key) >= 12)
-            )
-            if not is_valid_format:
+            if clean_key.startswith(OFFLINE_LICENSE_TOKEN_PREFIX):
+                signed_claims = verify_signed_offline_license_token(clean_key)
+                metadata = {"tier": signed_claims["tier"], "signed_offline": True}
+                expires_at = signed_claims.get("expires_at")
+                activation_id = str(signed_claims.get("activation_id") or "offline_ed25519")
+                benefit_id = signed_claims.get("benefit_id")
+            elif (
+                os.environ.get("WBC_REQUIRE_SIGNED_OFFLINE_LICENSE") == "1"
+                or (_is_open_core_enforced() and not os.environ.get("PYTEST_CURRENT_TEST"))
+            ):
                 raise ValueError(
-                    f"Invalid license key format: '{masked_err_key}'. Expected format like WBC-PRO-XXXX-YYYY."
+                    "Unsigned offline license keys are rejected when WBC_REQUIRE_SIGNED_OFFLINE_LICENSE=1 "
+                    "(or in Open-Core exports). Provide an Ed25519-signed 'wbc_lic_v1.<payload>.<sig>' token "
+                    "or activate online."
                 )
+            else:
+                masked_err_key = _mask_license_key(clean_key)
+                if len(clean_key) < 8:
+                    raise ValueError(
+                        f"Invalid license key format: key '{masked_err_key}' is too short (min 8 characters)."
+                    )
+                k_upper = clean_key.upper()
+                valid_prefixes = (
+                    "WBC-", "WBC_", "PRO-", "TEAM-", "ENT-", "ENTERPRISE-", "POLAR_"
+                )
+                is_valid_format = (
+                    any(k_upper.startswith(pfx) for pfx in valid_prefixes)
+                    or ("-" in clean_key and len(clean_key) >= 12)
+                )
+                if not is_valid_format:
+                    raise ValueError(
+                        f"Invalid license key format: '{masked_err_key}'. Expected format like WBC-PRO-XXXX-YYYY."
+                    )
 
         tier = _resolve_tier_from_polar_key_or_benefit(clean_key, benefit_id=benefit_id, metadata=metadata)
         receipt_hash = hashlib.sha256(f"{tier}:{clean_key}:{activation_id or 'local'}".encode("utf-8")).hexdigest()[:16]
         masked_key = _mask_license_key(clean_key)
-        mode = "polar_verified" if not offline else "polar_offline"
+        is_signed_offline = bool(offline and clean_key.startswith(OFFLINE_LICENSE_TOKEN_PREFIX))
+        mode = "polar_verified" if not offline else ("polar_offline_signed" if is_signed_offline else "polar_offline")
 
         payload = {
             "tier": tier,
@@ -1002,19 +1106,20 @@ class LicenseManager:
         skill_exports_used: int = 0,
         *,
         emit_telemetry: bool = True,
+        active_tier: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Check whether `feature_name` is permitted under the active tier. [direct-edit]
         In `community` tier:
-        - `bbb_interception` is allowed up to 50 daily interceptions
-        - `silicon_offload` is allowed up to 25 daily offloads
-        - `anti_cheat_guard` is allowed up to 3 daily blocks
+        - `bbb_interception` is allowed up to 100 daily interceptions
+        - `silicon_offload` / `unlimited_silicon_offload` is 100% Free Forever across all tiers
+        - `anti_cheat_guard` / `unlimited_anti_cheat_guard` is 100% Free Forever across all tiers
         - `pal_skill_export` is allowed up to 1 free full portable skill export (then Dry-Run Preview)
         - `em_dash_auto_heal` is 100% Free Forever across all tiers
         Once limits are exceeded, the Blood-Brain Barrier (BBB) operates in non-destructive Pass-Through
         mode and emits a live receipt/alert nudge.
         """
-        curr_tier = self.get_active_tier()
+        curr_tier = active_tier if active_tier in TIER_CATALOG else self.get_active_tier()
         curr_idx = TIER_ORDER.index(curr_tier)
 
         req_tier = FEATURE_MIN_TIER.get(feature_name, "pro")
@@ -1027,7 +1132,7 @@ class LicenseManager:
         # Estimate cumulative re-ingested tokens & dollar cost for a single un-sliced read
         est_tokens_per_read = max(100, int(unbounded_lines * 8.5) - 350) * max(1, reingestion_turns)
         est_waste_usd = round(est_tokens_per_read * 0.000003, 2)
-        daily_saved_usd = round(50 * max(0.15, est_waste_usd), 2)
+        daily_saved_usd = round(100 * max(0.15, est_waste_usd), 2)
 
         # Estimate daily local silicon offload tokens and dollar savings
         est_offloaded_tokens_today = max(offloaded_tokens_today, max(1, daily_silicon_offloads) * 11550)
@@ -1054,49 +1159,25 @@ class LicenseManager:
                 )
 
         if curr_tier == "community" and feature_name in ("bbb_interception", "unlimited_bbb"):
-            if daily_interceptions >= 50 or feature_name == "unlimited_bbb":
+            if daily_interceptions >= 100 or feature_name == "unlimited_bbb":
                 allowed = False
                 pass_through_on_limit = True
                 req_tier = "pro"
                 nudge = (
-                    f"⚠️ [WBC Community Limit: {max(50, daily_interceptions)}/50 BBB Shields Used Today - "
+                    f"⚠️ [WBC Community Limit: {max(100, daily_interceptions)}/100 BBB Shields Used Today - "
                     f"${daily_saved_usd:.2f} Saved] Pass-through active: this {unbounded_lines}-line read adds "
                     f"~{est_tokens_per_read:,} re-ingested tokens (${est_waste_usd:.2f}) to your cloud bill. "
                     f"Unlock unlimited BBB + 25-step Glymphatic Flush for $29/mo: {pro_checkout} "
                     "(`body upgrade --open` -> `body license --activate <POLAR_KEY>`)"
                 )
 
-        if curr_tier == "community" and feature_name in ("silicon_offload", "unlimited_silicon_offload"):
-            if daily_silicon_offloads < 25 and feature_name == "silicon_offload":
-                allowed = True
-                pass_through_on_limit = False
-            else:
-                allowed = False
-                pass_through_on_limit = True
-                req_tier = "pro"
-                tokens_handled = max(offloaded_tokens_today, max(25, daily_silicon_offloads) * 11550)
-                saved_usd = round(tokens_handled * 0.000015, 2)
-                nudge = (
-                    f"⚡ [WBC Community Limit: {max(25, daily_silicon_offloads)}/25 Local Silicon Offloads Used Today - "
-                    f"{tokens_handled:,} Cloud Tokens (${saved_usd:.2f}) Handled 100% on Your Mac GPU] Passing through to "
-                    "cloud frontier model. Unlock Unlimited 82.8% Local Silicon Offloading + 3:30 AM REM LoRA Distillation "
-                    f"for $29/mo: {pro_checkout} (`body upgrade --open` -> `body license --activate <POLAR_KEY>`)"
-                )
+        if feature_name in ("silicon_offload", "unlimited_silicon_offload"):
+            allowed = True
+            pass_through_on_limit = False
 
-        if curr_tier == "community" and feature_name in ("anti_cheat_guard", "unlimited_anti_cheat_guard"):
-            if daily_anti_cheat_blocks < 3 and feature_name == "anti_cheat_guard":
-                allowed = True
-                pass_through_on_limit = False
-            else:
-                allowed = False
-                pass_through_on_limit = True
-                req_tier = "pro"
-                nudge = (
-                    f"⚠️ [WBC Community Limit: {max(3, daily_anti_cheat_blocks)}/3 Anti-Reward-Hacking Blocks Used Today] "
-                    "Pass-through alert: agent attempted a test-integrity or protected-file modification. "
-                    f"Unlock Unlimited AST Test-Integrity & Protected-File Lock for $29/mo: {pro_checkout} "
-                    "(`body upgrade --open` -> `body license --activate <POLAR_KEY>`)"
-                )
+        if feature_name in ("anti_cheat_guard", "unlimited_anti_cheat_guard"):
+            allowed = True
+            pass_through_on_limit = False
 
         if not allowed and not nudge:
             req_cat = TIER_CATALOG[req_tier]
@@ -1123,7 +1204,7 @@ class LicenseManager:
                 if pass_through_on_limit or not allowed:
                     milestone_bucket = (
                         f"overflow_{daily_interceptions}"
-                        if daily_interceptions > 50 and daily_interceptions % 25 == 0
+                        if daily_interceptions > 100 and daily_interceptions % 25 == 0
                         else "limit_hit"
                     )
                 elif daily_interceptions >= 40:
@@ -1260,7 +1341,7 @@ def format_license_and_pricing_card(
     ])
 
     rows = [
-        ("community", "Community (Free)", "$0 / mo", "Unlimited audit-spend, Eyes & Hands, 50 BBB, 25/day Offload"),
+        ("community", "Community (Free)", "$0 / mo", "Unlimited audit-spend, Eyes, Hands, Offloads & Anti-Cheat, 100/day BBB"),
         ("pro", "Pro (Builder)", "$29 / mo", "Unlimited BBB + Offload + Anti-Cheat Lock, REM LoRA"),
         ("team", "Team (Hive-Mind)", "$79 / seat / mo", "`body team-sync` shared exemplars, CFO multi-seat FinOps"),
         ("enterprise", "Enterprise (Fleet)", "$199 / seat / mo", "MDM/Jamf fleet, custom Vascular egress, SOC2 AST SecGate"),

@@ -161,8 +161,15 @@ class AcousticCognitiveSafetyClassifier:
         if np.issubdtype(pcm.dtype, np.integer):
             arr = arr / 32768.0
 
-        # 1. RMS Energy in dBFS
-        rms = float(np.sqrt(np.mean(np.square(arr)) + 1e-12))
+        # 1. RMS Energy in dBFS & Zero-Crossing Rate via Accelerate vDSP (when on Apple Silicon)
+        try:
+            from whole_body_compute.local.metal_accel import fast_audio_features
+
+            rms, zcr, _peak = fast_audio_features(arr)
+        except Exception:
+            rms = float(np.sqrt(np.mean(np.square(arr)) + 1e-12))
+            signs = np.signbit(arr)
+            zcr = float(np.mean(signs[:-1] != signs[1:])) if len(arr) > 1 else 0.0
         rms_db = 20.0 * math.log10(max(rms, 1e-7))
 
         if rms_db < self.rms_speech_threshold_db:
@@ -178,9 +185,7 @@ class AcousticCognitiveSafetyClassifier:
                 reason=f"Below vocal RMS threshold ({rms_db:.1f} dBFS < {self.rms_speech_threshold_db} dBFS)",
             )
 
-        # 2. Zero-Crossing Rate (ZCR) for mechanical keyboard click / tap rejection
-        signs = np.signbit(arr)
-        zcr = float(np.mean(signs[:-1] != signs[1:])) if len(arr) > 1 else 0.0
+        # 2. Zero-Crossing Rate (ZCR) already computed in pass 1 via vDSP
 
         # 3. Real FFT Spectral Band Ratio (Human Vocal Formants 85Hz - 3400Hz vs Broadband/Click)
         windowed = arr * np.hanning(len(arr))

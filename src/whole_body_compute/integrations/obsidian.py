@@ -249,11 +249,13 @@ def get_daily_note_path(
             except Exception:
                 pass
 
-    note_name = f"{date_iso}.md" if not date_iso.endswith(".md") else date_iso
+    note_name = Path(f"{date_iso}.md" if not date_iso.endswith(".md") else date_iso).name
+    vault_resolved = vault_path.resolve()
     if custom_folder:
-        folder_path = vault_path / custom_folder
-        folder_path.mkdir(parents=True, exist_ok=True)
-        return folder_path / note_name
+        folder_path = (vault_path / custom_folder).resolve()
+        if folder_path.is_relative_to(vault_resolved):
+            folder_path.mkdir(parents=True, exist_ok=True)
+            return folder_path / note_name
 
     daily_notes_dir = vault_path / "Daily Notes"
     if daily_notes_dir.is_dir():
@@ -482,7 +484,11 @@ def launch_agent_in_vault(
 
     engine_norm = engine.lower().strip()
     if engine_norm in ("claude", "claude_code"):
-        cmd = f'tell application "Terminal" to do script "cd \\"{vault}\\" && claude"'
+        import shlex
+
+        shell_cmd = f"cd {shlex.quote(str(vault))} && claude"
+        as_escaped = shell_cmd.replace("\\", "\\\\").replace('"', '\\"')
+        cmd = f'tell application "Terminal" to do script "{as_escaped}"'
         subprocess.run(["osascript", "-e", cmd], check=False)
         return {
             "status": "ok",

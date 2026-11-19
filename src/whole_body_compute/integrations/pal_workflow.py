@@ -294,10 +294,21 @@ class PalStateGetters:
 
         if gtype == "shell_exit_zero":
             import subprocess
+            from whole_body_compute.organs.immune import VascularTrafficMonitor
+
+            shell_target = PalWorkflowRunner._interpolate(
+                check.target or "", vars_map, sanitize_shell=True
+            )
+            v_check = VascularTrafficMonitor.inspect_shell_command(shell_target)
+            if not v_check.get("allowed", True):
+                return (
+                    False,
+                    f"Security violation in shell_exit_zero: {v_check.get('reason', 'Blocked by VascularTrafficMonitor')}",
+                )
 
             try:
                 res = subprocess.run(
-                    target,
+                    shell_target,
                     shell=True,
                     capture_output=True,
                     text=True,
@@ -316,9 +327,10 @@ class PalStateGetters:
             return ok, (f"CLI '{target}' found at {found}" if ok else f"Required CLI '{target}' not found on PATH")
 
         if gtype == "app_running":
+            safe_app = target.strip().replace("\\", "\\\\").replace('"', '\\"')
             script = (
                 'tell application "System Events" to return (name of processes) '
-                f'contains "{target.strip()}"'
+                f'contains "{safe_app}"'
             )
             ok, out = PalHarness.run_applescript(script)
             running = bool(ok and "true" in (out or "").strip().lower())
@@ -651,7 +663,16 @@ class PalWorkflowRunner:
                 )
 
         # 1. Resolve & bind parameters
-        bound_vars = cls._bind_parameters(recipe.parameters, raw_prompt, explicit_args or {})
+        try:
+            bound_vars = cls._bind_parameters(recipe.parameters, raw_prompt, explicit_args or {})
+        except ValueError as exc:
+            return PalCommandResult(
+                success=False,
+                command=f"{recipe_id}:parameter_validation",
+                action_type="parameter_validation_failed",
+                details=str(exc),
+                spoken_summary="Blocked execution: unsafe workflow parameter",
+            )
         start_time = time.monotonic()
         self_healed_steps = 0
 
@@ -1293,6 +1314,79 @@ class PalWorkflowRunner:
         PalHarness.run_applescript(script)
 
     @classmethod
+    def _interpolate_shell_safe(cls, template: str, variables: Dict[str, Any]) -> str:
+        """
+        POSIX quote-context-aware `${var}` interpolation using `shlex.quote`.
+        Prevents both single-quote breakout (`'${var}'`) and double-quote command
+        substitution (`"${var}"` with `$(...)` or backticks).
+        """
+        if not template or not variables:
+            return template
+        out: List[str] = []
+        in_single = False
+        in_double = False
+        escaped = False
+        i = 0
+        n = len(template)
+        while i < n:
+            ch = template[i]
+            if escaped:
+                out.append(ch)
+                escaped = False
+                i += 1
+                continue
+            if ch == "\\" and not in_single:
+                out.append(ch)
+                escaped = True
+                i += 1
+                continue
+            if ch == "'" and not in_double:
+                in_single = not in_single
+                out.append(ch)
+                i += 1
+                continue
+            if ch == '"' and not in_single:
+                in_double = not in_double
+                out.append(ch)
+                i += 1
+                continue
+            if ch == "$" and i + 2 < n and template[i + 1] == "{":
+                end_brace = template.find("}", i + 2)
+                if end_brace != -1:
+                    var_name = template[i + 2 : end_brace]
+                    if var_name in variables:
+                        quoted = shlex.quote(str(variables[var_name]))
+                        if in_single:
+                            if out and out[-1] == "'":
+                                out.pop()
+                            else:
+                                out.append("'")
+                            out.append(quoted)
+                            if end_brace + 1 < n and template[end_brace + 1] == "'":
+                                in_single = False
+                                i = end_brace + 2
+                                continue
+                            out.append("'")
+                        elif in_double:
+                            if out and out[-1] == '"':
+                                out.pop()
+                            else:
+                                out.append('"')
+                            out.append(quoted)
+                            if end_brace + 1 < n and template[end_brace + 1] == '"':
+                                in_double = False
+                                i = end_brace + 2
+                                continue
+                            out.append('"')
+                        else:
+                            out.append(quoted)
+                        i = end_brace + 1
+                        continue
+            out.append(ch)
+            i += 1
+        return "".join(out)
+
+    @classmethod
     def _interpolate(
         cls,
         template: str,
@@ -1300,15 +1394,59 @@ class PalWorkflowRunner:
         sanitize_shell: bool = False,
         sanitize_as: bool = False,
     ) -> str:
+        if sanitize_shell:
+            return cls._interpolate_shell_safe(template, variables)
         result = template
         for k, v in variables.items():
             val = str(v)
-            if sanitize_shell:
-                val = shlex.quote(val)
-            elif sanitize_as:
+            if sanitize_as:
                 val = val.replace("\\", "\\\\").replace('"', '\\"')
             result = result.replace(f"${{{k}}}", val)
         return result
+
+    @staticmethod
+    def _validate_path_parameter(name: str, raw_val: Any, *, from_untrusted_prompt: bool) -> str:
+        """Guard `path` workflow parameters against sensitive dotfile/hook overwrites and prompt traversal."""
+        val_str = str(raw_val or "").strip()
+        if not val_str:
+            return val_str
+        if "\x00" in val_str:
+            raise ValueError(f"Invalid NUL byte in path parameter '{name}'")
+        expanded = str(Path(val_str).expanduser())
+        norm_low = expanded.replace("\\", "/").lower()
+        forbidden_markers = (
+            "/.ssh/",
+            "/.aws/",
+            "/.gnupg/",
+            "/.kube/",
+            "/.zshrc",
+            "/.zshenv",
+            "/.bashrc",
+            "/.bash_profile",
+            "/.profile",
+            "/etc/passwd",
+            "/etc/shadow",
+            "/etc/sudoers",
+            "/.git/hooks",
+            "/.git/config",
+        )
+        if any(m in norm_low or norm_low.endswith(m.rstrip("/")) for m in forbidden_markers):
+            raise ValueError(f"Blocked unsafe path target for parameter '{name}': {val_str}")
+        if from_untrusted_prompt:
+            parts = Path(val_str).parts
+            if ".." in parts:
+                raise ValueError(f"Blocked path traversal in prompt-extracted parameter '{name}': {val_str}")
+            resolved = Path(expanded).resolve()
+            cwd_res = Path.cwd().resolve()
+            tmp_roots = (Path("/tmp").resolve(), Path("/var/tmp").resolve())
+            if not (
+                resolved.is_relative_to(cwd_res)
+                or any(resolved.is_relative_to(tr) for tr in tmp_roots)
+            ):
+                raise ValueError(
+                    f"Blocked out-of-workspace path in prompt-extracted parameter '{name}': {val_str}"
+                )
+        return val_str
 
     @classmethod
     def _bind_parameters(
@@ -1320,14 +1458,21 @@ class PalWorkflowRunner:
         bound: Dict[str, Any] = {}
         unmatched_defs: Dict[str, str] = {}
         for name, pdef in param_defs.items():
+            is_path_param = str(getattr(pdef, "type", "")).lower() == "path" or name.endswith("_path")
             if name in explicit_args:
-                bound[name] = explicit_args[name]
+                val = explicit_args[name]
+                if is_path_param and val not in (None, ""):
+                    val = cls._validate_path_parameter(name, val, from_untrusted_prompt=False)
+                bound[name] = val
                 continue
             matched = False
             for pat in pdef.extract_patterns:
                 m = re.search(pat, prompt, re.IGNORECASE)
                 if m and "value" in m.groupdict():
-                    bound[name] = m.group("value")
+                    cand_val = m.group("value")
+                    if is_path_param:
+                        cand_val = cls._validate_path_parameter(name, cand_val, from_untrusted_prompt=True)
+                    bound[name] = cand_val
                     matched = True
                     break
             if not matched:
@@ -1339,7 +1484,15 @@ class PalWorkflowRunner:
             extracted = cls._extract_params_via_local_reflex(prompt, unmatched_defs)
             for k, v in extracted.items():
                 if k in unmatched_defs and v not in (None, ""):
-                    bound[k] = str(v)
+                    pdef_k = param_defs.get(k)
+                    is_path_k = (
+                        pdef_k is not None
+                        and (str(getattr(pdef_k, "type", "")).lower() == "path" or k.endswith("_path"))
+                    )
+                    if is_path_k:
+                        bound[k] = cls._validate_path_parameter(k, v, from_untrusted_prompt=True)
+                    else:
+                        bound[k] = str(v)
         return bound
 
     @classmethod

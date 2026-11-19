@@ -555,7 +555,7 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
                 print(f"📄 Synchronized Canonical 5-Pillar Metrics Ledger -> `{report['ledger_path']}`\n")
         return 0
 
-    if cmd in ("audit-spend", "roi", "finops"):
+    if cmd in ("audit-spend", "audit", "roi", "finops"):
         from pathlib import Path
         from whole_body_compute.finops_audit import (
             audit_historical_spend,

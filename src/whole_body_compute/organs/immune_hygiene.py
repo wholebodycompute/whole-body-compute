@@ -419,7 +419,7 @@ def _check_walken_audio_debounce() -> bool:
 def _trigger_walken_machine_mark_callout(
     vector: str = "typography_em_dash",
     snippet: str = "",
-    record_antigen: bool = True,
+    record_antigen: bool = False,
 ) -> bool:
     """
     Fire non-blocking (<1ms) Walken acoustic reflex with 2.0s debounce:
@@ -473,7 +473,7 @@ def _trigger_walken_machine_mark_callout(
 
 def _trigger_walken_em_dash_callout(
     snippet: str = "",
-    record_antigen: bool = True,
+    record_antigen: bool = False,
 ) -> bool:
     """Backward-compatible Walken callout delegating to multi-vector reflex."""
     return _trigger_walken_machine_mark_callout(

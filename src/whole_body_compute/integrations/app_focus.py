@@ -288,7 +288,7 @@ class AppFocusRegistry:
         if not clean_query:
             return False
 
-        escaped = clean_query.replace('"', '\\"')
+        escaped = clean_query.replace("\\", "\\\\").replace('"', '\\"').replace("\r", " ").replace("\n", " ")
         applescript = f'''
         set tabQuery to "{escaped}"
         set found to false
@@ -389,8 +389,9 @@ class AppFocusRegistry:
             pass
 
         try:
+            safe_app = app_name.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", "")
             subprocess.run(
-                ["osascript", "-e", f'tell application "{app_name}" to activate'],
+                ["osascript", "-e", f'tell application "{safe_app}" to activate'],
                 capture_output=True,
                 timeout=1.5,
             )
@@ -405,7 +406,9 @@ class AppFocusRegistry:
         time.sleep(delay_s)
 
         parts = [p.strip().lower() for p in shortcut.split("+")]
-        key = parts[-1]
+        key = re.sub(r"[^a-z0-9]", "", parts[-1])[:1]
+        if not key:
+            return False
         modifiers = parts[:-1]
 
         mod_clauses = []
@@ -418,10 +421,12 @@ class AppFocusRegistry:
         if "ctrl" in modifiers or "control" in modifiers:
             mod_clauses.append("control down")
 
+        safe_app = app_name.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", "")
+        safe_delay = max(0.0, min(float(delay_s), 5.0))
         using_clause = f" using {{{', '.join(mod_clauses)}}}" if mod_clauses else ""
         applescript = f'''
-        tell application "{app_name}" to activate
-        delay {delay_s}
+        tell application "{safe_app}" to activate
+        delay {safe_delay}
         tell application "System Events"
             keystroke "{key}"{using_clause}
         end tell

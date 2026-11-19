@@ -3903,26 +3903,52 @@ def run_foveal_daemon(
     except Exception as exc:
         logger.debug("AmbientWorkflowObserver startup notice: %s", exc)
 
+    sock_parent = os.path.dirname(socket_path)
+    if sock_parent:
+        os.makedirs(sock_parent, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(sock_parent, 0o700)
+        except OSError:
+            pass
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(socket_path)
+    old_umask = os.umask(0o177)
+    try:
+        server.bind(socket_path)
+    finally:
+        os.umask(old_umask)
     server.listen(5)
     logger.info("Foveal vision daemon listening on %s", socket_path)
     print(f"📡 Foveal Vision Daemon listening on {socket_path} (sub-5ms hot reflexes)")
+
+    _ALLOWED_READONLY_KEYS = {
+        "pid",
+        "app_name",
+        "window_title_query",
+        "max_elements",
+        "filter_query",
+        "include_floating",
+        "include_status_bar",
+        "read_last",
+    }
 
     try:
         while True:
             conn, _ = server.accept()
             try:
                 data = b""
-                while True:
+                while len(data) < 65536:
                     ch = conn.recv(4096)
                     if not ch:
                         break
                     data += ch
                     if b"\n" in ch:
                         break
+                if len(data) >= 65536 and b"\n" not in data:
+                    raise ValueError("Socket request exceeded 64 KiB limit")
                 if data:
                     req = json.loads(data.decode("utf-8"))
+                    if not isinstance(req, dict):
+                        raise ValueError("Request must be a JSON object")
                     if req.get("op") == "ambient_status":
                         resp = {
                             "status": "ok",
@@ -3937,7 +3963,8 @@ def run_foveal_daemon(
                             else 0,
                         }
                     else:
-                        snap = FovealVisionEngine.capture_snapshot(**req)
+                        safe_req = {k: v for k, v in req.items() if k in _ALLOWED_READONLY_KEYS}
+                        snap = FovealVisionEngine.capture_snapshot(**safe_req)
                         resp = snap.to_dict()
                     conn.sendall(json.dumps(resp).encode("utf-8") + b"\n")
             except Exception as exc:

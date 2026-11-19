@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows native fallback
@@ -458,7 +459,7 @@ def check_ruff(
 
     try:
         res = subprocess.run(
-            ["ruff", "check", "--ignore", "BLE001,S110,E501", "--quiet", "--"] + py_files,
+            ["ruff", "check", "--select", "E,F", "--ignore", "BLE001,S110,E501,E741,E402,F841,F401,F541", "--quiet", "--"] + py_files,
             check=False,
             cwd=repo_root,
             capture_output=True,
@@ -727,27 +728,34 @@ def run_fast_commit(
                     time.sleep(random.uniform(0.015, 0.060))
                     continue
 
-            # Update only scoped_rel_paths in shadow index (use -f when explicit/tracked paths
-            # live inside a newly .gitignore'd directory such as .agents/)
-            res_add = subprocess.run(
-                ["git", "add", "-A", "--"] + scoped_rel_paths,
-                check=False,
-                cwd=root,
-                env=env,
-                capture_output=True,
-                text=True,
-            )
-            if res_add.returncode != 0 and "ignored by one of your .gitignore files" in (res_add.stderr or ""):
-                res_add = subprocess.run(
-                    ["git", "add", "-f", "-A", "--"] + scoped_rel_paths,
+            # Update only scoped_rel_paths in shadow index (split existing vs deleted so
+            # deleted files and .gitignore'd tracked paths like .agents/* never collide)
+            existing_rel = [p for p in scoped_rel_paths if (root / p).exists() or (root / p).is_symlink()]
+            deleted_rel = [p for p in scoped_rel_paths if p not in existing_rel]
+
+            if deleted_rel:
+                res_rm = subprocess.run(
+                    ["git", "rm", "--cached", "--ignore-unmatch", "--quiet", "--"] + deleted_rel,
                     check=False,
                     cwd=root,
                     env=env,
                     capture_output=True,
                     text=True,
                 )
-            if res_add.returncode != 0:
-                return {"status": "error", "error": f"Failed to stage files in shadow index: {res_add.stderr}"}
+                if res_rm.returncode != 0:
+                    return {"status": "error", "error": f"Failed to stage deletions in shadow index: {res_rm.stderr}"}
+
+            if existing_rel:
+                res_add = subprocess.run(
+                    ["git", "add", "-f", "-A", "--"] + existing_rel,
+                    check=False,
+                    cwd=root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                if res_add.returncode != 0:
+                    return {"status": "error", "error": f"Failed to stage files in shadow index: {res_add.stderr}"}
 
             # 3. Extract staged diff
             res_diff = subprocess.run(
@@ -918,6 +926,11 @@ def run_checkpoint(
         return {"status": "ok", "checkpoints": checkpoints}
 
     if restore_ref:
+        if restore_ref.startswith("-"):
+            return {
+                "status": "error",
+                "error": f"Invalid checkpoint reference {restore_ref!r}: must not start with '-'",
+            }
         res = subprocess.run(
             ["git", "checkout", restore_ref, "--", "."],
             check=False,

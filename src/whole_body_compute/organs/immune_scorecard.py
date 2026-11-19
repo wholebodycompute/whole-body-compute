@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -610,6 +611,40 @@ def format_tools_breakdown_table(sc: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _format_compact_target(raw_tgt: str, max_len: int = 28) -> str:
+    """Format file paths (including workspace paths with spaces) or CLI commands cleanly without mid-directory truncation."""
+    s = str(raw_tgt or "").replace("\n", " ").replace("\r", " ").strip()
+    if not s:
+        return "unknown"
+    is_path_like = (
+        s.startswith(("/", "~/"))
+        and not s.startswith(("/bin/", "/usr/bin/"))
+        and " --" not in s
+        and " | " not in s
+        and " && " not in s
+    ) or (
+        "/" in s
+        and " " not in s
+        and not s.startswith(("http://", "https://"))
+    )
+    if is_path_like:
+        p = Path(s)
+        name = p.name or s
+        parent = p.parent.name if p.parent else ""
+        if parent and parent not in ("", "/", ".") and len(f"{parent}/{name}") <= max_len:
+            return f"{parent}/{name}"
+        return name[:max_len]
+    return s[:max_len]
+
+
+def _normalize_legacy_reason(reason: str) -> str:
+    """Normalize legacy historical organ audit log prefixes to 'BBB'."""
+    s = str(reason or "Blocked by Blood-Brain Barrier").replace("\n", " ").strip()
+    s = re.sub(r"\bOrgan\s+(?:10|11)\s*:?\s*", "BBB ", s)
+    s = s.replace("Blood-Brain Barrier ", "BBB ")
+    return s
+
+
 def format_top_blocked_table(sc: Dict[str, Any]) -> str:
     """Format top blocked files/commands table."""
     top_blkd = sc.get("top_blocked") or []
@@ -617,24 +652,23 @@ def format_top_blocked_table(sc: Dict[str, Any]) -> str:
     win_str = f"Window: {win}" if win != "all" else "All Time"
     lines = [
         f"\n🛑 Top Blocked Files & Commands ({win_str}):",
-        "┌──────┬─────────────┬─────────────────────┬──────────────────────────────┬──────────────────────────────────────────┐",
-        "│ Blkd │ Tool        │ Category            │ Target                       │ Primary Reason                           │",
-        "├──────┼─────────────┼─────────────────────┼──────────────────────────────┼──────────────────────────────────────────┤",
+        "┌──────┬─────────────┬─────────────────────┬──────────────────────────────┬──────────────────────────────────────────────────┐",
+        "│ Blkd │ Tool        │ Category            │ Target                       │ Primary Reason                                   │",
+        "├──────┼─────────────┼─────────────────────┼──────────────────────────────┼──────────────────────────────────────────────────┤",
     ]
     if not top_blkd:
-        lines.append("│ (No actions intercepted or blocked in this window)                                                     │")
+        lines.append("│ (No actions intercepted or blocked in this window)                                                             │")
     else:
         for entry in top_blkd[:10]:
             cnt = str(entry.get("count", 1)).rjust(4)
             tool = str(entry.get("tool", ""))[:11].ljust(11)
             cat = str(entry.get("category", ""))[:19].ljust(19)
-            raw_tgt = str(entry.get("target", "")).replace("\n", " ").replace("\r", " ")
-            tgt = Path(raw_tgt).name if "/" in raw_tgt and " " not in raw_tgt else raw_tgt
-            tgt_disp = tgt[:28].ljust(28)
+            raw_tgt = str(entry.get("target", ""))
+            tgt_disp = _format_compact_target(raw_tgt, max_len=28).ljust(28)
             reasons = entry.get("reasons") or ["Blocked by Blood-Brain Barrier"]
-            primary_reason = str(reasons[0]).replace("\n", " ")[:40].ljust(40)
+            primary_reason = _normalize_legacy_reason(str(reasons[0]))[:48].ljust(48)
             lines.append(f"│ {cnt} │ {tool} │ {cat} │ {tgt_disp} │ {primary_reason} │")
-    lines.append("└──────┴─────────────┴─────────────────────┴──────────────────────────────┴──────────────────────────────────────────┘")
+    lines.append("└──────┴─────────────┴─────────────────────┴──────────────────────────────┴──────────────────────────────────────────────────┘")
     return "\n".join(lines)
 
 
@@ -652,13 +686,14 @@ def format_immune_scorecard_table(
         show_blocked=show_blocked,
     )
     win_label = f"Window: {window}" if window and window.lower() != "all" else "All Time"
+    total_slices = int(sc.get("bounded_slice_reads", 0)) + int(sc.get("post_sliced_count", 0))
     lines = [
         f"🛡️  The Blood-Brain Barrier (BBB) - Pre/Post Context Shield, AST Gate & Vascular Scorecard ({win_label})",
         "┌──────────────────────────────┬──────────────────────────────────────────────────────────┐",
         f"│ Pre-Tool Checks / Post-Audits│ {sc['total_pre_checks']} pre-checks ({sc['fast_path_count']} fast-sh / {sc['deep_ast_count']} deep-AST) • {sc['total_post_verifications']} post │",
         f"│ Avg Overhead (Pre / Post)    │ {sc['avg_pre_latency_ms']:.2f}ms pre-gate  •  {sc['avg_post_latency_ms']:.2f}ms post-tactile{'':<19}│",
         f"│ Gate Decisions (All / 24h)   │ 🟢 {sc['allowed_count']} allowed  •  🩹 {sc['auto_healed_count']} healed  •  🛑 {sc['intercepted_count']} intercepted ({sc['intercepted_24h']} 24h)│",
-        f"│ Context Shield (AST / Slices)│ 🛡️ {sc['context_gate_intercepts']} full-reads blocked • ⚡ {sc['bounded_slice_reads']} slices • 💬 {sc['pre_invocation_nudges']} nudges│",
+        f"│ Context Shield (AST / Slices)│ 🛡️ {sc['context_gate_intercepts']} full-reads blocked • ⚡ {total_slices} slices • 💬 {sc['pre_invocation_nudges']} nudges│",
         f"│ Bicameral Compute Split      │ ⚖️ {sc.get('compute_split', {}).get('formatted', '0% Local • 0% Sub • 0% Cloud (0 ops)'):<54}│",
         f"│ Cloud Tokens Saved (Shield)  │ 📉 {sc['direct_tokens_saved']:,} dir (${sc.get('direct_usd_saved', 0):.2f}) • 🔥 {sc['quadratic_tokens_saved']:,} quad (~${sc['estimated_usd_saved']:.2f}){'':<3}│",
         f"│ Net Test Assertion Delta     │ {sc['net_assertion_delta']:+d} assertions across audited Python edits{'':<16}│",
@@ -679,24 +714,28 @@ def format_immune_scorecard_table(
             phase = str(ev.get("phase", "")).upper().ljust(4)
             tool = str(ev.get("tool", ""))[:12].ljust(12)
             lat = f"{float(ev.get('latency_ms', 0.0)):5.2f}ms"
-            raw_tgt = str(ev.get("target", "")).replace("\n", " ").replace("\r", " ")
-            target = Path(raw_tgt).name if "/" in raw_tgt and " " not in raw_tgt else raw_tgt[:38]
+            raw_tgt = str(ev.get("target", ""))
+            target = _format_compact_target(raw_tgt, max_len=42)
             if ev.get("phase") == "pre":
                 dec = ev.get("decision", "allow")
                 if ev.get("context_gate_triggered"):
                     badge = "🛡️ MAP"
-                elif ev.get("bounded_slice_read") and int(ev.get("direct_tokens_saved", 0)) > 0:
+                elif (ev.get("bounded_slice_read") or ev.get("read_auto_sliced")) and int(ev.get("direct_tokens_saved", 0)) > 0:
                     badge = "⚡ SLICE"
                 elif ev.get("auto_healed"):
                     badge = "🩹 HEAL"
                 else:
                     badge = "🟢 ALLOW" if dec == "allow" else f"🛑 {dec.upper()}"
-                lines.append(f"    [{phase}] {badge:<8} | {tool} | {lat} | {target[:40]}")
+                lines.append(f"    [{phase}] {badge:<8} | {tool} | {lat} | {target[:42]}")
             elif ev.get("phase") == "pre_invocation":
-                lines.append(f"    [PINV] 💬 NUDGE | {tool} | {lat} | {target[:40]}")
+                lines.append(f"    [PINV] 💬 NUDGE | {tool} | {lat} | {target[:42]}")
             else:
                 chg = "Δfile=True" if ev.get("file_changed") else "Δfile=False"
-                lines.append(f"    [{phase}] ✅ VERIF | {tool} | {lat} | {chg} ({target[:32]})")
+                if ev.get("post_output_sliced"):
+                    sav = int(ev.get("direct_tokens_saved", 0) or 0)
+                    lines.append(f"    [{phase}] ⚡ SLICE | {tool} | {lat} | -{sav:,} tok ({target[:32]})")
+                else:
+                    lines.append(f"    [{phase}] ✅ VERIF | {tool} | {lat} | {chg} ({target[:36]})")
     return "\n".join(lines)
 
 

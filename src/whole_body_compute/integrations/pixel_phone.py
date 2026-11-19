@@ -16,11 +16,22 @@ from __future__ import annotations
 
 import logging
 import re
+import shlex
 import struct
 import subprocess
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("whole_body_compute.integrations.pixel_phone")
+_ADB_SERIAL_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
+def _validate_adb_serial(serial: Optional[str]) -> Optional[str]:
+    if serial is None:
+        return None
+    clean = serial.strip()
+    if not clean or clean.startswith("-") or not _ADB_SERIAL_RE.match(clean):
+        raise ValueError(f"Invalid ADB serial: {serial!r}")
+    return clean
 
 
 def get_connected_pixel_device() -> Optional[Dict[str, str]]:
@@ -227,8 +238,12 @@ def set_pixel_clipboard(text: str, serial: Optional[str] = None) -> bool:
     if not serial:
         return False
 
-    escaped_text = text.replace('"', '\\"').replace("'", "\\'")
-    cmd = ["adb", "-s", serial, "shell", "input", "text", f'"{escaped_text}"']
+    try:
+        safe_serial = _validate_adb_serial(serial)
+    except ValueError:
+        return False
+    adb_encoded = text.replace(" ", "%s")
+    cmd = ["adb", "-s", safe_serial, "shell", "input", "text", shlex.quote(adb_encoded)]
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=5.0)
         return res.returncode == 0

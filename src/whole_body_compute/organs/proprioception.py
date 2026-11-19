@@ -1127,7 +1127,20 @@ def compute_sensory_vector(
         if t_path_str:
             try:
                 st = os.stat(t_path_str)
-                transcript_kb = round(st.st_size / 1024.0, 1)
+                raw_bytes_len = st.st_size
+                if harness_name == "claude_code" and raw_bytes_len > 65536:
+                    try:
+                        with open(t_path_str, "rb") as tfh:
+                            raw_b = tfh.read()
+                        if b'"attachment"' in raw_b:
+                            raw_bytes_len = sum(
+                                len(ln)
+                                for ln in raw_b.splitlines()
+                                if b'"type":"attachment"' not in ln and b'"type": "attachment"' not in ln
+                            )
+                    except OSError:
+                        pass
+                transcript_kb = round(raw_bytes_len / 1024.0, 1)
             except OSError:
                 transcript_kb = 0.0
         else:

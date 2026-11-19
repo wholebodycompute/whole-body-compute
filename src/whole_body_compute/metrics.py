@@ -1534,20 +1534,28 @@ class CanonicalMetricsEngine:
             pdfs = sorted(carousels_dir.glob("*.pdf")) if carousels_dir.is_dir() else []
             pngs = sorted(carousels_dir.glob("*.png")) if carousels_dir.is_dir() else []
 
-            completed_issues = 4
-            planned_issues = 6
-            next_queued_issue = 'Issue #5: "Read With Your Ears" (2.5x Speed Listening & High-Bandwidth I/O)'
+            completed_issues = max(7, len(pdfs))
+            planned_issues = max(9, completed_issues + 1)
+            next_queued_issue = 'Issue #6: "Zero-Bloat OS Hooks"'
 
             pipelines_path = self.workspace_root / ".agents" / "ACTIVE_PIPELINES.md"
             if pipelines_path.is_file():
                 try:
                     content = pipelines_path.read_text(encoding="utf-8", errors="ignore")
-                    checked_issues = re.findall(r"-\s*\[x\]\s*\*\*Issue\s*#\d+", content, re.IGNORECASE)
-                    unchecked_issues = re.findall(r"-\s*\[\s*\]\s*\*\*Issue\s*#\d+([^\n]*)", content, re.IGNORECASE)
+                    checked_issues = re.findall(r"-\s*\[x\]\s*\*\*[^\n]*Issue\s*#\d+", content, re.IGNORECASE)
+                    unchecked_issues = re.findall(r"-\s*\[\s*\]\s*\*\*[^\n]*Issue\s*#\d+([^\n]*)", content, re.IGNORECASE)
                     if checked_issues:
-                        completed_issues = len(checked_issues)
-                        planned_issues = completed_issues + len(unchecked_issues)
-                    if unchecked_issues:
+                        completed_issues = max(len(pdfs), len(checked_issues))
+                        planned_issues = max(completed_issues + 1, completed_issues + len(unchecked_issues))
+                    m_banner_queued = re.search(
+                        r"ISSUE\s*#(\d+)\s+EDITORIAL\s+CAROUSEL\s+QUEUED",
+                        content,
+                        re.IGNORECASE,
+                    )
+                    if m_banner_queued:
+                        q_num = m_banner_queued.group(1)
+                        next_queued_issue = f"Issue #{q_num} (Queued Next)"
+                    elif unchecked_issues:
                         m_next_issue = re.search(
                             r"-\s*\[\s*\]\s*\*\*(Issue\s*#\d+[^*]*)\*\*\s*([^\n]*)",
                             content,
@@ -1979,8 +1987,12 @@ def format_metrics_terminal_table(report: Dict[str, Any]) -> str:
         else "cold standby"
     )
     harnesses_list = awaken.get("wired_harnesses", ["antigravity"])
+    c_done = carousel.get("completed_issues_count", carousel.get("completed_issues", 0))
+    c_plan = carousel.get("planned_issues_count", carousel.get("planned_issues", 0))
+    c_pct = carousel.get("completion_pct", 0.0)
+    c_win_cell = f"{c_done}/{c_plan} ({c_pct:.1f}%)" if c_plan else carousel.get("summary", "")[:17]
     p5_last_row = (
-        f"    • Editorial Carousel Velocity        │ {str(carousel.get('completed_pdfs_count', 0)) + ' PDFs':>15} │ {carousel.get('summary', '')[:17]:>17} │ {carousel.get('next_queued_issue', 'N/A')[:18]}"
+        f"    • Editorial Carousel Velocity        │ {str(carousel.get('completed_pdfs_count', 0)) + ' PDFs':>15} │ {c_win_cell:>17} │ Next: {carousel.get('next_queued_issue', 'N/A')[:22]}"
         if p5.get("is_wbc_repo")
         else f"    • Wired IDE Harnesses                │ {str(len(harnesses_list)) + ' wired':>15} │ {', '.join(harnesses_list)[:17]:>17} │ Pre-commit SecGate"
     )

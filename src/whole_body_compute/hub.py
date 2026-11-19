@@ -197,7 +197,9 @@ def _pure_ed25519_verify(public_key: bytes, message: bytes, signature: bytes) ->
     # Cofactor-multiplied verification equation: [8][S]B == [8]R + [8][k]A (RFC 8032 §5.1.7)
     lhs = _ed_scalarmult(_ED_BASE, 8 * s)
     rhs = _ed_scalarmult(_ed_add(r_pt, _ed_scalarmult(a_pt, k)), 8)
-    return _ed_encodepoint(lhs) == _ed_encodepoint(rhs)
+    import hmac as _hmac
+
+    return _hmac.compare_digest(_ed_encodepoint(lhs), _ed_encodepoint(rhs))
 
 
 def ed25519_public_from_seed(seed: bytes, *, use_pure_python: bool = False) -> bytes:
@@ -691,10 +693,14 @@ def audit_zero_pii_and_shell_safety(recipe_dict: dict[str, Any]) -> list[str]:
         if m_ip:
             violations.append(f"Raw public IPv4 '{m_ip.group(0)}' detected in {field_path}")
 
-    # Inspect all shell execution surfaces via Blood-Brain Barrier VascularTrafficMonitor
+    # Inspect all shell & AppleScript execution surfaces via Blood-Brain Barrier VascularTrafficMonitor
     for s_idx, step in enumerate(recipe_dict.get("steps") or []):
         if not isinstance(step, dict):
             continue
+        if str(step.get("action") or "").strip().lower() == "applescript":
+            violations.append(
+                f"Untrusted AppleScript action in steps[{s_idx}] is disallowed in Hub recipes (use semantic UI or shell contracts)"
+            )
         cmd = step.get("command")
         if isinstance(cmd, str) and cmd.strip():
             vasc = VascularTrafficMonitor.inspect_shell_command(cmd, record_antigen_on_block=False)
@@ -1283,6 +1289,20 @@ def _is_loopback_url(url: str) -> bool:
     return host in ("127.0.0.1", "localhost", "::1")
 
 
+class _SafeHubRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        orig_scheme = urllib.parse.urlparse(req.full_url).scheme.lower()
+        new_parsed = urllib.parse.urlparse(newurl)
+        new_scheme = new_parsed.scheme.lower()
+        if new_scheme not in ("http", "https"):
+            raise urllib.error.URLError(f"Blocked Hub redirect to non-HTTP(S) scheme: {new_scheme!r}")
+        if orig_scheme == "https" and new_scheme != "https":
+            raise urllib.error.URLError("Blocked Hub HTTPS-to-HTTP downgrade redirect")
+        if new_scheme == "http" and not _is_loopback_url(newurl):
+            raise urllib.error.URLError("Blocked Hub redirect to non-loopback plain HTTP URL")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _fetch_bytes_from_url_or_path(url_or_path: str, timeout: float = 8.0) -> bytes:
     parsed = urllib.parse.urlparse(url_or_path)
     if parsed.scheme == "file":
@@ -1292,6 +1312,8 @@ def _fetch_bytes_from_url_or_path(url_or_path: str, timeout: float = 8.0) -> byt
         local_p = Path(url_or_path).expanduser()
         if local_p.is_file():
             return local_p.read_bytes()
+    if parsed.scheme not in ("http", "https"):
+        raise RecipeVerificationError(f"Unsupported Hub URL scheme: {parsed.scheme!r}")
     if parsed.scheme == "http" and not _is_loopback_url(url_or_path):
         raise RecipeVerificationError(
             f"Insecure plain HTTP Hub URL rejected ('{url_or_path}'); HTTPS is required for non-loopback registries"
@@ -1303,7 +1325,8 @@ def _fetch_bytes_from_url_or_path(url_or_path: str, timeout: float = 8.0) -> byt
             "User-Agent": f"whole-body-compute/{__version__}",
         },
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    opener = urllib.request.build_opener(_SafeHubRedirectHandler())
+    with opener.open(req, timeout=timeout) as resp:
         return resp.read(2 * 1024 * 1024)  # 2 MB safety cap
 
 

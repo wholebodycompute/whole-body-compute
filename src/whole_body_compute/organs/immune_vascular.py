@@ -480,13 +480,13 @@ def sanitize_untrusted_screen_text(
 # ---------------------------------------------------------------------------
 
 # Loopback hosts permitted for local sovereign stack communication
-ALLOWED_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "0.0.0.0")
+ALLOWED_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
 
 # Central Immune Tolerance ("Self" & Civic Research Domains permitted for read-only HTTP)
 TRUSTED_SELF_AND_CIVIC_DOMAINS: Tuple[str, ...] = (
     "wholebodycompute.org",
     "wholebodycompute.com",
-    "pages.dev",
+    "wholebodycompute.pages.dev",
     "github.com",
     "githubusercontent.com",
     "huggingface.co",
@@ -562,13 +562,11 @@ TRUSTED_SELF_AND_CIVIC_DOMAINS: Tuple[str, ...] = (
     "google.com",
     "googleapis.com",
     "gstatic.com",
-    "supabase.co",
     "algolia.net",
     "duckduckgo.com",
     "w3.org",
     "json-schema.org",
     "openxmlformats.org",
-    "cloudfront.net",
     "usps.com",
     "overpass-api.de",
     "county-portal.internal",
@@ -624,18 +622,143 @@ _CIVIC_KEYWORDS = (
 
 _CIVIC_HOST_RE = re.compile(
     rf"(?i)^(?=.*(?:{_CIVIC_KEYWORDS}))"
-    r"(?!.*(?:evil|attacker|example\.com|pwn|malicious|webhook|ngrok|requestbin|pipedream|pastebin))"
+    r"(?!.*(?:evil|attacker|example\.com|pwn|malicious|webhook|ngrok|requestbin|pipedream|pastebin|pages\.dev|workers\.dev|trycloudflare|vercel\.app|netlify\.app|herokuapp|ngrok-free))"
     r"[a-z0-9.-]+\.(?:org|net|com|gov|us|io|cloud|info|de|cc|internal|local)$"
 )
 
 _HTTP_EXFIL_OR_PIPE_RE = re.compile(
-    r"(?i)(?:\|\s*(?:ba|z)?sh\b|\|\s*python[23]?(?!\s+-(?:c|m\s+json\.tool)\b)\b|\|\s*perl\b|\|\s*ruby\b|"
-    r"(?:^|\s)-d\s*@|--data(?:-binary|-raw|-urlencode|-ascii)?\s*=?\s*@|"
-    r"(?:^|\s)-F\s+[^\s]*=@|(?:^|\s)-T\s+|--upload-file\b|"
-    r"\b(?:nc|ncat|netcat|scp|sftp|rsync|ssh)\s+(?!=))"
+    r"(?i)(?:\|\s*(?:ba|z|da|k|fi|c)?sh\b|\|\s*python[23]?(?!\s+-(?:c|m\s+json\.tool)\b)\b|"
+    r"\|\s*(?:perl|ruby|node|deno|bun|php|osascript)\b|"
+    r"(?:^|\s)(?:-d|--data(?:-binary|-raw|-urlencode|-ascii)?|--json)\s*(?:=|\s)\s*\S|"
+    r"(?:^|\s)(?:-F|--form(?:-string)?)\s*(?:=|\s)\s*\S|(?:^|\s)-T\s+|--upload-file\b|"
+    r"(?:^|\s)(?:-X|--request)\s*(?:=|\s)\s*['\"]?(?:POST|PUT|PATCH|DELETE)\b|"
+    r"--(?:post|body)-(?:data|file)\b|"
+    r"(?:^|\s)(?:-H|--header)\s*(?:=|\s)\s*['\"]?[^\n;|&]*\$(?:\(|[A-Za-z_{])|"
+    r"https?://[^\s'\"`]*\?[^\s'\"`]*(?:\$\(|`|\$\{?[A-Za-z_])|"
+    r"slack\.com/services/|"
+    r"\b(?:nc(?!\s*=)|ncat|netcat|socat|scp|sftp|rsync|ssh|ftp|telnet)\s+(?!=))"
 )
 
-_URL_HOST_RE = re.compile(r"(?i)\bhttps?://([a-z0-9._-]+)(?::\d+)?(?:/|\b|$)")
+_URL_TOKEN_RE = re.compile(r"(?i)\b(?:https?|ftp)://[^\s'\"`;|&<>()]+")
+_URL_HOST_RE = re.compile(r"(?i)\bhttps?://(?![^/\s'\"`]*@)([a-z0-9._-]+)(?::\d+)?(?:/|(?![a-z0-9._@-])\b|$)")
+_SHELL_SUBCMD_SPLIT_RE = re.compile(r"(?:&&|\|\||[;\n]|\$\(|\)|`)")
+_NET_CLIENT_BIN_RE = re.compile(
+    r"(?i)(?<![a-zA-Z0-9_./-])(?:/usr/bin/|/bin/|/opt/homebrew/bin/|/usr/local/bin/)?"
+    r"(?:curl|wget|nc(?!\s*=)|ncat|netcat|socat|scp|sftp|rsync|ssh|ftp|telnet|openssl\s+s_client)\b\s*(?!=)"
+)
+_HTTP_ONLY_CLIENT_RE = re.compile(
+    r"(?i)(?<![a-zA-Z0-9_./-])(?:/usr/bin/|/bin/|/opt/homebrew/bin/|/usr/local/bin/)?(?:curl|wget)\b"
+)
+_NON_HTTP_NET_CLIENT_RE = re.compile(
+    r"(?i)(?<![a-zA-Z0-9_./-])(?:/usr/bin/|/bin/|/opt/homebrew/bin/|/usr/local/bin/)?"
+    r"(?:nc(?!\s*=)|ncat|netcat|socat|scp|sftp|rsync|ssh|ftp|telnet|openssl\s+s_client)\b\s*(?!=)"
+)
+_SCRIPT_NET_EGRESS_RE = re.compile(
+    r"(?i)\b(?:python[23]?|node|perl|ruby|php)\s+-(?:c|e|r)\s+[^\n;|&]*"
+    r"(?:urllib\.request|requests\.(?:get|post|put|request)|http\.client|socket\.connect|fetch\s*\()\s*[^\n;|&]*"
+    r"https?://[^\s'\"`)>]+",
+)
+
+
+def _normalize_shell_evasions(command: str) -> str:
+    """Collapse trivial quote-splitting and backslash escapes in command tokens (e.g. cu\\rl, \"cur\"\"l\")."""
+    if not command:
+        return ""
+    norm = re.sub(r'""|\'\'', "", command)
+    norm = re.sub(r"\\([A-Za-z0-9_./-])", r"\1", norm)
+    return norm
+
+
+def _extract_parsed_urls(segment: str) -> Tuple[bool, list[str]]:
+    """
+    Parse all http(s)/ftp URLs in `segment` via `urllib.parse.urlsplit`.
+    Returns `(has_invalid_or_userinfo, hostnames)`. Any `@` userinfo authority confusion marks invalid.
+    """
+    import urllib.parse
+
+    hosts: list[str] = []
+    for raw_url in _URL_TOKEN_RE.findall(segment):
+        cleaned = raw_url.rstrip(".,;:)]}")
+        try:
+            parsed = urllib.parse.urlsplit(cleaned)
+        except ValueError:
+            return True, hosts
+        if parsed.username or parsed.password or "@" in (parsed.netloc or ""):
+            return True, hosts
+        if parsed.scheme.lower() not in ("http", "https"):
+            return True, hosts
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+        if not host:
+            return True, hosts
+        hosts.append(host)
+    return False, hosts
+
+
+def _is_loopback_target(host: str) -> bool:
+    h = (host or "").strip().lower().rstrip(".")
+    return h in ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def _segment_has_external_egress(segment: str) -> bool:
+    """Check a single shell subcommand segment for non-loopback network egress."""
+    seg = segment.strip()
+    if not seg:
+        return False
+
+    # 1. Inline scripting runtimes making HTTP calls to non-loopback URLs
+    if _SCRIPT_NET_EGRESS_RE.search(seg):
+        bad_url, url_hosts = _extract_parsed_urls(seg)
+        if bad_url or any(not _is_loopback_target(h) for h in url_hosts):
+            return True
+
+    if not _NET_CLIENT_BIN_RE.search(seg):
+        return False
+
+    # Allow pure local UNIX domain socket flags (curl --unix-socket ... http://localhost/...)
+    bad_url, url_hosts = _extract_parsed_urls(seg)
+    if bad_url:
+        return True
+
+    # Strip legitimate URLs from segment before scanning bare host/IP operands (e.g. ssh/scp/nc/curl host:port)
+    seg_no_urls = _URL_TOKEN_RE.sub(" ", seg)
+
+    # Check any URLs extracted
+    if any(not _is_loopback_target(h) for h in url_hosts):
+        return True
+
+    # Check bare hostnames, IPv4, or IPv6 operands on network clients (ssh user@host, nc 1.2.3.4 4444, curl evil.ai)
+    for m_ip in re.finditer(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", seg_no_urls):
+        if m_ip.group(1) != "127.0.0.1":
+            return True
+    for m_v6 in re.finditer(r"\[([0-9a-fA-F:]+)\]", seg_no_urls):
+        if m_v6.group(1).lower() != "::1":
+            return True
+    # Bare domain token (any 2+ letter TLD, excluding common file extensions on local flags like .json/.yaml/.sock/.txt/.log/.py/.sh/.pem/.crt/.key)
+    for m_dom in re.finditer(
+        r"(?:@|\s)([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+)(?::\d+|/|\s|$)",
+        seg_no_urls,
+    ):
+        cand = m_dom.group(1).lower().rstrip(".")
+        tld = cand.rsplit(".", 1)[-1]
+        if cand in ("127.0.0.1", "localhost"):
+            continue
+        if tld in {
+            "json", "jsonl", "yaml", "yml", "txt", "md", "log", "err", "out",
+            "py", "js", "ts", "rb", "rs", "go", "sh", "zsh", "html", "css",
+            "csv", "tsv", "xml", "sql", "sqlite", "db", "sock", "pid", "lock",
+            "pem", "crt", "cer", "key", "pub", "tar", "gz", "tgz", "zip", "whl",
+        }:
+            continue
+        if len(tld) >= 2 and tld.isalpha():
+            return True
+
+    # Non-HTTP raw socket/remote shell tools without an explicit loopback target
+    if _NON_HTTP_NET_CLIENT_RE.search(seg):
+        if not url_hosts and not re.search(r"\b(?:127\.0\.0\.1|localhost|::1)\b|(?:/tmp/|\.whole_body_compute/run/)[^\s]*\.sock\b", seg):
+            return True
+
+    return False
+
 
 # Forbidden shell command patterns (credential theft, privilege escalation, reverse shell, egress, harness introspection, reward hacking)
 VASCULAR_SHELL_RULES: Tuple[Tuple[str, str, re.Pattern[str]], ...] = (
@@ -661,9 +784,9 @@ VASCULAR_SHELL_RULES: Tuple[Tuple[str, str, re.Pattern[str]], ...] = (
             " .env, macOS keychain, secret env dumping)"
         ),
         re.compile(
-            r"(?i)(?:~|/Users/[^/\s]+|/root|/home/[^/\s]+)/\.(?:ssh/id_[a-zA-Z0-9_-]+|aws/(?:credentials|config)|config/gh/hosts\.yml|netrc|npmrc|kube/config|docker/config\.json)|"
+            r"(?i)(?:~|\$\{?HOME\}?|/Users/[^/\s]+|/root|/home/[^/\s]+)/\.(?:ssh/id_[a-zA-Z0-9_-]+|aws/(?:credentials|config)|config/gh/hosts\.yml|netrc|npmrc|pypirc|kube/config|docker/config\.json|gnupg/)|"
             r"/etc/(?:shadow|master\.passwd)|"
-            r"\b(?:cat|curl|scp|base64)\s+[^\n;|&'\"]*\.env(?:\.(?:local|prod|production|staging|development|secret))?(?![a-zA-Z0-9_.-])|"
+            r"\b(?:cat|head|tail|less|more|sed|awk|grep|rg|cp|tee|xxd|od|strings|curl|scp|base64|python[23]?|node|ruby|perl)\s+[^\n;|&'\"]*\.env(?:\.(?:local|prod|production|staging|development|secret))?(?![a-zA-Z0-9_.-])|"
             r"\bsecurity\s+find-(?:generic|internet)-password\b|"
             r"\b(?:export\s+[A-Za-z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD|AUTH)\s*=\s*\$\(\s*(?:env|printenv)\b)|"
             r"(?:^|[;&|]\s*)(?:env|printenv)\s*\|\s*grep\s+-[a-zA-Z0-9]*\s*['\"]?(?:HF_TOKEN|GITHUB_TOKEN|OPENAI_API_KEY|AWS_SECRET_ACCESS_KEY|SLACK_BOT_TOKEN)"
@@ -676,8 +799,10 @@ VASCULAR_SHELL_RULES: Tuple[Tuple[str, str, re.Pattern[str]], ...] = (
             " (sudo, docker.sock, unshare, nsenter, chroot, capsh, mount)"
         ),
         re.compile(
-            r"(?i)(?:^|[;&|]\s*)sudo\s+|\bchmod\s+(?:\+s|[2467][0-7]{3})\b|"
-            r"\brm\s+-[rf]{1,2}\s+(?:/|~|\$HOME)(?:\s|$)|"
+            r"(?i)(?:^|[;&|]\s*|/usr/bin/|/bin/|env\s+)(?:sudo|doas|pkexec)\s+|"
+            r"\bosascript\b[^\n;|&]*\bwith\s+administrator\s+privileges\b|"
+            r"\bchmod\s+(?:\+s|[2467][0-7]{3})\b|"
+            r"\brm\s+(?:-[a-zA-Z]*[rf][a-zA-Z]*\s+|--no-preserve-root\s+)+(?:/|~|\$\{?HOME\}?)(?:\s|$)|"
             r":\(\)\s*\{\s*:\|:&\s*\}\s*;|"
             r"\bmkfs\b|"
             r"\b(?:docker\.sock|containerd\.sock)\b|"
@@ -695,7 +820,7 @@ VASCULAR_SHELL_RULES: Tuple[Tuple[str, str, re.Pattern[str]], ...] = (
         ),
         re.compile(
             r"(?i)/proc/(?:self|1|\$(?:PPID|!|[a-z0-9_]+))/(?:environ|cmdline|mem|fd|maps|mountinfo|status)\b|\bls\s+/proc\b|"
-            r"\b(?:ps\s+-[a-zA-Z]*aux|pgrep|pkill|pidof)\b.*(?:harness|agent-runner|grading|verifier_daemon)|"
+            r"\b(?:ps\s+-[a-zA-Z]*aux|pgrep|pkill|pidof)\b[^\n;|&]{0,500}(?:harness|agent-runner|grading|verifier_daemon)|"
             r"/(?:\.daytona|daytona-daemon|daytona_repl_worker|daemon-swagger|\.harbor|fast-agent-results|fast-agent-home/sessions|logs/verifier|/installed-agent)|"
             r":2280/(?:version|openapi|docs|redoc|routes|process|shell|system|env|work-dir|files(?!/info\?path=/workdir|/find\?path=/workdir)|swagger)"
         ),
@@ -707,8 +832,8 @@ VASCULAR_SHELL_RULES: Tuple[Tuple[str, str, re.Pattern[str]], ...] = (
             " or benchmark gold solution theft"
         ),
         re.compile(
-            r"(?i)\b(?:sed|perl)\s+-[a-zA-Z0-9]*i[a-zA-Z0-9]*\b.*(?:s/assert|assert\s+True|pass|\btest_[a-zA-Z0-9_]+\.py|\bconftest\.py)|"
-            r"\bawk\s+-i\s+inplace\b.*(?:assert|test_)|"
+            r"(?i)\b(?:sed|perl)\s+-[a-zA-Z0-9]*i[a-zA-Z0-9]*\b[^\n;|&]{0,1000}(?:s/assert|assert\s+True|pass|\btest_[a-zA-Z0-9_]+\.py|\bconftest\.py)|"
+            r"\bawk\s+-i\s+inplace\b[^\n;|&]{0,1000}(?:assert|test_)|"
             r"\b(?:cat|head|tail|less|more|grep|python[23]?|bash|sh|\.)\s+[^\n;|&]*(?:grade\.py|eval\.sh|reference_solution|ground_truth|\.eval_cache|task\.toml|solution\.patch|gblock\.txt|instruction\.md)\b|"
             r"\b(?:cat|grep|head|tail|less|more|cp)\s+[^\n;|&]*(?:solution/solve\.sh|solve\.sh|grader\.py|correct\.json|solution\.csv|grader_local\.py|solution_solve\.sh|test_outputs\.py)|"
             r"\bgit\s+(?:log|show|diff|checkout|archive)\s+[^\n;|&]*(?:reference_solution|ground_truth|eval_answer|\.eval_cache|test_patch)\b|"
@@ -716,7 +841,7 @@ VASCULAR_SHELL_RULES: Tuple[Tuple[str, str, re.Pattern[str]], ...] = (
             r"/tmp/(?:seta-|seed2synth|hf_tb|r2r-|endless|fe-tmax|fe-termin|devset|tblite|toolbox_api|gitrecon|ref|tbp|repos|neutron_repo|hd_paths|paths_harbor)|"
             r"raw\.githubusercontent\.com/[^/\s]+/(?:OpenThoughts|SWE-bench|benchmark|eval|dev_set_tasks)|"
             r"rcsb\.org/fasta|fetch_fasta|"
-            r"importlib\.util\.spec_from_file_location.*(?:checker|test|grade|solution|eval)|"
+            r"importlib\.util\.spec_from_file_location[^\n;|&]{0,500}(?:checker|test|grade|solution|eval)|"
             r"\brm\s+-[rf]{1,2}\s+/tests\b|"
             r"for\s+d\s+in\s+[^\n;|&]*(?:/tests\s+/test|/grader|/eval\b)|"
             r"\b(?:LD_PRELOAD|DYLD_INSERT_LIBRARIES)\s*="
@@ -733,9 +858,9 @@ VASCULAR_SHELL_RULES: Tuple[Tuple[str, str, re.Pattern[str]], ...] = (
         "external_network_egress",
         "External network egress command (curl/wget/nc/scp/ssh to non-loopback host)",
         re.compile(
-            r"(?i)(?<![a-zA-Z0-9_])(?:curl|wget|nc(?!\s*=)|ncat|netcat|scp|sftp|rsync|ssh)\b\s+(?!=)"
+            r"(?i)(?<![a-zA-Z0-9_])(?:curl|wget|nc(?!\s*=)|ncat|netcat|socat|scp|sftp|rsync|ssh|ftp|telnet)\b\s+(?!=)"
             r"(?![^\n;|&]*(?:127\.0\.0\.1|localhost|::1|/tmp/vifi\.sock|/tmp/voicefi\.sock))"
-            r"[^\n;|&]*(?:https?://|ftp://|\b[a-z0-9.-]+\.(?:com|org|net|io|gov|edu|mil|sh|xyz|ru|cn|tk|dev|app|co)\b|\b\d{1,3}(?:\.\d{1,3}){3}\b)"
+            r"[^\n;|&]*(?:https?://|ftp://|\b[a-z0-9.-]+\.[a-z]{2,24}\b|\b\d{1,3}(?:\.\d{1,3}){3}\b)"
         ),
     ),
 )
@@ -754,13 +879,15 @@ class VascularTrafficMonitor:
     def is_trusted_host(cls, host: str) -> bool:
         """Check whether a hostname belongs to loopback, Self projects, or Civic/CAD portals."""
         h = (host or "").strip().lower().rstrip(".")
-        if not h:
+        if not h or "@" in h or ":" in h.strip("[]"):
             return False
         if h in ALLOWED_LOOPBACK_HOSTS:
             return True
         if h.endswith((".gov", ".us", ".mil", ".edu", ".internal", ".local")):
             return True
-        for dom in TRUSTED_SELF_AND_CIVIC_DOMAINS:
+        extra_env = os.environ.get("WBC_TRUSTED_EGRESS_DOMAINS", "")
+        extra_domains = tuple(d.strip().lower() for d in extra_env.split(",") if d.strip()) if extra_env else ()
+        for dom in TRUSTED_SELF_AND_CIVIC_DOMAINS + extra_domains:
             if h == dom or h.endswith("." + dom):
                 return True
         if _CIVIC_HOST_RE.match(h):
@@ -770,16 +897,39 @@ class VascularTrafficMonitor:
     @classmethod
     def is_trusted_self_or_civic_http(cls, command: str) -> bool:
         """
-        Return True if a shell command only performs read-safe HTTP requests to trusted
-        Self (enterprise_corpus, VoiceFi, GitHub) or Civic (County CAD, GIS, .gov) domains,
-        with no file uploads (`-d @`, `-F`, `-T`), raw sockets (`scp`, `nc`), or shell piping (`| sh`).
+        Return True if a shell command ONLY performs read-safe HTTP requests to trusted
+        Self or Civic domains across ALL subcommands, with no `@` userinfo authority confusion,
+        no POST/upload flags, no non-HTTP network clients, and no shell piping (`| sh`).
         """
-        if not command or _HTTP_EXFIL_OR_PIPE_RE.search(command):
+        norm_cmd = _normalize_shell_evasions(command)
+        if not norm_cmd or _HTTP_EXFIL_OR_PIPE_RE.search(norm_cmd):
             return False
-        hosts = _URL_HOST_RE.findall(command)
-        if not hosts:
+
+        subcommands = [s.strip() for s in _SHELL_SUBCMD_SPLIT_RE.split(norm_cmd) if s.strip()]
+        if not subcommands:
             return False
-        return all(cls.is_trusted_host(h) for h in hosts)
+
+        saw_trusted_http = False
+        for seg in subcommands:
+            if _NON_HTTP_NET_CLIENT_RE.search(seg) or _SCRIPT_NET_EGRESS_RE.search(seg):
+                return False
+            bad_url, seg_hosts = _extract_parsed_urls(seg)
+            if bad_url:
+                return False
+            if seg_hosts:
+                if not all(cls.is_trusted_host(h) for h in seg_hosts):
+                    return False
+                # Ensure no extra bare untrusted host/IP operands accompany a trusted URL on curl/wget
+                seg_without_urls = _URL_TOKEN_RE.sub(" http://127.0.0.1/ ", seg)
+                if _segment_has_external_egress(seg_without_urls):
+                    return False
+                saw_trusted_http = True
+            elif _HTTP_ONLY_CLIENT_RE.search(seg):
+                # Bare `curl evil.com` without `https://` scheme is NOT trusted civic HTTP
+                if _segment_has_external_egress(seg):
+                    return False
+
+        return saw_trusted_http
 
     @classmethod
     def inspect_shell_command(
@@ -795,11 +945,13 @@ class VascularTrafficMonitor:
         if not command or not command.strip():
             return {"allowed": True, "reason": "Empty command", "latency_ms": 0.0}
 
+        norm_cmd = _normalize_shell_evasions(command)
+
         # 1. Check Innate High-Severity Rules (credentials, sudo/rm -rf, reverse shell) first
         for rule_id, description, pattern in VASCULAR_SHELL_RULES:
             if rule_id == "external_network_egress":
                 continue
-            if pattern.search(command):
+            if pattern.search(command) or (norm_cmd != command and pattern.search(norm_cmd)):
                 if record_antigen_on_block:
                     ab = AntibodyRegistry.get_instance().record_antigen(
                         vector="shell_egress",
@@ -819,7 +971,7 @@ class VascularTrafficMonitor:
                 }
 
         # 2. Central Immune Tolerance: allow read-only HTTP to trusted Self & Civic domains
-        if cls.is_trusted_self_or_civic_http(command):
+        if cls.is_trusted_self_or_civic_http(norm_cmd):
             return {
                 "allowed": True,
                 "violation_type": None,
@@ -827,8 +979,8 @@ class VascularTrafficMonitor:
                 "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3),
             }
 
-        # 3. Check Adaptive Antibody Registry
-        ab_check = AntibodyRegistry.get_instance().screen_payload(command)
+        # 3. Check Adaptive Antibody Registry (scoped strictly to shell_egress vector)
+        ab_check = AntibodyRegistry.get_instance().screen_payload(command, vector_filter="shell_egress")
         if ab_check.get("blocked"):
             return {
                 "allowed": False,
@@ -838,28 +990,34 @@ class VascularTrafficMonitor:
                 "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3),
             }
 
-        # 4. Check external network egress rule for untrusted hosts
-        for rule_id, description, pattern in VASCULAR_SHELL_RULES:
-            if rule_id != "external_network_egress":
-                continue
-            if pattern.search(command):
-                if record_antigen_on_block:
-                    ab = AntibodyRegistry.get_instance().record_antigen(
-                        vector="shell_egress",
-                        payload=command,
-                        reason=f"{rule_id}: {description}",
-                        stage=3,
-                    )
-                    ab_id = ab.antibody_id
-                else:
-                    ab_id = None
-                return {
-                    "allowed": False,
-                    "violation_type": rule_id,
-                    "antibody_id": ab_id,
-                    "reason": f"Vascular Traffic Monitor blocked '{rule_id}': {description}",
-                    "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3),
-                }
+        # 4. Check external network egress per subcommand (immune to `localhost` query-string spoofing & `@` userinfo)
+        subcommands = [s.strip() for s in _SHELL_SUBCMD_SPLIT_RE.split(norm_cmd) if s.strip()]
+        egress_detected = any(_segment_has_external_egress(seg) for seg in subcommands)
+        if not egress_detected:
+            for rule_id, _desc, pattern in VASCULAR_SHELL_RULES:
+                if rule_id == "external_network_egress" and pattern.search(norm_cmd):
+                    egress_detected = True
+                    break
+
+        if egress_detected:
+            egress_desc = "External network egress command (curl/wget/nc/scp/ssh to non-loopback host)"
+            if record_antigen_on_block:
+                ab = AntibodyRegistry.get_instance().record_antigen(
+                    vector="shell_egress",
+                    payload=command,
+                    reason=f"external_network_egress: {egress_desc}",
+                    stage=3,
+                )
+                ab_id = ab.antibody_id
+            else:
+                ab_id = None
+            return {
+                "allowed": False,
+                "violation_type": "external_network_egress",
+                "antibody_id": ab_id,
+                "reason": f"Vascular Traffic Monitor blocked 'external_network_egress': {egress_desc}",
+                "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3),
+            }
 
         return {
             "allowed": True,
@@ -923,15 +1081,20 @@ class VascularTrafficMonitor:
     def build_zero_egress_seatbelt_profile() -> str:
         """
         Generate a macOS `sandbox-exec` Seatbelt profile that permits local compute
-        and loopback sockets (`localhost`, `127.0.0.1`, `/tmp/vifi.sock`) while
-        blocking all external internet outbound connections at the XNU kernel layer.
+        and loopback/WBC IPC sockets while blocking external internet outbound connections
+        and dangerous host UNIX sockets (`/var/run/docker.sock`, `/var/run/mDNSResponder`)
+        at the XNU kernel layer.
         """
+        wbc_run_dir = str((Path.home() / ".whole_body_compute" / "run").resolve()).replace("\\", "\\\\").replace('"', '\\"')
         return (
             "(version 1)\n"
             "(allow default)\n"
             "(deny network-outbound (remote ip))\n"
             '(allow network-outbound (remote ip "localhost:*"))\n'
-            '(allow network-outbound (remote unix-socket))\n'
+            "(deny network-outbound (remote unix-socket))\n"
+            f'(allow network-outbound (remote unix-socket (subpath "{wbc_run_dir}")))\n'
+            '(allow network-outbound (remote unix-socket (path-literal "/tmp/vifi.sock")))\n'
+            '(allow network-outbound (remote unix-socket (path-literal "/tmp/voicefi.sock")))\n'
         )
 
     @classmethod
@@ -975,8 +1138,10 @@ class CompanionTrafficGuard:
         """
         if not origin:
             return {"allowed": True, "origin": "*", "reason": "No Origin header (same-origin/CLI)"}
-        if origin in ("null", "file://", "app://obsidian.md", "capacitor://localhost"):
+        if origin in ("file://", "app://obsidian.md", "capacitor://localhost"):
             return {"allowed": True, "origin": origin, "reason": "Trusted native app container"}
+        if origin == "null":
+            return {"allowed": False, "origin": None, "reason": "Rejected sandboxed null Origin"}
 
         import urllib.parse
 
@@ -991,7 +1156,7 @@ class CompanionTrafficGuard:
 
         # 1. Local loopback & LAN
         if (
-            host in ("localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0")
+            host in ("localhost", "127.0.0.1", "::1", "[::1]")
             or host.endswith(".local")
             or host.endswith(".lan")
             or host in ("wholebodycompute.com", "wholebodycompute.org")

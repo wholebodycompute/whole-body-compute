@@ -1,6 +1,17 @@
 #!/bin/sh
 # ==============================================================================
 # Whole Body Compute - 60-Second Sovereign Agent Runtime Installer
+#
+# What this script does (zero sudo, 100% inspectable):
+#   1. Installs the `body` CLI into your user environment (uv / brew / pipx / venv)
+#   2. Runs `body begin` to wire Blood-Brain Barrier hooks into your coding agents
+#      (Claude Code, Cursor, Antigravity, Codex, Windsurf, Goose, OpenCode)
+#   3. Runs a <5ms local reflex self-test + 30-day retroactive FinOps audit
+#
+# Prefer not to pipe curl to sh? Install directly instead:
+#   macOS (Homebrew):  brew install wholebodycompute/tap/whole-body-compute && body begin
+#   macOS / Linux:     uv tool install whole-body-compute && body begin
+#
 # Hosted at:
 #   curl -fsSL https://wholebodycompute.com/begin | sh
 # ==============================================================================
@@ -20,7 +31,7 @@ ARCH_NAME="$(uname -m)"
 printf "  • Platform: %s (%s)\n" "$OS_NAME" "$ARCH_NAME"
 
 if [ "$OS_NAME" != "Darwin" ]; then
-  printf "${YELLOW}  ! Note: Apple Silicon Metal organs degrade gracefully on non-macOS hosts.${RESET}\n"
+  printf "${GREEN}  ✓ Linux/POSIX host: Blood-Brain Barrier hooks, <5ms AST slicer & FinOps shield active natively.${RESET}\n"
 fi
 
 # 1. Locate or install Whole Body Compute CLI (`body`)
@@ -43,14 +54,14 @@ elif [ -x "$HOME/.local/bin/body" ]; then
   if [ -z "$LOCAL_SRC" ] && [ "${WBC_SKIP_UPGRADE:-0}" != "1" ] && command -v uv >/dev/null 2>&1; then
     uv tool upgrade whole-body-compute >/dev/null 2>&1 || uv tool install --force "$GIT_REPO_URL" >/dev/null 2>&1 || true
   fi
-elif [ -x "./.venv/bin/body" ]; then
+elif [ "${WBC_ALLOW_WORKSPACE_VENV:-0}" = "1" ] && [ -x "./.venv/bin/body" ]; then
   printf "${GREEN}  ✓ Found workspace '.venv/bin/body' CLI${RESET}\n"
   PATH="$(pwd)/.venv/bin:$PATH"
   export PATH
 else
   printf "  • Installing whole-body-compute CLI...\n"
 
-  INSTALL_LOG="$(mktemp /tmp/wbc_install.XXXXXX 2>/dev/null || printf '/tmp/wbc_install.log')"
+  INSTALL_LOG="$(mktemp "${TMPDIR:-/tmp}/wbc_install.XXXXXX" 2>/dev/null || printf '/dev/null')"
   if command -v brew >/dev/null 2>&1 && [ "$OS_NAME" = "Darwin" ] && [ -z "$LOCAL_SRC" ] && [ "${WBC_PREFER_BREW:-0}" = "1" ]; then
     brew install wholebodycompute/tap/whole-body-compute >>"$INSTALL_LOG" 2>&1 || true
   fi
@@ -139,12 +150,12 @@ fi
 if command -v body >/dev/null 2>&1; then
   rm -f "${INSTALL_LOG:-}" 2>/dev/null || true
   exec body begin "$@"
-elif [ -x "./.venv/bin/body" ]; then
+elif [ "${WBC_ALLOW_WORKSPACE_VENV:-0}" = "1" ] && [ -x "./.venv/bin/body" ]; then
   rm -f "${INSTALL_LOG:-}" 2>/dev/null || true
   exec ./.venv/bin/body begin "$@"
-elif python3 -c "import whole_body_compute" >/dev/null 2>&1; then
+elif python3 -P -c "import whole_body_compute" >/dev/null 2>&1; then
   rm -f "${INSTALL_LOG:-}" 2>/dev/null || true
-  exec python3 -m whole_body_compute.cli begin "$@"
+  exec python3 -P -m whole_body_compute.cli begin "$@"
 else
   printf "${YELLOW}  ! Automatic CLI install did not complete on this Python/OS setup.${RESET}\n" >&2
   if [ -n "${INSTALL_LOG:-}" ] && [ -s "$INSTALL_LOG" ]; then

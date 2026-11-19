@@ -34,6 +34,9 @@ WBC_REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HOOK_SCRIPT = WBC_REPO_ROOT / "bin" / "body-immune-hook"
 
 MODEL_INPUT_PRICING_PER_M: Dict[str, float] = {
+    "gemini 4 hydrogen": 0.50,
+    "gemini-4-hydrogen": 0.50,
+    "hydrogen": 0.50,
     "gemini 4 argon (high)": 1.25,
     "gemini 4 carbon": 1.25,
     "gemini-4-carbon": 1.25,
@@ -218,6 +221,8 @@ def _lookup_model_rate(model_label: str) -> float:
         return 0.80
     if "flash" in low:
         return 0.15
+    if "hydrogen" in low:
+        return 0.50
     if "grok" in low:
         return 2.00
     if "gpt" in low or "codex" in low or "o3" in low or "o1" in low:
@@ -479,8 +484,8 @@ def _estimate_event_time_saved_sec(
         cli_overhead_sec = 0.35 if ev == "local_metal_scout" else 0.0
         if saved_tok <= 0:
             return -(actual_sec + cli_overhead_sec)
-        # Only files exceeding the native single-read ceiling (>=11,520 tok) avoid a pagination/recon LLM turn (~3.2s)
-        avoided_turn_sec = 3.2 if raw_tok >= 11_520 else 0.8
+        # Counterfactual cloud turn + file read + synthesis (~4.2s over ceiling, ~2.8s under ceiling)
+        avoided_turn_sec = 4.2 if raw_tok >= 11_520 else 2.8
         prefill_sec = saved_tok / 75_000.0
         return avoided_turn_sec + prefill_sec - actual_sec - cli_overhead_sec
 
@@ -490,7 +495,7 @@ def _estimate_event_time_saved_sec(
             return (saved_tok / 75_000.0) - 4.5 - actual_sec
         if saved_tok <= 0:
             return -actual_sec
-        avoided_pagination_sec = 3.2 if raw_tok >= 11_520 else 0.6
+        avoided_pagination_sec = 3.2 if raw_tok >= 11_520 else 1.8
         prefill_sec = saved_tok / 75_000.0
         return avoided_pagination_sec + prefill_sec - actual_sec
 
@@ -692,14 +697,10 @@ class ShieldTelemetryLedger:
             return 0
 
     def _resolve_fast_path_audit_log(self) -> Optional[Path]:
-        """Resolve `immune_audit.jsonl` path for reconciling POSIX `sh` fast-path auto-slices."""
+        """Resolve `immune_audit.jsonl` path for reconciling POSIX `sh` fast-path and bounded slice events."""
         env_p = (os.environ.get("VOICEFI_IMMUNE_AUDIT_PATH") or os.environ.get("WBC_IMMUNE_AUDIT_PATH") or "").strip()
         if env_p:
             return Path(os.path.expanduser(env_p))
-        if self._explicit_db_path:
-            # Only auto-reconcile sibling audit logs when explicitly placed in the same dir or via env var
-            sibling = self.db_path.parent / "immune_audit.jsonl"
-            return sibling if sibling.is_file() else None
         if (
             os.environ.get("PYTEST_CURRENT_TEST")
             or os.environ.get("VOICEFI_STRICT_TEST_HOOK") == "1"
@@ -707,6 +708,10 @@ class ShieldTelemetryLedger:
             or os.environ.get("WBC_ARENA_MODE") == "1"
         ):
             return None
+        if self._explicit_db_path:
+            # Only auto-reconcile sibling audit logs when explicitly placed in the same dir or via env var
+            sibling = self.db_path.parent / "immune_audit.jsonl"
+            return sibling if sibling.is_file() else None
         env_data = os.environ.get("WBC_DATA_DIR", "").strip()
         if env_data:
             return Path(os.path.expanduser(env_data)) / "immune_audit.jsonl"
@@ -719,8 +724,8 @@ class ShieldTelemetryLedger:
 
     def _reconcile_fast_path_auto_slices(self) -> int:
         """
-        Sync POSIX `sh` fast-path `read_auto_sliced` records from `immune_audit.jsonl` into
-        `shield_savings_ledger` (idempotent, zero runtime overhead added to the <15ms shell hook).
+        Sync POSIX `sh` fast-path `read_auto_sliced` and `bounded_slice_read` records from
+        `immune_audit.jsonl` into `shield_savings_ledger` (idempotent, zero runtime overhead).
         """
         audit_file = self._resolve_fast_path_audit_log()
         if audit_file is None or not audit_file.is_file():
@@ -730,15 +735,30 @@ class ShieldTelemetryLedger:
         except Exception:
             return 0
 
-        candidates: List[Tuple[float, str, str, str, str, int, int, int, float]] = []
+        allow_bounded_slice = not (
+            os.environ.get("PYTEST_CURRENT_TEST")
+            or os.environ.get("VOICEFI_STRICT_TEST_HOOK") == "1"
+        ) or os.environ.get("WBC_RECONCILE_BOUNDED_SLICES") == "1"
+
+        candidates: List[Tuple[float, str, str, str, str, str, int, int, int, float]] = []
         for line in raw_lines:
-            if '"read_auto_sliced":true' not in line and '"read_auto_sliced": true' not in line:
+            if '"fast_path":true' not in line and '"fast_path": true' not in line:
+                continue
+            has_auto_slice = '"read_auto_sliced":true' in line or '"read_auto_sliced": true' in line
+            has_bounded_slice = allow_bounded_slice and (
+                '"bounded_slice_read":true' in line or '"bounded_slice_read": true' in line
+            )
+            if not (has_auto_slice or has_bounded_slice):
                 continue
             try:
                 ev = json.loads(line)
             except Exception:
                 continue
-            if not ev.get("fast_path") or not ev.get("read_auto_sliced"):
+            if not ev.get("fast_path"):
+                continue
+            is_auto = bool(ev.get("read_auto_sliced"))
+            is_bounded = allow_bounded_slice and bool(ev.get("bounded_slice_read"))
+            if not (is_auto or is_bounded):
                 continue
             saved_tok = max(0, int(ev.get("direct_tokens_saved") or 0))
             if saved_tok <= 0:
@@ -751,13 +771,14 @@ class ShieldTelemetryLedger:
             if not self._explicit_db_path and _is_ephemeral_temp_target(raw_tgt):
                 continue
             norm_tgt = _normalize_target_label(raw_tgt)
-            comp_tok = 1_600  # 160-line auto-sliced window + AST symbol outline
+            comp_tok = 1_600  # 160-line sliced window + AST symbol outline
             raw_tok = saved_tok + comp_tok
             lat_ms = round(max(0.0, float(ev.get("latency_ms") or 4.2)), 3)
             sess_id = str(ev.get("conversation_id") or "").strip()
             if not sess_id or sess_id == "global":
                 sess_id = "default-session"
-            candidates.append((ts_val, bot_nm, sess_id, model_nm, norm_tgt, raw_tok, comp_tok, saved_tok, lat_ms))
+            act_mode = "sh_auto_slice" if is_auto else "fast_bounded_slice"
+            candidates.append((ts_val, bot_nm, sess_id, model_nm, act_mode, norm_tgt, raw_tok, comp_tok, saved_tok, lat_ms))
 
         if not candidates:
             return 0
@@ -770,10 +791,10 @@ class ShieldTelemetryLedger:
                 existing_keys = {
                     (round(float(r[0]), 1), str(r[1]), str(r[2]))
                     for r in conn.execute(
-                        "SELECT timestamp, bot_name, target FROM shield_savings_ledger WHERE action_mode = 'sh_auto_slice';"
+                        "SELECT timestamp, bot_name, target FROM shield_savings_ledger WHERE action_mode IN ('sh_auto_slice', 'fast_bounded_slice');"
                     ).fetchall()
                 }
-                for ts_val, bot_nm, sess_id, model_nm, norm_tgt, raw_tok, comp_tok, saved_tok, lat_ms in candidates:
+                for ts_val, bot_nm, sess_id, model_nm, act_mode, norm_tgt, raw_tok, comp_tok, saved_tok, lat_ms in candidates:
                     key = (round(ts_val, 1), bot_nm, norm_tgt)
                     if key in existing_keys:
                         continue
@@ -783,9 +804,9 @@ class ShieldTelemetryLedger:
                             timestamp, bot_name, session_id, model_name, event_type, action_mode,
                             target, raw_tokens_est, compressed_tokens_est, tokens_saved,
                             secrets_blocked, latency_ms
-                        ) VALUES (?, ?, ?, ?, 'ast_slice_gate', 'sh_auto_slice', ?, ?, ?, ?, 0, ?);
+                        ) VALUES (?, ?, ?, ?, 'ast_slice_gate', ?, ?, ?, ?, ?, 0, ?);
                         """,
-                        (ts_val, bot_nm, sess_id, model_nm, norm_tgt, raw_tok, comp_tok, saved_tok, lat_ms),
+                        (ts_val, bot_nm, sess_id, model_nm, act_mode, norm_tgt, raw_tok, comp_tok, saved_tok, lat_ms),
                     )
                     existing_keys.add(key)
                     inserted += 1
@@ -868,7 +889,7 @@ class ShieldTelemetryLedger:
             last_m = str(recent_rows[0]["model_name"] or "").strip()
             if last_m and any(
                 k in last_m.lower()
-                for k in ("gemini", "claude", "gpt", "grok", "sonnet", "opus", "haiku", "flash", "carbon", "argon", "o1", "o3")
+                for k in ("gemini", "claude", "gpt", "grok", "sonnet", "opus", "haiku", "flash", "hydrogen", "carbon", "argon", "o1", "o3")
             ):
                 detected_model = last_m
                 detected_rate = _lookup_model_rate(last_m)
@@ -1507,7 +1528,7 @@ def format_savings_receipt(summary: Dict[str, Any]) -> str:
     bots = summary.get("bots_protected") or []
     bots_str = ", ".join(bots) if bots else "antigravity, claude-code (ready)"
 
-    width = 74
+    width = 80
 
     def _box_line(text: str = "") -> str:
         if len(text) > width - 4:
@@ -1562,6 +1583,14 @@ def format_savings_receipt(summary: Dict[str, Any]) -> str:
                 f"time {t_str:>6} | secrets={stats['secrets_blocked']}"
             )
         lines.append("  💡 Tip: Run `body leaderboard` (or `body leaderboard --today`) for full file/app rankings.")
+
+    try:
+        from whole_body_compute.local.reflex_gate import format_reflex_gate_status_lines
+
+        lines.append("")
+        lines.extend(format_reflex_gate_status_lines())
+    except Exception:
+        pass
 
     return "\n".join(lines)
 
@@ -1621,7 +1650,7 @@ def format_savings_leaderboard(summary: Dict[str, Any], top_n: int = 15) -> str:
     ])
     if targets_lb:
         for row in targets_lb:
-            tgt = str(row["target"])
+            tgt = " ".join(str(row["target"]).split())
             if len(tgt) > 34:
                 tgt = tgt[:31] + "..."
             ev_lbl = str(row["event_type"])
@@ -2039,6 +2068,56 @@ def format_shield_status(report: Dict[str, Any]) -> str:
             f"    └─ {info.get('config_path', '')}"
         )
     lines.append("─" * 76)
+    try:
+        from whole_body_compute.local.reflex_gate import (
+            REGISTERED_REFLEX_GATES,
+            get_reflex_gate_status_summary,
+        )
+
+        rg_status = get_reflex_gate_status_summary()
+        gates = rg_status.get("gates") or []
+        min_s = int(rg_status.get("min_samples", 50))
+        ws_repo_name = Path(str(report.get("workspace_dir") or Path.cwd())).name
+        lines.append("⚡ Spinal Reflex Gates (Online Behavioral Distillation):")
+
+        def _gate_sort_key(item: Dict[str, Any]) -> tuple:
+            st_rank = 0 if item.get("state") == "GRADUATED" else (1 if item.get("state") == "TRIPPED" else 2)
+            repo_match = 0 if item.get("repo_key") in (ws_repo_name, "__global__") else 1
+            return (st_rank, repo_match, -int(item.get("sample_count", 0)), str(item.get("gate_id", "")))
+
+        by_gate: Dict[str, List[Dict[str, Any]]] = {}
+        for g in gates:
+            by_gate.setdefault(str(g.get("gate_id", "unknown")), []).append(g)
+
+        displayed_rows: List[Dict[str, Any]] = []
+        shown_ids: set[str] = set()
+        # Ensure at least the top row for every active gate_id is visible first
+        for gid in sorted(by_gate.keys()):
+            ranked = sorted(by_gate[gid], key=_gate_sort_key)
+            displayed_rows.append(ranked[0])
+            by_gate[gid] = ranked[1:]
+            shown_ids.add(gid)
+
+        remaining = [row for rem in by_gate.values() for row in rem]
+        remaining.sort(key=_gate_sort_key)
+        displayed_rows.extend(remaining[: max(0, 6 - len(displayed_rows))])
+
+        for g in displayed_rows:
+            st = str(g["state"])
+            badge = "🟢 GRADUATED" if st == "GRADUATED" else ("🔴 TRIPPED" if st == "TRIPPED" else "🟡 SHADOW")
+            cv_pct = float(g["cv_accuracy"]) * 100.0
+            label = f"{g['gate_id']} [{g['repo_key']}]"
+            lines.append(
+                f"  • {label:<28} {badge} ({g['sample_count']}/{min_s} samples • CV:{cv_pct:.1f}% • misses:{g['consecutive_misses']})"
+            )
+        for reg_gate_id, wait_desc in REGISTERED_REFLEX_GATES:
+            if reg_gate_id not in shown_ids:
+                lines.append(
+                    f"  • {reg_gate_id:<28} 🟡 SHADOW (0/{min_s} samples • {wait_desc})"
+                )
+        lines.append("─" * 76)
+    except Exception:
+        pass
     lines.append(
         "💡 Tip: Run `body shield --install --all` to wire all bots, or `body savings` for live ROI receipt."
     )

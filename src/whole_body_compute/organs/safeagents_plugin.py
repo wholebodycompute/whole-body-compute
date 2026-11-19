@@ -205,9 +205,10 @@ async def evaluate_with_metal_judge(
                 "source": "deterministic_wbc_blacklist",
             }
 
-    # --- Tier 1c: Deterministic Benign Whitelist (Strict Single-Command Only) ---
+    # --- Tier 1c: Deterministic Benign Whitelist (Strict Single-Command Only, Zero Scanner Findings) ---
     if (
         command_str
+        and not findings
         and not CHAINING_CHARS_RE.search(command_str)
         and BENIGN_DEV_PATTERNS.match(command_str)
     ):
@@ -225,10 +226,13 @@ async def evaluate_with_metal_judge(
         for f in findings
     ) if findings else "- none: general safety evaluation"
 
+    def _esc_xml(val: str) -> str:
+        return val.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
     user_prompt = (
-        f"<task>\n{task}\n</task>\n\n"
-        f"<tool_call name={json.dumps(tool_name)}>\n{args_text}\n</tool_call>\n\n"
-        f"<scanner_findings>\n{findings_str}\n</scanner_findings>"
+        f"<task>\n{_esc_xml(task)}\n</task>\n\n"
+        f"<tool_call name={json.dumps(tool_name)}>\n{_esc_xml(args_text)}\n</tool_call>\n\n"
+        f"<scanner_findings>\n{_esc_xml(findings_str)}\n</scanner_findings>"
     )
 
     body = {
@@ -257,9 +261,9 @@ async def evaluate_with_metal_judge(
                     data = resp.json()
                     content = data["choices"][0]["message"]["content"]
                     obj = json.loads(content[content.find("{") : content.rfind("}") + 1])
-                    v_raw = str(obj.get("verdict", "allow")).lower()
+                    v_raw = str(obj.get("verdict", "block")).strip().lower()
                     return {
-                        "verdict": "block" if "block" in v_raw else "allow",
+                        "verdict": "allow" if v_raw == "allow" else "block",
                         "reason": str(obj.get("reason", "")),
                         "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3),
                         "source": f"metal_judge_{ep_model}",

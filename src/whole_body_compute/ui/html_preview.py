@@ -11,6 +11,7 @@ Automatically awakened by Organ 05 (`PostToolUse` hook on `.html` files) with ze
 from __future__ import annotations
 
 import argparse
+import hmac
 import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -18,6 +19,7 @@ import mimetypes
 import os
 from pathlib import Path
 import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -100,6 +102,7 @@ EDIT_OVERLAY_SNIPPET = """
 <script id="wbc-live-edit-script">
 (function() {
   const relPath = __WBC_REL_PATH_JSON__;
+  const csrfToken = __WBC_CSRF_TOKEN_JSON__;
   const edits = new Map();
   const statusEl = document.getElementById("wbc-edit-status");
   const saveBtn = document.getElementById("wbc-save-btn");
@@ -186,7 +189,10 @@ EDIT_OVERLAY_SNIPPET = """
     try {
       const resp = await fetch("/__wbc_save", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-WBC-Preview-Token": csrfToken
+        },
         body: JSON.stringify({ rel_path: relPath, changes }),
       });
       const data = await resp.json();
@@ -269,26 +275,51 @@ def ensure_preview_server_running(repo_root: Path, port: int = DEFAULT_PORT) -> 
 
 def make_handler(repo_root: Path):
     root = repo_root.resolve()
-    site_dir = root / "site"
-    docs_dir = root / "docs"
+    site_dir = (root / "site").resolve()
+    docs_dir = (root / "docs").resolve()
+    allowed_bases = tuple(b for b in (site_dir, docs_dir) if b.exists())
+    csrf_token = secrets.token_urlsafe(32)
+    max_post_bytes = 1_048_576
+
+    def _is_under_allowed_base(cand: Path) -> bool:
+        return any(cand.is_relative_to(b) for b in allowed_bases)
+
+    def _is_valid_loopback_host(host_hdr: str) -> bool:
+        if not host_hdr:
+            return False
+        host_only = host_hdr.strip().lower()
+        if host_only.startswith("["):
+            host_only = host_only.split("]")[0].lstrip("[")
+        elif ":" in host_only:
+            host_only = host_only.split(":", 1)[0]
+        return host_only in ("127.0.0.1", "localhost", "::1")
+
+    def _is_valid_loopback_origin(origin_hdr: str) -> bool:
+        if not origin_hdr:
+            return True
+        try:
+            parsed_o = urlparse(origin_hdr.strip())
+        except Exception:
+            return False
+        if parsed_o.scheme.lower() != "http":
+            return False
+        return (parsed_o.hostname or "").lower() in ("127.0.0.1", "localhost", "::1")
 
     def _resolve_target(url_path: str) -> tuple[Path | None, str]:
         clean = unquote(url_path)
         if clean in ROUTE_ALIASES:
             clean = "/" + ROUTE_ALIASES[clean]
         rel = clean.lstrip("/") or "index.html"
-        for base in (site_dir, docs_dir, root):
-            if not base.exists():
-                continue
+        for base in allowed_bases:
             cand = (base / rel).resolve()
-            if cand.is_file() and str(cand).startswith(str(root)):
+            if cand.is_file() and cand.is_relative_to(base):
                 return cand, str(cand.relative_to(root))
-            if cand.is_dir() and str(cand).startswith(str(root)):
+            if cand.is_dir() and cand.is_relative_to(base):
                 cand_idx = (cand / "index.html").resolve()
-                if cand_idx.is_file():
+                if cand_idx.is_file() and cand_idx.is_relative_to(base):
                     return cand_idx, str(cand_idx.relative_to(root))
             cand_html = (base / (rel + ".html")).resolve()
-            if cand_html.is_file() and str(cand_html).startswith(str(root)):
+            if cand_html.is_file() and cand_html.is_relative_to(base):
                 return cand_html, str(cand_html.relative_to(root))
         return None, rel
 
@@ -297,13 +328,16 @@ def make_handler(repo_root: Path):
             return
 
         def do_GET(self) -> None:
+            if not _is_valid_loopback_host(self.headers.get("Host", "")):
+                self._send_json(403, {"status": "error", "error": "Forbidden Host header"})
+                return
             if self.path == "/__wbc_health":
                 self._send_json(200, {"status": "ok", "root": str(root)})
                 return
             parsed = urlparse(self.path)
             qs = parse_qs(parsed.query)
             target, rel = _resolve_target(parsed.path)
-            if target is None:
+            if target is None or not _is_under_allowed_base(target):
                 self.send_error(404, f"Not found: {parsed.path}")
                 return
 
@@ -319,7 +353,11 @@ def make_handler(repo_root: Path):
             if target.suffix.lower() == ".html":
                 text = data.decode("utf-8", errors="replace")
                 if qs.get("edit") == ["1"]:
-                    injected = EDIT_OVERLAY_SNIPPET.replace("__WBC_REL_PATH_JSON__", json.dumps(rel))
+                    safe_rel_json = json.dumps(rel).replace("</", "<\\/")
+                    safe_tok_json = json.dumps(csrf_token).replace("</", "<\\/")
+                    injected = EDIT_OVERLAY_SNIPPET.replace("__WBC_REL_PATH_JSON__", safe_rel_json).replace(
+                        "__WBC_CSRF_TOKEN_JSON__", safe_tok_json
+                    )
                 elif qs.get("clean") == ["1"] or target.name == "editorial_carousel_studio.html":
                     injected = ""
                 else:
@@ -339,24 +377,73 @@ def make_handler(repo_root: Path):
             self.wfile.write(data)
 
         def do_POST(self) -> None:
+            if not _is_valid_loopback_host(self.headers.get("Host", "")):
+                self._send_json(403, {"status": "error", "error": "Forbidden Host header"})
+                return
+            if not _is_valid_loopback_origin(self.headers.get("Origin", "")):
+                self._send_json(403, {"status": "error", "error": "Forbidden Origin header"})
+                return
+            if self.headers.get("Sec-Fetch-Site", "").lower() == "cross-site":
+                self._send_json(403, {"status": "error", "error": "Cross-site POST forbidden"})
+                return
             if self.path != "/__wbc_save":
                 self.send_error(404)
                 return
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            rel_arg = str(payload.get("rel_path", ""))
+            ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                self._send_json(415, {"status": "error", "error": "Content-Type must be application/json"})
+                return
+            supplied_tok = self.headers.get("X-WBC-Preview-Token", "")
+            if not supplied_tok or not hmac.compare_digest(supplied_tok, csrf_token):
+                self._send_json(403, {"status": "error", "error": "Missing or invalid preview CSRF token"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self._send_json(400, {"status": "error", "error": "Invalid Content-Length"})
+                return
+            if length <= 0 or length > max_post_bytes:
+                self._send_json(413, {"status": "error", "error": "Payload size out of bounds"})
+                return
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            except Exception:
+                self._send_json(400, {"status": "error", "error": "Invalid JSON body"})
+                return
+            if not isinstance(payload, dict):
+                self._send_json(400, {"status": "error", "error": "Expected JSON object"})
+                return
+            rel_arg = str(payload.get("rel_path", "")).strip()
+            if not rel_arg or "\x00" in rel_arg:
+                self._send_json(400, {"status": "error", "error": "Invalid rel_path"})
+                return
             fname = Path(rel_arg).name
             sub_rel = re.sub(r"^(site|docs)/", "", rel_arg)
             changes = payload.get("changes", [])
+            if not isinstance(changes, list):
+                self._send_json(400, {"status": "error", "error": "Invalid changes list"})
+                return
 
-            candidates = []
+            candidates: list[Path] = []
             exact = (root / rel_arg).resolve()
-            if exact.is_file() and str(exact).startswith(str(root)):
+            if (
+                exact.is_file()
+                and not exact.is_symlink()
+                and exact.suffix.lower() == ".html"
+                and _is_under_allowed_base(exact)
+            ):
                 candidates.append(exact)
-            for mirror in (docs_dir / sub_rel, site_dir / sub_rel, docs_dir / fname, site_dir / fname):
-                m_res = mirror.resolve()
-                if m_res.is_file() and m_res not in candidates:
-                    candidates.append(m_res)
+            for base_dir in allowed_bases:
+                for rel_cand in (sub_rel, fname):
+                    m_res = (base_dir / rel_cand).resolve()
+                    if (
+                        m_res.is_file()
+                        and not m_res.is_symlink()
+                        and m_res.suffix.lower() == ".html"
+                        and m_res.is_relative_to(base_dir)
+                        and m_res not in candidates
+                    ):
+                        candidates.append(m_res)
 
             if not candidates:
                 self._send_json(400, {"status": "error", "error": f"Unknown target {rel_arg}"})

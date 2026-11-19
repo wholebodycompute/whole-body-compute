@@ -64,6 +64,52 @@ MLX_8080_CHAT_URL = "http://127.0.0.1:8080/v1/chat/completions"
 
 PRO_COMPILER_MLX_MODEL = "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
 MAX_FRONTIER_MLX_MODEL = "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit"
+MAX_SPARSE_MOE_MLX_MODEL = "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+SPECULATIVE_DRAFT_MLX_MODEL = "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit"
+
+
+def get_mlx_speculative_config(target_model: str) -> Dict[str, Any]:
+    """
+    Return the M5 Pro calibrated Tier-2 speculative decoding configuration for an MLX model.
+    - Sparse MoE (`Qwen3-Coder-30B-A3B`): streams only ~1.85 GB/tok natively (53.4 tok/s decode,
+      2,234 tok/s prefill), so no draft model is needed.
+    - Dense 14B (`Qwen2.5-Coder-14B`): pairs with 1.5B draft at k=5 -> 50.5 tok/s (2.15x speedup).
+    - Dense 32B (`Qwen2.5-Coder-32B`): pairs with 1.5B draft at k=4 -> 30.9 tok/s (2.53x speedup).
+    """
+    m = (target_model or "").strip()
+    if "Qwen3-Coder-30B-A3B" in m or "A3B" in m:
+        return {
+            "target_model": m,
+            "use_speculative": False,
+            "draft_model": None,
+            "num_draft_tokens": 0,
+            "expected_prefill_tok_s": 2234.2,
+            "expected_decode_tok_s": 53.4,
+        }
+    if "32B" in m:
+        return {
+            "target_model": m,
+            "use_speculative": True,
+            "draft_model": SPECULATIVE_DRAFT_MLX_MODEL,
+            "num_draft_tokens": 4,
+            "expected_decode_tok_s": 30.9,
+            "speedup_x": 2.53,
+        }
+    if "14B" in m:
+        return {
+            "target_model": m,
+            "use_speculative": True,
+            "draft_model": SPECULATIVE_DRAFT_MLX_MODEL,
+            "num_draft_tokens": 5,
+            "expected_decode_tok_s": 50.5,
+            "speedup_x": 2.15,
+        }
+    return {
+        "target_model": m,
+        "use_speculative": False,
+        "draft_model": None,
+        "num_draft_tokens": 0,
+    }
 
 
 @dataclass
@@ -177,8 +223,123 @@ def resolve_voicefi_coder_mlx_dir() -> Optional[Path]:
     return None
 
 
+EXTERNAL_MODELS_VOLUME = Path("/Volumes/Local Models")
+
+
+def is_external_models_mounted() -> bool:
+    """Return True if the external NVMe model drive (`/Volumes/Local Models`) is mounted and writable."""
+    try:
+        return EXTERNAL_MODELS_VOLUME.is_dir() and (
+            (EXTERNAL_MODELS_VOLUME / "huggingface").is_dir()
+            or (EXTERNAL_MODELS_VOLUME / "ollama").is_dir()
+        )
+    except Exception:
+        return False
+
+
+def ensure_hot_warm_storage_routes() -> Dict[str, Any]:
+    """
+    Verify and auto-heal the Hot/Warm local model storage routes across internal NVMe
+    (`~/.whole_body_compute/models`, `~/.ollama/models_internal`) and external Thunderbolt NVMe
+    (`/Volumes/Local Models`).
+
+    - When `/Volumes/Local Models` is DOCKED:
+        * `~/.ollama/models` points to `/Volumes/Local Models/ollama/models`
+        * `~/.cache/huggingface/hub` points to `/Volumes/Local Models/huggingface/hub`
+    - When `/Volumes/Local Models` is UNPLUGGED:
+        * Automatically heals `~/.ollama/models` to `~/.ollama/models_internal` so Tier-0/1
+          Ollama models (`tev1:0.8b`, `voicefi-coder:1.5b`, `nomic-embed-text`) keep running offline.
+        * Hot internal MLX & audio models in `~/.whole_body_compute/models/` remain 100% available.
+    """
+    docked = is_external_models_mounted()
+    ollama_dir = Path.home() / ".ollama"
+    ollama_models_link = ollama_dir / "models"
+    ext_ollama_models = EXTERNAL_MODELS_VOLUME / "ollama" / "models"
+    int_ollama_models = ollama_dir / "models_internal"
+
+    target_ollama = ext_ollama_models if (docked and ext_ollama_models.is_dir()) else int_ollama_models
+    ollama_route_switched = False
+    active_ollama_target = ""
+
+    try:
+        if target_ollama.is_dir():
+            current_target = None
+            if ollama_models_link.is_symlink():
+                try:
+                    current_target = Path(os.readlink(ollama_models_link))
+                except Exception:
+                    current_target = None
+            if current_target != target_ollama:
+                if ollama_models_link.is_symlink() or ollama_models_link.is_file():
+                    ollama_models_link.unlink(missing_ok=True)
+                ollama_models_link.parent.mkdir(parents=True, exist_ok=True)
+                ollama_models_link.symlink_to(target_ollama)
+                ollama_route_switched = True
+            active_ollama_target = str(target_ollama)
+    except Exception as exc:
+        logger.debug("ensure_hot_warm_storage_routes ollama symlink check: %s", exc)
+
+    wbc_hot_dir = get_wbc_data_dir() / "models"
+    hot_models_present: List[str] = []
+    if wbc_hot_dir.is_dir():
+        for entry in sorted(wbc_hot_dir.iterdir()):
+            if entry.is_dir() or entry.suffix == ".onnx":
+                hot_models_present.append(entry.name)
+
+    ext_free_gb = 0.0
+    if docked:
+        try:
+            usage = shutil.disk_usage(EXTERNAL_MODELS_VOLUME)
+            ext_free_gb = round(usage.free / (1024**3), 1)
+        except Exception:
+            pass
+
+    return {
+        "mode": "docked_external" if docked else "unplugged_hot_internal",
+        "external_mounted": docked,
+        "external_volume": str(EXTERNAL_MODELS_VOLUME),
+        "external_free_gb": ext_free_gb,
+        "ollama_target": active_ollama_target,
+        "ollama_route_switched": ollama_route_switched,
+        "hot_internal_dir": str(wbc_hot_dir),
+        "hot_models": hot_models_present,
+    }
+
+
+def resolve_local_mlx_model_path(repo_id: str) -> Optional[Path]:
+    """
+    Resolve an MLX model (`mlx-community/...` or `voicefi-coder-mlx`) preferring the
+    internal Hot Tier (`~/.whole_body_compute/models/<basename>`) first so unplugged inference
+    always succeeds, then falling back to `~/.cache/huggingface/hub` (or `/Volumes/Local Models/huggingface/hub`).
+    """
+    if repo_id == "voicefi-coder-mlx":
+        return resolve_voicefi_coder_mlx_dir()
+
+    short_name = repo_id.split("/")[-1]
+    hot_cand = get_wbc_data_dir() / "models" / short_name
+    if hot_cand.is_dir() and any(hot_cand.glob("*.safetensors")):
+        return hot_cand
+
+    hf_hubs = [
+        Path.home() / ".cache" / "huggingface" / "hub",
+        EXTERNAL_MODELS_VOLUME / "huggingface" / "hub",
+    ]
+    for hub in hf_hubs:
+        try:
+            folder = hub / f"models--{repo_id.replace('/', '--')}"
+            if folder.is_dir():
+                snaps = sorted((folder / "snapshots").glob("*"))
+                if snaps and any(snaps[-1].glob("*.safetensors")):
+                    return snaps[-1]
+        except Exception:
+            continue
+    return None
+
+
 def is_hf_mlx_model_cached(repo_id: str) -> bool:
-    """Return True if an MLX Hugging Face repo (`mlx-community/...`) is cached on disk."""
+    """Return True if an MLX Hugging Face repo (`mlx-community/...`) is cached in Hot Internal or External HF Hub."""
+    if resolve_local_mlx_model_path(repo_id) is not None:
+        return True
     hf_hub = Path.home() / ".cache" / "huggingface" / "hub"
     folder = hf_hub / f"models--{repo_id.replace('/', '--')}"
     return folder.is_dir() and any(folder.rglob("*.safetensors"))
@@ -240,13 +401,15 @@ def get_tier_manifest(tier_id: str) -> Dict[str, Any]:
     if t == "max":
         return {
             "tier_id": "max",
-            "name": "Max Sovereign Pack (64GB+ RAM — Core + 14B PbE Compiler + 32B Ready)",
+            "name": "Max Sovereign Pack (64GB+ RAM - Core + 14B PbE Compiler + 30B-A3B / 32B Ready)",
             "description": (
                 "tev1:0.8b (141ms Param/HAR Triage :11434) + voicefi-coder-mlx (4.97s Self-Heal :9379) "
-                "+ Qwen2.5-Coder-14B-4bit (2.15s PbE Compiler :8080)"
+                "+ Qwen2.5-Coder-14B-4bit (2.15s PbE Compiler :8080) + Qwen3-Coder-30B-A3B (53.4 tok/s Sparse MoE)"
             ),
             "models": [*starter_models, pro_compiler_model],
             "optional_frontier": MAX_FRONTIER_MLX_MODEL,
+            "optional_sparse_moe": MAX_SPARSE_MOE_MLX_MODEL,
+            "speculative_draft": SPECULATIVE_DRAFT_MLX_MODEL,
             "min_ram_gb": 64,
             "total_size_mb": 10420,
         }
@@ -259,6 +422,7 @@ def get_tier_manifest(tier_id: str) -> Dict[str, Any]:
                 "+ Qwen2.5-Coder-14B-4bit (2.15s PbE Compiler :8080)"
             ),
             "models": [*starter_models, pro_compiler_model],
+            "speculative_draft": SPECULATIVE_DRAFT_MLX_MODEL,
             "min_ram_gb": 16,
             "total_size_mb": 10420,
         }
@@ -400,11 +564,15 @@ def check_organ_status() -> List[OrganHealth]:
         )
 
     # 2. Mouth
-    from whole_body_compute.tts.kokoro_tts import KokoroTTS
+    try:
+        from whole_body_compute.tts.kokoro_tts import KokoroTTS
 
-    kokoro_ok = KokoroTTS.is_available()
-    m_file, v_file = KokoroTTS.resolve_model_and_voices_files()
-    if kokoro_ok and m_file.exists() and v_file.exists():
+        kokoro_ok = KokoroTTS.is_available()
+        m_file, v_file = KokoroTTS.resolve_model_and_voices_files()
+    except ImportError:
+        kokoro_ok = False
+        m_file, v_file = Path(), Path()
+    if kokoro_ok and m_file.is_file() and v_file.is_file():
         organs.append(
             OrganHealth(
                 organ="2. Mouth",

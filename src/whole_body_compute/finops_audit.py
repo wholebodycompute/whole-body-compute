@@ -96,15 +96,20 @@ def calculate_csi(
 
     trunc_penalty = 0.05 * min(1.0, truncated_steps / 25.0)
     latency_penalty = 0.0
+    inflation = 1.0
     if early_step_sec > 0.1:
         # True turn-latency inflation against the thread's own early baseline
         inflation = recent_step_sec / early_step_sec
         if recent_step_sec > 3.5 and inflation > 1.05:
             latency_penalty = 0.05 * min(1.0, (inflation - 1.05) / 0.80)
+            if inflation >= 2.0 and recent_step_sec >= 8.0 and (steps >= 100 or full_size_kb >= 600.0):
+                latency_penalty += min(0.25, 0.12 + 0.08 * (inflation - 2.0))
     elif recent_step_sec > 3.5:
         latency_penalty = 0.05 * min(1.0, (recent_step_sec - 3.5) / 6.5)
 
     csi = round(base + trunc_penalty + latency_penalty, 3)
+    if inflation >= 2.0 and recent_step_sec >= 8.0 and (steps >= 120 or full_size_kb >= 700.0):
+        csi = max(csi, 0.72)
 
     if steps >= HARD_STEP_THRESHOLD or full_size_kb >= HARD_SIZE_KB_THRESHOLD or csi >= 1.00:
         tier = "RED"
@@ -264,7 +269,15 @@ def analyze_bloat_attribution(
     )
     top_stats = sorted_tools.get(top_tool, {}) if top_tool else {}
 
-    if top_tool in ("run_command", "bash", "execute_command"):
+    if primary_cause == "NOMINAL":
+        recommendations.append(
+            "Context telemetry nominal. Continue standard execution cadence."
+        )
+    elif primary_cause == "RETRY_CHURN_LOOP" and top_tool:
+        recommendations.append(
+            f"Repeated consecutive retries on '{top_tool}'. Verify prerequisites or step arguments before looping."
+        )
+    elif top_tool in ("run_command", "bash", "execute_command"):
         if primary_cause == "TRUNCATION_CASCADE" or top_stats.get("truncated", 0) > 0:
             recommendations.append(
                 "High truncation on run_command. Route massive outputs/logs through local-scout (ReconScout) or pass concise flags (-q, --tb=short)."
@@ -285,10 +298,6 @@ def analyze_bloat_attribution(
     elif top_tool in ("search_web", "web_search"):
         recommendations.append(
             "Web search results bloating context. Constrain query scopes or synthesize summaries off-context."
-        )
-    elif primary_cause == "RETRY_CHURN_LOOP" and top_tool:
-        recommendations.append(
-            f"Repeated consecutive retries on '{top_tool}'. Verify prerequisites or step arguments before looping."
         )
     elif primary_cause == "UNFILTERED_OUTPUT_BLOAT" and top_tool:
         recommendations.append(
@@ -414,7 +423,12 @@ def inspect_conversation_lightweight(
 
 
 def _locate_standalone_audit_script() -> Optional[Path]:
-    """Locate bundled `standalone_audit.py` (wheel/Homebrew) or repo `docs/audit.py`."""
+    """Locate repo `docs/audit.py` first (for live dev checkouts), falling back to bundled `standalone_audit.py`."""
+    here = Path(__file__).resolve()
+    for parent in (here.parents[2], here.parents[1], *here.parents):
+        candidate = parent / "docs" / "audit.py"
+        if candidate.is_file():
+            return candidate
     try:
         from whole_body_compute.bundled import get_bundled_audit_script_path
 
@@ -423,11 +437,23 @@ def _locate_standalone_audit_script() -> Optional[Path]:
             return bundled
     except Exception:
         pass
-    here = Path(__file__).resolve()
-    for parent in (here.parents[2], here.parents[1], *here.parents):
-        candidate = parent / "docs" / "audit.py"
-        if candidate.is_file():
-            return candidate
+    return None
+
+
+def _load_standalone_audit_module() -> Optional[Any]:
+    """Load `docs/audit.py` or bundled `standalone_audit.py` as an isolated Python module."""
+    try:
+        audit_script = _locate_standalone_audit_script()
+        if audit_script is not None and audit_script.is_file():
+            spec = importlib.util.spec_from_file_location(
+                "wbc_standalone_audit", audit_script
+            )
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return mod
+    except Exception as exc:
+        logger.debug("Standalone audit module load skipped: %s", exc)
     return None
 
 
@@ -629,14 +655,24 @@ def audit_turn0_static_overhead(
 
     mcp_servers_map: Dict[str, Dict[str, Any]] = {}
     seen_cfg_realpaths: set[str] = set()
+    disabled_canonical_keys: set[str] = set()
+    agy_mcp_config_present = False
+
+    def _canonical_mcp_key(name: str) -> str:
+        norm = re.sub(r"[^a-z0-9]+", "", str(name or "").lower())
+        if norm.endswith("mcp") and len(norm) > 3:
+            norm = norm[:-3]
+        return norm
 
     def _register_servers_dict(servers_obj: Any, cfg_label: str) -> None:
         if not isinstance(servers_obj, dict):
             return
         for raw_srv_name, srv_cfg in list(servers_obj.items())[:48]:
-            if isinstance(srv_cfg, dict) and srv_cfg.get("disabled") is True:
-                continue
             s_name = _sanitize_turn0_label(raw_srv_name)
+            if isinstance(srv_cfg, dict) and srv_cfg.get("disabled") is True:
+                disabled_canonical_keys.add(s_name)
+                disabled_canonical_keys.add(_canonical_mcp_key(s_name))
+                continue
             inline_tools = (
                 srv_cfg.get("tools")
                 if isinstance(srv_cfg, dict) and isinstance(srv_cfg.get("tools"), list)
@@ -671,10 +707,13 @@ def audit_turn0_static_overhead(
                     "provenance": "calibrated_server_estimate",
                 }
 
+    agy_cfg_path = h_dir / ".gemini" / "antigravity" / "mcp_config.json"
     for cfg_p in mcp_config_candidates:
         try:
             if not cfg_p.is_file():
                 continue
+            if cfg_p == agy_cfg_path:
+                agy_mcp_config_present = True
             rp = os.path.realpath(cfg_p)
             if rp in seen_cfg_realpaths:
                 continue
@@ -695,16 +734,26 @@ def audit_turn0_static_overhead(
         except Exception:
             continue
 
+    canonical_seen = {_canonical_mcp_key(k) for k in mcp_servers_map}
+
     # Include any disk-cached MCP schema directories not listed in a separate mcp_config.json
-    for s_name, (d_cnt, d_tok) in disk_schema_by_server.items():
-        if s_name not in mcp_servers_map:
-            mcp_servers_map[s_name] = {
-                "name": s_name,
-                "source": "~/.gemini/antigravity/mcp",
-                "schema_files": d_cnt,
-                "tokens": d_tok,
-                "provenance": "measured_disk_schema",
-            }
+    # (Skip explicitly disabled servers, and skip orphan ~/.gemini/antigravity/mcp folders when mcp_config.json exists)
+    if not agy_mcp_config_present or (ws_dir / ".mcp-schemas").is_dir():
+        for s_name, (d_cnt, d_tok) in disk_schema_by_server.items():
+            c_key = _canonical_mcp_key(s_name)
+            if s_name in disabled_canonical_keys or c_key in disabled_canonical_keys:
+                continue
+            if agy_mcp_config_present and not (ws_dir / ".mcp-schemas" / s_name).is_dir():
+                continue
+            if s_name not in mcp_servers_map and c_key not in canonical_seen:
+                canonical_seen.add(c_key)
+                mcp_servers_map[s_name] = {
+                    "name": s_name,
+                    "source": "~/.gemini/antigravity/mcp",
+                    "schema_files": d_cnt,
+                    "tokens": d_tok,
+                    "provenance": "measured_disk_schema",
+                }
 
     mcp_servers_list = sorted(
         mcp_servers_map.values(), key=lambda x: int(x.get("tokens", 0)), reverse=True
@@ -854,6 +903,8 @@ def audit_historical_spend(
     total_bbb_optimized_tokens = 0
     total_bbb_optimized_output_tokens = 0
 
+    standalone_mod = _load_standalone_audit_module()
+    model_usage_by_id: Dict[str, Dict[str, Dict[str, Any]]] = {}
     thread_records: List[Dict[str, Any]] = []
 
     for mtime, c_dir, primary_p, full_p in conv_dirs:
@@ -908,10 +959,26 @@ def audit_historical_spend(
 
             first_prompt = ""
             parent_conv_id = ""
+            active_model = ""
+            conv_model_usage: Dict[str, Dict[str, Any]] = {}
+            conv_metered_turns = 0
+            conv_metered_in = 0
+            conv_metered_cr = 0
+            conv_metered_out = 0
+            conv_fresh_usd = 0.0
+            conv_cache_usd = 0.0
+            conv_out_usd = 0.0
             for idx, (step, raw_len) in enumerate(zip(lines, raw_line_lengths), start=1):
                 stype = step.get("type")
+                content_raw = str(step.get("content") or "")
+                if standalone_mod is not None and "Model Selection" in content_raw:
+                    ms_cand = standalone_mod._extract_model_selection_change(content_raw)
+                    if ms_cand:
+                        active_model = ms_cand
+                if step.get("model"):
+                    active_model = str(step.get("model"))
                 if stype == "USER_INPUT" and idx <= 5:
-                    content_s = str(step.get("content") or "")
+                    content_s = content_raw
                     if not parent_conv_id:
                         m_parent = re.search(
                             r"Continuing from (?:conversation://)?([0-9a-fA-F\-]{36})",
@@ -935,6 +1002,48 @@ def audit_historical_spend(
 
                 if stype == "PLANNER_RESPONSE":
                     conv_output_tok += max(20, step_tok)
+                    if standalone_mod is not None:
+                        if "input_tokens" in step or "output_tokens" in step or "cache_read_tokens" in step:
+                            t_in = int(step.get("input_tokens") or 0)
+                            t_cr = int(step.get("cache_read_tokens") or 0)
+                            t_out = int(step.get("output_tokens") or 0)
+                            conv_metered_turns += 1
+                            conv_metered_in += t_in
+                            conv_metered_cr += t_cr
+                            conv_metered_out += t_out
+                            tin_p, tout_p, _ = standalone_mod._resolve_model_rates(
+                                active_model, in_price_per_m, out_price_per_m, False
+                            )
+                            t_fresh = (t_in / 1_000_000.0) * tin_p
+                            t_cache = (t_cr / 1_000_000.0) * (tin_p * 0.10)
+                            t_out_u = (t_out / 1_000_000.0) * tout_p
+                            conv_fresh_usd += t_fresh
+                            conv_cache_usd += t_cache
+                            conv_out_usd += t_out_u
+                            if active_model:
+                                standalone_mod._record_turn_model_usage(
+                                    conv_model_usage,
+                                    active_model,
+                                    turns=1,
+                                    billed_input_tokens=t_in,
+                                    cache_read_tokens=t_cr,
+                                    output_tokens=t_out,
+                                    fresh_usd=t_fresh,
+                                    cache_usd=t_cache,
+                                    output_usd=t_out_u,
+                                )
+                        elif active_model:
+                            est_out = max(20, step_tok)
+                            _, tout_p, _ = standalone_mod._resolve_model_rates(
+                                active_model, in_price_per_m, out_price_per_m, False
+                            )
+                            standalone_mod._record_turn_model_usage(
+                                conv_model_usage,
+                                active_model,
+                                turns=1,
+                                output_tokens=est_out,
+                                output_usd=(est_out / 1_000_000.0) * tout_p,
+                            )
 
                 if step_effective_bytes > 2000.0 or is_trunc:
                     base_cap = min(step_tok, 500)
@@ -1074,11 +1183,28 @@ def audit_historical_spend(
             total_bbb_optimized_tokens += conv_bbb_opt_tok
             total_bbb_optimized_output_tokens += conv_bbb_opt_out_tok
 
+            if conv_model_usage:
+                model_usage_by_id[c_dir.name] = conv_model_usage
+            exact_agy_usd = (
+                round(conv_fresh_usd + conv_cache_usd + conv_out_usd, 2)
+                if conv_metered_turns > 0
+                else round(conv_cons_frontier_usd, 2)
+            )
+            primary_model_lbl = (
+                max(
+                    conv_model_usage.values(),
+                    key=lambda mu: (float(mu.get("spend_usd", 0.0)), int(mu.get("turns", 0))),
+                )["label"]
+                if conv_model_usage
+                else ""
+            )
+
             thread_records.append(
                 {
                     "harness": "antigravity",
                     "conv_id": c_dir.name,
                     "short_id": c_dir.name[:8],
+                    "primary_model": primary_model_lbl,
                     "steps": steps,
                     "planner_turns": planner_turns,
                     "truncated_steps": truncated_steps,
@@ -1098,6 +1224,7 @@ def audit_historical_spend(
                     "bicameral_local_offload_tokens": conv_local_offload_tok,
                     "bbb_optimized_tokens": conv_bbb_opt_tok,
                     "bbb_optimized_output_tokens": conv_bbb_opt_out_tok,
+                    "exact_api_spend_usd": exact_agy_usd,
                     "conservative_spend_usd": round(conv_cons_frontier_usd, 2),
                     "estimated_spend_usd": round(conv_real_frontier_usd, 2),
                     "uncached_spend_usd": round(conv_uncached_frontier_usd, 2),
@@ -1236,16 +1363,11 @@ def audit_historical_spend(
     is_isolated_agy_test = bool(has_custom_agy and not has_external_custom)
     is_selective_custom = bool(has_custom_agy or has_external_custom)
 
-    if not is_isolated_agy_test:
+    if not is_isolated_agy_test and standalone_mod is not None:
         try:
-            audit_script = _locate_standalone_audit_script()
-            if audit_script is not None and audit_script.is_file():
-                spec = importlib.util.spec_from_file_location(
-                    "wbc_standalone_audit", audit_script
-                )
-                if spec and spec.loader:
-                    mod = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(mod)
+            if True:
+                if True:
+                    mod = standalone_mod
                     cand_homes = (
                         mod._iter_candidate_user_homes()
                         if hasattr(mod, "_iter_candidate_user_homes")
@@ -1424,6 +1546,15 @@ def audit_historical_spend(
                         total_bbb_optimized_output_tokens += int(
                             extra_r.get("bbb_optimized_output_tokens", 0)
                         )
+                        extra_r.pop("_mtime", None)
+                        extra_r.pop("_wbc_hook_fired", None)
+                        extra_r.pop("_fresh_input_usd", None)
+                        extra_r.pop("_cache_read_usd", None)
+                        extra_r.pop("_output_usd", None)
+                        extra_r.pop("_local_title", None)
+                        ext_mu = extra_r.pop("_model_usage", None)
+                        if ext_mu:
+                            model_usage_by_id[str(extra_r.get("conv_id", ""))] = ext_mu
                         thread_records.append(extra_r)
         except Exception as exc:
             logger.debug("External harness scan skipped: %s", exc)
@@ -1641,6 +1772,12 @@ def audit_historical_spend(
         "k": 3,
         "pass_pow_3_pct": 100.0,
         "pass_pow_3_fraction": "30/30",
+        "n200_pass_at_1_wbc_pct": 85.5,
+        "n200_pass_at_1_vanilla_pct": 83.5,
+        "n200_pass_at_1_delta_pp": 2.0,
+        "real_world_per_session_cost_drop_pct": 74.1,
+        "real_world_unshielded_avg_session_usd": 3.59,
+        "real_world_shielded_avg_session_usd": 0.93,
         "context_efficiency_multiple": 1.48,
         "context_reduction_pct": 32.4,
         "baseline_cumulative_context_m": 203.08,
@@ -1657,6 +1794,11 @@ def audit_historical_spend(
         "turn_reduction_pct": 18.8,
         "baseline_planner_turns": 1685,
         "wbc_planner_turns": 1368,
+        "regime_reconciliation": (
+            "Sprint Floor (SWE-bench ~11t single-issue patches): 85.5% vs 83.5% Pass@1 (+2.0pp, N=200), "
+            "-15% to -34.3% context • Marathon Production (50+t multi-turn sessions): -74.1% per-session cost "
+            "($3.59 -> $0.93/sess) & 85-98.7% quadratic bloat elimination via Glymphatic Flush + Local Metal"
+        ),
         "summary": (
             "1.48x Cumulative Context (-32.4%, 203.08M -> 137.23M) • "
             "1.52x Net Task Context (-34.3%, 178.87M -> 117.56M) • "
@@ -1725,6 +1867,31 @@ def audit_historical_spend(
         sessions_count=len(thread_records),
         in_price_per_m=in_price_per_m,
     )
+    if standalone_mod is not None and hasattr(standalone_mod, "compute_model_opportunity_insights"):
+        model_opportunities = standalone_mod.compute_model_opportunity_insights(
+            all_records=thread_records,
+            model_usage_by_id=model_usage_by_id,
+            window_days=days,
+        )
+    else:
+        model_opportunities = {
+            "read_only": True,
+            "window_days": int(days),
+            "tagged_sessions": 0,
+            "tagged_turns": 0,
+            "tagged_spend_usd": 0.0,
+            "untagged_sessions": len(thread_records),
+            "untagged_turns": total_planner_turns,
+            "untagged_spend_usd": 0.0,
+            "tier_breakdown": {},
+            "models": [],
+            "routine_downshift": {"sessions": 0, "turns": 0, "current_spend_usd": 0.0, "savable_usd": 0.0},
+            "thinking_cot_tax": {"sessions": 0, "turns": 0, "output_tokens": 0, "current_output_usd": 0.0, "savable_usd": 0.0},
+            "marathon_reread_drag": {"sessions": 0, "turns": 0, "cache_read_tokens": 0, "current_reread_usd": 0.0, "savable_usd": 0.0},
+            "total_opportunity_usd": 0.0,
+            "projected_annual_opportunity_usd": 0.0,
+            "opportunities": [],
+        }
 
     res_dict = {
         "window_days": int(days),
@@ -1770,6 +1937,7 @@ def audit_historical_spend(
         "quota_multiplier_metrics": quota_multiplier_metrics,
         "swebench_k3_benchmark": swebench_k3_benchmark,
         "harness_breakdown": harness_breakdown,
+        "model_opportunities": model_opportunities,
         "turn0_static_overhead": turn0_static_overhead,
         "live_organ10_interceptions": live_organ10,
         "verified_handoff_lineage": verified_handoff_lineage,
@@ -1944,8 +2112,12 @@ def format_finops_audit_receipt(audit: Dict[str, Any]) -> str:
             "1.48x Context (-32.4%) • 1.52x Net (-34.3%) • 1.34x Billed (-25.6%)",
         ),
         _row(
-            "  └─ N=10 Official Repos (Pass^3)",
-            "100.0% Pass^3 (30/30) • -18.8% Turns (1,685->1,368) • -16.7% Med",
+            "  ├─ N=200 Floor (~11t Sprints)",
+            "85.5% vs 83.5% Pass@1 (+2.0pp) • 100% Pass^3 (30/30) • -18.8% Turns",
+        ),
+        _row(
+            "  └─ Real Usage (50+t Marathons)",
+            "-74.1% Cost/Sess ($3.59 -> $0.93) • 68% Spend in 50+t • 70% Local",
         ),
         _row(
             "Wedge B • Enterprise API FinOps",
@@ -2113,6 +2285,44 @@ def format_finops_audit_receipt(audit: Dict[str, Any]) -> str:
             f"  • MCP Bloat vs WBC OS Hooks: {t0_mcp:,} MCP schema tok/session vs 0 MCP schema tok for `body` PreToolUse/PostToolUse hooks ($0.00 Turn-0 tax)"
         )
 
+    mo = audit.get("model_opportunities", {}) or {}
+    mo_models = mo.get("models", []) or []
+    if mo_models:
+        lines.append("")
+        lines.append("🧠 Read-Only Model Mix & Routing Opportunity Insights (Zero-Mutation):")
+        lines.append(
+            "  ┌──────────────────────────────┬──────────┬──────────┬──────────────┬──────────────┬────────────┬──────────┐"
+        )
+        lines.append(
+            "  │ Logged Model                 │ Tier     │ Sessions │ Turns        │ API-Equiv $  │ Avg / Sess │ Out/CoT% │"
+        )
+        lines.append(
+            "  ├──────────────────────────────┼──────────┼──────────┼──────────────┼──────────────┼────────────┼──────────┤"
+        )
+        tier_lbl_map = {"heavy_thinking": "Heavy", "balanced": "Balanced", "fast_low": "Fast/Low"}
+        for m_row in mo_models[:8]:
+            m_lbl = str(m_row.get("label", ""))[:28]
+            m_tr = tier_lbl_map.get(str(m_row.get("tier", "")), "Balanced")[:8]
+            m_sess = int(m_row.get("sessions", 0))
+            m_trns = int(m_row.get("turns", 0))
+            m_sp = f"${float(m_row.get('spend_usd', 0.0)):,.2f}"
+            m_avg = f"${float(m_row.get('avg_session_usd', 0.0)):,.2f}"
+            m_op = f"{float(m_row.get('output_share_pct', 0.0)):.1f}%"
+            lines.append(
+                f"  │ {m_lbl:<28} │ {m_tr:<8} │ {m_sess:>8,} │ {m_trns:>12,} │ {m_sp:>12} │ {m_avg:>10} │ {m_op:>8} │"
+            )
+        lines.append(
+            "  └──────────────────────────────┴──────────┴──────────┴──────────────┴──────────────┴────────────┴──────────┘"
+        )
+        for opp in mo.get("opportunities", []) or []:
+            lines.append(f"  • {opp.get('title', 'Opportunity')}: {opp.get('summary', '')}")
+        tot_opp = float(mo.get("total_opportunity_usd", 0.0))
+        yr_opp = float(mo.get("projected_annual_opportunity_usd", 0.0))
+        if tot_opp >= 0.05:
+            lines.append(
+                f"  • Combined Model-Fit Opportunity: ~${tot_opp:,.2f} / {days}d (~${yr_opp:,.0f}/yr per seat • strictly read-only)"
+            )
+
     lines.append("")
     lines.append("🔥 Top Expensive Threads & Context Bloat Triggers:")
     top_convs = audit.get("top_bloated_conversations", [])
@@ -2130,7 +2340,7 @@ def format_finops_audit_receipt(audit: Dict[str, Any]) -> str:
         lines.append("  • (No conversations found in window)")
     lines.append("")
     lines.append(
-        "🌐 Shareable Zero-Install Audit: `curl -sSL https://wholebodycompute.com/audit.py | python3`  •  ROI Calculator: https://wholebodycompute.com/roi"
+        "🌐 Shareable Zero-Install Audit: `curl -sSL https://wholebodycompute.com/audit.py | python3`  •  Awaken Workspace: `curl -fsSL https://wholebodycompute.com/begin | sh`"
     )
     lines.append("")
     return "\n".join(lines)
@@ -2206,8 +2416,9 @@ def format_finops_markdown_receipt(audit: Dict[str, Any]) -> str:
         "## 1. Executive Summary (Dual-Wedge GTM & Calibrated 3-Point Savings Range)",
         "",
         f"- **Wedge A - Prosumer Quota Multiplier (`$20-$200/mo` Flat-Rate Plans):** `{q_mult:.2f}x Quota Stretch • {q_lat:.1f}% Faster Turn Latency • {qm.get('weekly_lockouts_avoided', 0)} Weekly Rate-Limit Lockouts Avoided`",
-        "- **SWE-bench_Verified Empirical Runway (`60` Trials, `k=3`, `N=10` Official Repos, `100.0% Pass^3` `30/30`):** `1.48x` cumulative context efficiency (`-32.4%`, `203.08M -> 137.23M` tokens) • `1.52x` net task context efficiency (`-34.3%`, `178.87M -> 117.56M` tokens) • `1.34x` billed input runway (`-25.6%` total billed input, `7.83M -> 5.83M` tokens; `-16.7%` median) • `-18.8%` fewer agent turns (`1,685 -> 1,368`)",
-        f"- **Wedge B - Enterprise CFO Metered API FinOps (`Bedrock / Vertex / API Keys`):** `${cons_mo:,.2f} – ${real_mo:,.2f} / mo Saved (90%-Cached -> Blended)`",
+        "- **SWE-bench_Verified Empirical Runway (`60` Trials, `k=3`, `N=10` Official Repos, `100.0% Pass^3` `30/30` + `N=200` `85.5%` vs `83.5%` `Pass@1`):** `1.48x` cumulative context efficiency (`-32.4%`, `203.08M -> 137.23M` tokens) • `1.52x` net task context efficiency (`-34.3%`, `178.87M -> 117.56M` tokens) • `1.34x` billed input runway (`-25.6%` total billed input, `7.83M -> 5.83M` tokens; `-16.7%` median) • `-18.8%` fewer agent turns (`1,685 -> 1,368`)",
+        "- **Why Real-World Usage Outperforms Synthetic Benchmarks (`Sprint vs. Marathon Regime`):** Synthetic `SWE-bench_Verified` tasks are cold-start `~11-turn` sprints where context resets after every patch (`-15% to -34%` cut). In real multi-turn usage (`50+` turn marathons driving `68%` of total spend), `body flush` StateCapsules + AST slicing + `70%` Local Metal offload eliminate quadratic history re-reads for a **`-74.1%` measured per-session cost drop (`$3.59 -> $0.93/sess`)** and **`85%–98.7%` bloat reduction**.",
+        f"- **Wedge B - Enterprise CFO Metered API FinOps (`Bedrock / Vertex / API Keys`):** `${cons_mo:,.2f} - ${real_mo:,.2f} / mo Saved (90%-Cached -> Blended)`",
         "",
         "| Metric | Measured Value |",
         "| :--- | :--- |",
@@ -2306,6 +2517,38 @@ def format_finops_markdown_receipt(audit: Dict[str, Any]) -> str:
             ]
         )
 
+    mo_md = audit.get("model_opportunities", {}) or {}
+    mo_md_models = mo_md.get("models", []) or []
+    if mo_md_models:
+        md.extend(
+            [
+                "",
+                "## 3.75. Read-Only Model Mix & Routing Opportunity Insights",
+                "",
+                "| Logged Model | Tier | Sessions | Turns | API-Equiv Spend | Avg / Session | CoT/Output Share |",
+                "| :--- | :--- | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for m_row in mo_md_models[:10]:
+            md.append(
+                f"| **{m_row.get('label', '')}** | `{m_row.get('tier', 'balanced')}` | "
+                f"{int(m_row.get('sessions', 0)):,} | {int(m_row.get('turns', 0)):,} | "
+                f"**${float(m_row.get('spend_usd', 0.0)):,.2f}** | "
+                f"${float(m_row.get('avg_session_usd', 0.0)):,.2f} | "
+                f"{float(m_row.get('output_share_pct', 0.0)):.1f}% |"
+            )
+        opps_md = mo_md.get("opportunities", []) or []
+        if opps_md:
+            md.append("")
+            for opp in opps_md:
+                md.append(f"- **{opp.get('title', 'Opportunity')}:** {opp.get('summary', '')}")
+            tot_opp_m = float(mo_md.get("total_opportunity_usd", 0.0))
+            yr_opp_m = float(mo_md.get("projected_annual_opportunity_usd", 0.0))
+            if tot_opp_m >= 0.05:
+                md.append(
+                    f"- **Combined Read-Only Model-Fit Upside:** **`~${tot_opp_m:,.2f} / {days}d`** (`~${yr_opp_m:,.0f}/yr` per seat)"
+                )
+
     md.extend(
         [
             "",
@@ -2325,7 +2568,7 @@ def format_finops_markdown_receipt(audit: Dict[str, Any]) -> str:
 
     md.append("")
     md.append(
-        "> **Zero-Install Audit Command:** `curl -sSL https://wholebodycompute.com/audit.py | python3` • **Interactive Calculator:** [https://wholebodycompute.com/roi](https://wholebodycompute.com/roi)"
+        "> **Zero-Install Audit Command:** `curl -sSL https://wholebodycompute.com/audit.py | python3` • **Awaken Workspace:** `curl -fsSL https://wholebodycompute.com/begin | sh`"
     )
     md.append("")
     return "\n".join(md)

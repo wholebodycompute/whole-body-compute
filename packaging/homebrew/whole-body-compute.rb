@@ -1,8 +1,8 @@
 class WholeBodyCompute < Formula
   desc "Local AST context shield, vision & memory runtime for AI coding agents"
   homepage "https://wholebodycompute.com/open-core"
-  url "https://files.pythonhosted.org/packages/source/w/whole-body-compute/whole_body_compute-0.1.2.tar.gz"
-  sha256 "378869e316b59257dfac424732c5ceecfa72c2cb1e01f2b5ecd8da3d1482d781"
+  url "https://files.pythonhosted.org/packages/source/w/whole-body-compute/whole_body_compute-0.1.3.tar.gz"
+  sha256 "8a2e826eb11b636ed228e03ee5b9fb7111ad72e3b293c31a0599e4976f6432dc"
   license :cannot_represent
   head "https://github.com/wholebodycompute/whole-body-compute.git", branch: "main"
 

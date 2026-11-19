@@ -18,6 +18,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,57 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from benchmarks.gemini4_3model_12org_harness import (
+    ALL_12_INSTANCES,
+    ensure_12org_cache,
+    load_12org_metadata,
+    sync_compiled_extensions,
+)
+from benchmarks.hydlow_wave2_harness import (
+    WAVE2_INSTANCES,
+    load_w2_metadata,
+    setup_wave2,
+)
+from benchmarks.hydlow_wave3_harness import (
+    WAVE3_INSTANCES,
+    load_w3_metadata,
+    setup_wave3,
+)
+from benchmarks.hydlow_wave4_harness import (
+    WAVE4_INSTANCES,
+    load_w4_metadata,
+    setup_wave4,
+)
+from benchmarks.hydlow_wave5_harness import (
+    WAVE5_INSTANCES,
+    load_w5_metadata,
+    setup_wave5,
+)
+from benchmarks.hydlow_wave6_harness import (
+    WAVE6_INSTANCES,
+    load_w6_metadata,
+    setup_wave6,
+)
+from benchmarks.hydlow_wave7_harness import (
+    WAVE7_INSTANCES,
+    load_w7_metadata,
+    setup_wave7,
+)
+from benchmarks.hydlow_wave8_harness import (
+    WAVE8_INSTANCES,
+    load_w8_metadata,
+    setup_wave8,
+)
+from benchmarks.hydlow_wave9_harness import (
+    WAVE9_INSTANCES,
+    load_w9_metadata,
+    setup_wave9,
+)
+from benchmarks.hydlow_wave10_harness import (
+    WAVE10_INSTANCES,
+    load_w10_metadata,
+    setup_wave10,
+)
 from benchmarks.upstream_swebench_verified_harness import (
     CACHE_BASE,
     TARGET_INSTANCES,
@@ -69,6 +121,12 @@ def parse_claude_project_transcript(arm_dir: Path) -> dict[str, int]:
         "bbb_hook_interceptions": 0,
         "bbb_bounded_fast_path": 0,
         "bbb_autonomic_cues": 0,
+        "jsonl_turns": 0,
+        "jsonl_input_tokens": 0,
+        "jsonl_cache_creation_tokens": 0,
+        "jsonl_cache_read_tokens": 0,
+        "jsonl_output_tokens": 0,
+        "hit_session_limit": 0,
     }
     try:
         resolved_str = str(arm_dir.resolve())
@@ -92,7 +150,11 @@ def parse_claude_project_transcript(arm_dir: Path) -> dict[str, int]:
         return stats
 
     seen_tool_ids: set[str] = set()
-    for ln in jsonl_files[0].read_text(encoding="utf-8", errors="replace").splitlines():
+    seen_msg_ids: set[str] = set()
+    raw_txt = jsonl_files[0].read_text(encoding="utf-8", errors="replace")
+    if "hit your session limit" in raw_txt or "hit your limit" in raw_txt:
+        stats["hit_session_limit"] = 1
+    for ln in raw_txt.splitlines():
         if not ln.strip():
             continue
         try:
@@ -104,6 +166,15 @@ def parse_claude_project_transcript(arm_dir: Path) -> dict[str, int]:
             msg = d.get("message", {})
             if not isinstance(msg, dict):
                 continue
+            mid = str(msg.get("id") or "")
+            if mid and mid not in seen_msg_ids:
+                seen_msg_ids.add(mid)
+                stats["jsonl_turns"] += 1
+                u = msg.get("usage", {}) if isinstance(msg.get("usage"), dict) else {}
+                stats["jsonl_input_tokens"] += int(u.get("input_tokens", 0) or 0)
+                stats["jsonl_cache_creation_tokens"] += int(u.get("cache_creation_input_tokens", 0) or 0)
+                stats["jsonl_cache_read_tokens"] += int(u.get("cache_read_input_tokens", 0) or 0)
+                stats["jsonl_output_tokens"] += int(u.get("output_tokens", 0) or 0)
             for block in msg.get("content", []):
                 if not isinstance(block, dict) or block.get("type") != "tool_use":
                     continue
@@ -159,17 +230,34 @@ def provision_claude_sandboxes(
     meta: dict[str, dict[str, Any]],
     sandbox_base: Path = CLAUDE_SANDBOX_BASE,
     trial_ids: list[int] | None = None,
+    jobs_filter: set[tuple[str, bool, int]] | None = None,
 ) -> None:
     """Provision APFS CoW sandboxes for Vanilla and `+ Whole Body Compute` Claude Code arms across specified trial_ids."""
     t_ids = trial_ids if trial_ids is not None else [1]
     # Ensure base repo_cache and venv_cache exist
     missing_cache = any(
         not (CACHE_BASE / f"repo_{item['short_id']}" / ".git").exists()
-        or not (CACHE_BASE / f"venv_{item['short_id']}" / "bin" / "python").exists()
+        or not (CACHE_BASE / item.get("reuse_venv", f"venv_{item['short_id']}") / "bin" / "python").exists()
         for item in instances
     )
     if missing_cache:
-        setup_all(instances=instances, trials=1, sandbox_base=sandbox_base)
+        ensure_12org_cache()
+        if any(it["short_id"] in {w["short_id"] for w in WAVE2_INSTANCES} for it in instances):
+            setup_wave2()
+        if any(it["short_id"] in {w["short_id"] for w in WAVE3_INSTANCES} for it in instances):
+            setup_wave3()
+        if any(it["short_id"] in {w["short_id"] for w in WAVE4_INSTANCES} for it in instances):
+            setup_wave4()
+        for w_list, w_setup in (
+            (WAVE5_INSTANCES, setup_wave5),
+            (WAVE6_INSTANCES, setup_wave6),
+            (WAVE7_INSTANCES, setup_wave7),
+            (WAVE8_INSTANCES, setup_wave8),
+            (WAVE9_INSTANCES, setup_wave9),
+            (WAVE10_INSTANCES, setup_wave10),
+        ):
+            if any(it["short_id"] in {w["short_id"] for w in w_list} for it in instances):
+                w_setup()
 
     sandbox_base.mkdir(parents=True, exist_ok=True)
     hook_path = (REPO_ROOT / "bin" / "body-immune-hook").resolve()
@@ -181,21 +269,45 @@ def provision_claude_sandboxes(
             rec = meta[iid]
             repo = rec["repo"]
             sha = rec["base_commit"]
+            py_ver = item.get("python_ver", "3.10")
             repo_cache = CACHE_BASE / f"repo_{sid}"
-            venv_dir = CACHE_BASE / f"venv_{sid}"
+            venv_dir = CACHE_BASE / item.get("reuse_venv", f"venv_{sid}")
+            if "primary_file_lines" not in item or not item["primary_file_lines"]:
+                pfile = repo_cache / item["primary_file"]
+                item["primary_file_lines"] = (
+                    len(pfile.read_text(encoding="utf-8", errors="replace").splitlines())
+                    if pfile.exists()
+                    else 0
+                )
 
+            hints_block = ""
+            if rec.get("hints_text") and str(rec["hints_text"]).strip():
+                hints_block = (
+                    "\n## Issue Discussion & Maintainer Notes (`hints_text`)\n\n"
+                    + str(rec["hints_text"]).strip()
+                    + "\n"
+                )
             problem_text = (
                 f"# Official SWE-bench Verified Issue: `{iid}` (`{repo}` @ `{sha[:10]}`)\n\n"
                 + rec["problem_statement"].strip()
                 + "\n"
+                + hints_block
             )
 
             for arm_sub, is_wbc in (("wbc_vanilla_arm", False), ("wbc_wbc_arm", True)):
+                if jobs_filter is not None and (iid, is_wbc, t_id) not in jobs_filter:
+                    continue
                 arm_dir = sandbox_base / arm_sub / f"{sid}_t{t_id}"
                 if arm_dir.exists():
                     shutil.rmtree(arm_dir)
                 arm_dir.parent.mkdir(parents=True, exist_ok=True)
                 copy_tree_cow(repo_cache, arm_dir)
+
+                if item.get("sync_mpl_so"):
+                    sync_compiled_extensions(venv_dir, py_ver, arm_dir, "matplotlib", "lib/matplotlib")
+                if item.get("sync_pkg_so"):
+                    pkg = item["sync_pkg_so"]
+                    sync_compiled_extensions(venv_dir, py_ver, arm_dir, pkg, pkg)
 
                 if not (arm_dir / ".venv").exists():
                     os.symlink(venv_dir, arm_dir / ".venv")
@@ -212,7 +324,7 @@ def provision_claude_sandboxes(
                                     "hooks": [
                                         {
                                             "type": "command",
-                                            "command": f"'{hook_path}'",
+                                            "command": f"WBC_INTERNAL_DEV=1 '{hook_path}'",
                                             "timeout": 10,
                                         }
                                     ],
@@ -224,7 +336,7 @@ def provision_claude_sandboxes(
                                     "hooks": [
                                         {
                                             "type": "command",
-                                            "command": f"'{hook_path}' --phase post",
+                                            "command": f"WBC_INTERNAL_DEV=1 '{hook_path}' --phase post",
                                             "timeout": 10,
                                         }
                                     ],
@@ -273,6 +385,7 @@ def run_single_claude_trial(
     claude_bin = shutil.which("claude") or str(Path.home() / ".nvm/versions/node/v22.22.0/bin/claude")
     env = dict(os.environ)
     env["PYTHONUNBUFFERED"] = "1"
+    env["WBC_INTERNAL_DEV"] = "1"
     env["WBC_IMMUNE_DEDUP_FILE"] = str(arm_dir / ".wbc_dedup")
     env["WBC_DATA_DIR"] = str(arm_dir / ".wbc_data")
     venv_bin = str((REPO_ROOT / ".venv" / "bin").resolve())
@@ -288,7 +401,7 @@ def run_single_claude_trial(
                 "--setting-sources",
                 "local",
                 "--model",
-                model_alias,
+                "sonnet" if "sonnet" in model_alias.lower() else model_alias,
                 "-p",
                 prompt,
                 "--output-format",
@@ -336,8 +449,17 @@ def run_single_claude_trial(
         elif p_aux.exists():
             p_aux.unlink(missing_ok=True)
 
-    f2p_passed, eval_log = evaluate_sandbox(item, rec, arm_dir)
+    eval_item = dict(item)
+    if item.get("reuse_venv"):
+        eval_item["short_id"] = str(item["reuse_venv"]).replace("venv_", "")
+    f2p_passed, eval_log = evaluate_sandbox(eval_item, rec, arm_dir)
     patch_diff = extract_model_patch(arm_dir)
+    p_lines = int(item.get("primary_file_lines") or 0)
+    if not p_lines:
+        pf = arm_dir / item["primary_file"]
+        if pf.is_file():
+            p_lines = len(pf.read_text(encoding="utf-8", errors="replace").splitlines())
+            item["primary_file_lines"] = p_lines
 
     usage = raw_json.get("usage", {}) if isinstance(raw_json, dict) else {}
     input_tok = int(usage.get("input_tokens", 0) or 0)
@@ -386,8 +508,8 @@ def run_single_claude_trial(
         "web_fetch_calls": tool_telemetry["web_fetch_calls"],
         "total_tool_calls": tool_telemetry["total_tools"],
         "patch_lines": len(patch_diff.splitlines()),
-        "eval_tail": eval_log[-400:],
-        "stderr_tail": stderr_str[-300:] if stderr_str else "",
+        "eval_tail": re.sub(r"/" + r"Users/[^/\"'\s]+", "<HOME>", eval_log[-400:]),
+        "stderr_tail": re.sub(r"/" + r"Users/[^/\"'\s]+", "<HOME>", stderr_str[-300:]) if stderr_str else "",
     }
 
 
@@ -403,9 +525,10 @@ def enrich_run_with_tool_telemetry(
     arm_prefix = "wbc" if arm_key == "wbc" else "van"
     arm_sub = "wbc_wbc_arm" if arm_key == "wbc" else "wbc_vanilla_arm"
     enriched.setdefault("worker_name", f"{arm_prefix}-{sid}-t{t_id}")
-    if "read_file_calls" not in enriched or enriched.get("total_tool_calls", 0) == 0:
+    if "read_file_calls" not in enriched or enriched.get("total_tool_calls", 0) == 0 or int(enriched.get("turns", 0)) == 0 or "hit_session_limit" not in enriched:
         arm_dir = sandbox_base / arm_sub / f"{sid}_t{t_id}"
         tt = parse_claude_project_transcript(arm_dir)
+        enriched["hit_session_limit"] = bool(tt.get("hit_session_limit", 0))
         enriched["read_file_calls"] = tt["read_total"]
         enriched["read_bounded_calls"] = tt["read_bounded"]
         enriched["read_unbounded_calls"] = tt["read_unbounded"]
@@ -414,6 +537,26 @@ def enrich_run_with_tool_telemetry(
         enriched["web_search_calls"] = tt["web_search_calls"]
         enriched["web_fetch_calls"] = tt["web_fetch_calls"]
         enriched["total_tool_calls"] = tt["total_tools"]
+        if int(enriched.get("turns", 0)) == 0 and tt.get("jsonl_turns", 0) > 0:
+            in_t = tt["jsonl_input_tokens"]
+            cc_t = tt["jsonl_cache_creation_tokens"]
+            cr_t = tt["jsonl_cache_read_tokens"]
+            out_t = tt["jsonl_output_tokens"]
+            billed_t = in_t + cc_t
+            ctx_t = billed_t + cr_t
+            m_low = str(enriched.get("model", "haiku")).lower()
+            if "sonnet" in m_low:
+                cost_u = (in_t * 3.0 + cc_t * 3.75 + cr_t * 0.30 + out_t * 15.0) / 1_000_000.0
+            else:
+                cost_u = (in_t * 1.0 + cc_t * 1.25 + cr_t * 0.10 + out_t * 5.0) / 1_000_000.0
+            enriched["turns"] = tt["jsonl_turns"]
+            enriched["input_tokens"] = in_t
+            enriched["cache_creation_input_tokens"] = cc_t
+            enriched["billed_input_tokens"] = billed_t
+            enriched["cache_read_tokens"] = cr_t
+            enriched["total_context_tokens"] = ctx_t
+            enriched["output_tokens"] = out_t
+            enriched["total_cost_usd"] = round(cost_u, 5)
     return enriched
 
 
@@ -454,9 +597,15 @@ def compile_results_and_report(
     van_summary = arm_agg(van_runs)
     wbc_summary = arm_agg(wbc_runs)
 
+    by_key = {(r["instance_id"], r["arm"]): r for r in runs}
+    paired_van = [r for r in van_runs if (r["instance_id"], "wbc") in by_key]
+    paired_wbc = [r for r in wbc_runs if (r["instance_id"], "vanilla") in by_key]
+    p_van_sum = arm_agg(paired_van) if paired_van else van_summary
+    p_wbc_sum = arm_agg(paired_wbc) if paired_wbc else wbc_summary
+
     # Also compute >2,000L monster-file subset (directly exceeding Claude Code's 2,000L ceiling)
-    monster_van = [r for r in van_runs if r["primary_file_lines"] > 2000]
-    monster_wbc = [r for r in wbc_runs if r["primary_file_lines"] > 2000]
+    monster_van = [r for r in paired_van if r["primary_file_lines"] > 2000]
+    monster_wbc = [r for r in paired_wbc if r["primary_file_lines"] > 2000]
     monster_van_ctx = sum(r["total_context_tokens"] for r in monster_van)
     monster_wbc_ctx = sum(r["total_context_tokens"] for r in monster_wbc)
     monster_van_billed = sum(r["billed_input_tokens"] for r in monster_van)
@@ -465,26 +614,27 @@ def compile_results_and_report(
     monster_wbc_cost = sum(r["total_cost_usd"] for r in monster_wbc)
 
     deltas = {
+        "paired_instances_count": len(paired_van),
         "total_context_sum_delta_pct": pct_delta(
-            van_summary["total_context_stats"]["sum"], wbc_summary["total_context_stats"]["sum"]
+            p_van_sum["total_context_stats"]["sum"], p_wbc_sum["total_context_stats"]["sum"]
         ),
         "total_context_median_delta_pct": pct_delta(
-            van_summary["total_context_stats"]["median"], wbc_summary["total_context_stats"]["median"]
+            p_van_sum["total_context_stats"]["median"], p_wbc_sum["total_context_stats"]["median"]
         ),
         "billed_input_sum_delta_pct": pct_delta(
-            van_summary["billed_input_stats"]["sum"], wbc_summary["billed_input_stats"]["sum"]
+            p_van_sum["billed_input_stats"]["sum"], p_wbc_sum["billed_input_stats"]["sum"]
         ),
         "billed_input_median_delta_pct": pct_delta(
-            van_summary["billed_input_stats"]["median"], wbc_summary["billed_input_stats"]["median"]
+            p_van_sum["billed_input_stats"]["median"], p_wbc_sum["billed_input_stats"]["median"]
         ),
         "turns_sum_delta_pct": pct_delta(
-            van_summary["turns_stats"]["sum"], wbc_summary["turns_stats"]["sum"]
+            p_van_sum["turns_stats"]["sum"], p_wbc_sum["turns_stats"]["sum"]
         ),
         "wall_sum_delta_pct": pct_delta(
-            van_summary["wall_stats"]["sum"], wbc_summary["wall_stats"]["sum"]
+            p_van_sum["wall_stats"]["sum"], p_wbc_sum["wall_stats"]["sum"]
         ),
         "cost_usd_sum_delta_pct": pct_delta(
-            van_summary["cost_usd_stats"]["sum"], wbc_summary["cost_usd_stats"]["sum"]
+            p_van_sum["cost_usd_stats"]["sum"], p_wbc_sum["cost_usd_stats"]["sum"]
         ),
         "monster_gt2000l_context_delta_pct": pct_delta(monster_van_ctx, monster_wbc_ctx),
         "monster_gt2000l_billed_delta_pct": pct_delta(monster_van_billed, monster_wbc_billed),
@@ -492,7 +642,6 @@ def compile_results_and_report(
     }
 
     per_repo: list[dict[str, Any]] = []
-    by_key = {(r["instance_id"], r["arm"]): r for r in runs}
     for item in instances:
         iid = item["instance_id"]
         rv = by_key.get((iid, "vanilla"))
@@ -516,6 +665,27 @@ def compile_results_and_report(
                     "vanilla_cost_usd": rv["total_cost_usd"],
                     "wbc_cost_usd": rw["total_cost_usd"],
                     "cost_delta_pct": pct_delta(rv["total_cost_usd"], rw["total_cost_usd"]),
+                }
+            )
+        elif rw:
+            per_repo.append(
+                {
+                    "instance_id": iid,
+                    "primary_file": item["primary_file"],
+                    "primary_file_lines": item["primary_file_lines"],
+                    "vanilla_resolved": None,
+                    "wbc_resolved": rw["resolved"],
+                    "vanilla_turns": 0,
+                    "wbc_turns": rw["turns"],
+                    "vanilla_context": 0,
+                    "wbc_context": rw["total_context_tokens"],
+                    "context_delta_pct": 0.0,
+                    "vanilla_billed_input": 0,
+                    "wbc_billed_input": rw["billed_input_tokens"],
+                    "billed_delta_pct": 0.0,
+                    "vanilla_cost_usd": 0.0,
+                    "wbc_cost_usd": rw["total_cost_usd"],
+                    "cost_delta_pct": 0.0,
                 }
             )
 
@@ -557,14 +727,22 @@ def compile_results_and_report(
         "| :--- | :--- | :--- | :--- | :---: | :---: |",
     ]
     for pr in per_repo:
-        v_ok = "✅" if pr["vanilla_resolved"] else "❌"
         w_ok = "✅" if pr["wbc_resolved"] else "❌"
-        md_lines.append(
-            f"| `{pr['instance_id']}` | `{pr['primary_file']}` (`{pr['primary_file_lines']:,}L`) | "
-            f"{v_ok} `{pr['vanilla_turns']}t`, `{pr['vanilla_context']:,}`, `${pr['vanilla_cost_usd']:.2f}` | "
-            f"{w_ok} `{pr['wbc_turns']}t`, `{pr['wbc_context']:,}`, `${pr['wbc_cost_usd']:.2f}` | "
-            f"**`{pr['context_delta_pct']:+.1f}%`** | **`{pr['cost_delta_pct']:+.1f}%`** |"
-        )
+        if pr["vanilla_resolved"] is None:
+            md_lines.append(
+                f"| `{pr['instance_id']}` | `{pr['primary_file']}` (`{pr['primary_file_lines']:,}L`) | "
+                f" - *(WBC-Only)* | "
+                f"{w_ok} `{pr['wbc_turns']}t`, `{pr['wbc_context']:,}`, `${pr['wbc_cost_usd']:.2f}` | "
+                f" - | - |"
+            )
+        else:
+            v_ok = "✅" if pr["vanilla_resolved"] else "❌"
+            md_lines.append(
+                f"| `{pr['instance_id']}` | `{pr['primary_file']}` (`{pr['primary_file_lines']:,}L`) | "
+                f"{v_ok} `{pr['vanilla_turns']}t`, `{pr['vanilla_context']:,}`, `${pr['vanilla_cost_usd']:.2f}` | "
+                f"{w_ok} `{pr['wbc_turns']}t`, `{pr['wbc_context']:,}`, `${pr['wbc_cost_usd']:.2f}` | "
+                f"**`{pr['context_delta_pct']:+.1f}%`** | **`{pr['cost_delta_pct']:+.1f}%`** |"
+            )
 
     out_md.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
     return payload
@@ -1107,6 +1285,13 @@ def main() -> int:
     parser.add_argument("--only-unresolved", action="store_true", help="Skip (instance_id, arm, trial) entries that are already resolved=True in banked results")
     parser.add_argument("--compile-only", action="store_true", help="Only compile existing banked runs without launching Claude CLI")
     parser.add_argument("--monster-only", action="store_true", help="Only run the 5 >2,000L monster repos")
+    parser.add_argument("--all-12", action="store_true", help="Run across all 12 official SWE-bench_Verified organizations")
+    parser.add_argument("--all-22", action="store_true", help="Run across all 22 SWE-bench_Verified instances (Wave 1 12-org + Wave 2 10 instances)")
+    parser.add_argument("--all-32", action="store_true", help="Run across all 32 SWE-bench_Verified instances (Wave 1 + Wave 2 + Wave 3)")
+    parser.add_argument("--all-50", action="store_true", help="Run across all 50 SWE-bench_Verified instances (Shard 1: Wave 1 + Wave 2 + Wave 3 + Wave 4)")
+    parser.add_argument("--all-100", action="store_true", help="Run across all 100 SWE-bench_Verified instances (Shards 1-2: Waves 1-7)")
+    parser.add_argument("--all-150", action="store_true", help="Run across all 150 SWE-bench_Verified instances (Shards 1-3: Waves 1-10)")
+    parser.add_argument("--wbc-only", action="store_true", help="Only run the + Whole Body Compute arm (preserve banked Vanilla runs)")
     parser.add_argument("--timeout", type=int, default=900, help="Per-trial timeout in seconds")
     args = parser.parse_args()
 
@@ -1114,39 +1299,107 @@ def main() -> int:
     trial_ids_to_run = _parse_trial_ids_arg(args.trial_ids, args.trials)
     effective_k = max([args.trials, *trial_ids_to_run])
 
+    all_22_pool: list[dict[str, Any]] = []
+    is_multi_wave = any((args.all_22, args.all_32, args.all_50, args.all_100, args.all_150))
+    if is_multi_wave:
+        raw_pool = [
+            *ALL_12_INSTANCES,
+            *WAVE2_INSTANCES,
+            *(WAVE3_INSTANCES if any((args.all_32, args.all_50, args.all_100, args.all_150)) else []),
+            *(WAVE4_INSTANCES if any((args.all_50, args.all_100, args.all_150)) else []),
+            *([*WAVE5_INSTANCES, *WAVE6_INSTANCES, *WAVE7_INSTANCES] if any((args.all_100, args.all_150)) else []),
+            *([*WAVE8_INSTANCES, *WAVE9_INSTANCES, *WAVE10_INSTANCES] if args.all_150 else []),
+        ]
+        for it in raw_pool:
+            it_copy = dict(it)
+            if not it_copy.get("primary_file_lines"):
+                pf = CACHE_BASE / f"repo_{it_copy['short_id']}" / it_copy["primary_file"]
+                it_copy["primary_file_lines"] = (
+                    len(pf.read_text(encoding="utf-8", errors="replace").splitlines())
+                    if pf.is_file()
+                    else 0
+                )
+            all_22_pool.append(it_copy)
+
+    base_pool = all_22_pool if is_multi_wave else (ALL_12_INSTANCES if args.all_12 else TARGET_INSTANCES)
     instances = [
-        it for it in TARGET_INSTANCES if (not args.monster_only or it["primary_file_lines"] > 2000)
+        it for it in base_pool if (not args.monster_only or it.get("primary_file_lines", 0) > 2000)
     ]
     if args.instances.strip():
         wanted = {tok.strip() for tok in args.instances.split(",") if tok.strip()}
         instances = [
-            it for it in instances if it["short_id"] in wanted or it["instance_id"] in wanted
+            it for it in base_pool if it["short_id"] in wanted or it["instance_id"] in wanted
         ]
 
-    meta = load_parquet_metadata()
+    if args.all_150:
+        meta = {
+            **load_12org_metadata(),
+            **load_w2_metadata(),
+            **load_w3_metadata(),
+            **load_w4_metadata(),
+            **load_w5_metadata(),
+            **load_w6_metadata(),
+            **load_w7_metadata(),
+            **load_w8_metadata(),
+            **load_w9_metadata(),
+            **load_w10_metadata(),
+        }
+    elif args.all_100:
+        meta = {
+            **load_12org_metadata(),
+            **load_w2_metadata(),
+            **load_w3_metadata(),
+            **load_w4_metadata(),
+            **load_w5_metadata(),
+            **load_w6_metadata(),
+            **load_w7_metadata(),
+        }
+    elif args.all_50:
+        meta = {**load_12org_metadata(), **load_w2_metadata(), **load_w3_metadata(), **load_w4_metadata()}
+    elif args.all_32:
+        meta = {**load_12org_metadata(), **load_w2_metadata(), **load_w3_metadata()}
+    elif args.all_22:
+        meta = {**load_12org_metadata(), **load_w2_metadata()}
+    elif args.all_12:
+        meta = load_12org_metadata()
+    else:
+        meta = load_parquet_metadata()
     banked_map = load_banked_runs(args.model, sandbox_base, results_json_path)
 
     if not args.compile_only:
-        print(
-            f"Provisioning {len(instances) * 2 * len(trial_ids_to_run)} APFS CoW sandboxes for Claude Code ({args.model}, trials={trial_ids_to_run}) at {sandbox_base}...",
-            flush=True,
-        )
-        provision_claude_sandboxes(
-            instances, meta, sandbox_base=sandbox_base, trial_ids=trial_ids_to_run
-        )
-
         jobs: list[tuple[dict[str, Any], dict[str, Any], bool, int]] = []
         for t_id in trial_ids_to_run:
             for item in instances:
                 iid = item["instance_id"]
                 rec = meta[iid]
                 for is_wbc, arm_k in ((False, "vanilla"), (True, "wbc")):
-                    existing = banked_map.get((iid, arm_k, t_id))
-                    if args.only_unresolved and existing and existing.get("resolved"):
+                    if args.wbc_only and not is_wbc:
                         continue
+                    existing = banked_map.get((iid, arm_k, t_id))
+                    if args.only_unresolved and existing:
+                        hit_lim = bool(
+                            existing.get("hit_session_limit")
+                            or (int(existing.get("turns", 0)) <= 1 and float(existing.get("total_cost_usd", 0.0)) == 0.0)
+                        )
+                        if existing.get("resolved") or (int(existing.get("turns", 0)) > 0 and not hit_lim):
+                            continue
                     jobs.append((item, rec, is_wbc, t_id))
 
+        jobs_filter = {(it["instance_id"], is_wbc, t_id) for (it, _rec, is_wbc, t_id) in jobs}
+        print(
+            f"Provisioning {len(jobs)} APFS CoW sandboxes for Claude Code ({args.model}, trials={trial_ids_to_run}) at {sandbox_base}...",
+            flush=True,
+        )
+        provision_claude_sandboxes(
+            instances,
+            meta,
+            sandbox_base=sandbox_base,
+            trial_ids=trial_ids_to_run,
+            jobs_filter=jobs_filter,
+        )
+
         t_start = time.perf_counter()
+        report_instances = base_pool if not args.monster_only else instances
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             futs = {
                 pool.submit(
@@ -1165,8 +1418,25 @@ def main() -> int:
                 res = fut.result()
                 key = (res["instance_id"], res["arm"], int(res.get("trial", 1)))
                 banked_map[key] = res
-                # Save incremental checkpoint to RESULTS_K3_JSON if multi-trial
-                if effective_k > 1:
+                if effective_k == 1:
+                    runs_t1_ckpt = [
+                        v for (_iid_k, _arm_k, t_k), v in banked_map.items() if t_k == 1
+                    ]
+                    order_map_ckpt = {it["instance_id"]: idx for idx, it in enumerate(report_instances)}
+                    runs_t1_ckpt.sort(
+                        key=lambda r: (
+                            order_map_ckpt.get(r["instance_id"], 999),
+                            0 if r["arm"] == "vanilla" else 1,
+                        )
+                    )
+                    compile_results_and_report(
+                        runs_t1_ckpt,
+                        args.model,
+                        report_instances,
+                        results_json_path=results_json_path,
+                        report_md_path=report_md_path,
+                    )
+                else:
                     all_current = [
                         v
                         for (iid_k, arm_k, t_k), v in banked_map.items()
@@ -1175,22 +1445,23 @@ def main() -> int:
                     compile_k3_results_and_report(
                         all_current,
                         args.model,
-                        TARGET_INSTANCES if not args.monster_only else instances,
+                        report_instances,
                         k=effective_k,
                         sandbox_base=sandbox_base,
                     )
         elapsed_total = time.perf_counter() - t_start
     else:
         elapsed_total = 0.0
+        report_instances = base_pool if not args.monster_only else instances
 
     if effective_k == 1:
         runs_t1 = [
             v for (iid_k, arm_k, t_k), v in banked_map.items() if t_k == 1
         ]
-        order_map = {it["instance_id"]: idx for idx, it in enumerate(instances)}
+        order_map = {it["instance_id"]: idx for idx, it in enumerate(report_instances)}
         runs_t1.sort(key=lambda r: (order_map.get(r["instance_id"], 999), 0 if r["arm"] == "vanilla" else 1))
         summary_payload = compile_results_and_report(
-            runs_t1, args.model, instances, results_json_path=results_json_path, report_md_path=report_md_path
+            runs_t1, args.model, report_instances, results_json_path=results_json_path, report_md_path=report_md_path
         )
         print(
             f"\nCompleted {len(runs_t1)} Claude Code (k=1) runs in {elapsed_total:.1f}s.\n"

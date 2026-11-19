@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "whole-body-compute"
-version = "0.1.2"
+version = "0.1.3"
 description = "Cut agent token burn with zero accuracy loss on SWE-bench Verified. Local <3ms AST shield, Apple Silicon vision & memory runtime for Claude Code, Cursor & Antigravity."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -121,4 +121,5 @@ include = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
+asyncio_default_fixture_loop_scope = "function"
 addopts = "--ignore=tests/test_bootstrap_sovereign.py"

@@ -18,12 +18,17 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 logger = logging.getLogger("whole_body_compute.integrations.tactile")
+
+_SNAP_CACHE_LOCK = threading.Lock()
+_SNAP_CACHE: Dict[str, Tuple[int, int, Any]] = {}
+_SNAP_CACHE_MAX = 256
 
 
 def _is_tautological_assert(test_node: ast.AST) -> bool:
@@ -424,10 +429,37 @@ class TactileSensor:
         fpath_str = str(file_path or "")
 
         if raw_bytes is None and raw_text is None:
-            if not fpath_str or not fpath.is_file():
+            if not fpath_str:
                 return FileTactileSnapshot(
                     file_path=fpath_str,
                     exists=False,
+                    latency_ms=round((time.perf_counter() - t0) * 1000.0, 3),
+                )
+            try:
+                st = os.stat(fpath_str)
+            except OSError:
+                return FileTactileSnapshot(
+                    file_path=fpath_str,
+                    exists=False,
+                    latency_ms=round((time.perf_counter() - t0) * 1000.0, 3),
+                )
+            with _SNAP_CACHE_LOCK:
+                cached = _SNAP_CACHE.get(fpath_str)
+            if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+                base_snap: FileTactileSnapshot = cached[2]
+                return FileTactileSnapshot(
+                    file_path=fpath_str,
+                    exists=True,
+                    sha256=base_snap.sha256,
+                    size_bytes=base_snap.size_bytes,
+                    ast_syntax_valid=base_snap.ast_syntax_valid,
+                    ast_error=base_snap.ast_error,
+                    ast_digest=base_snap.ast_digest,
+                    topology_digest=base_snap.topology_digest,
+                    symbol_count=base_snap.symbol_count,
+                    assert_count=base_snap.assert_count,
+                    tautological_asserts=base_snap.tautological_asserts,
+                    test_funcs=list(base_snap.test_funcs),
                     latency_ms=round((time.perf_counter() - t0) * 1000.0, 3),
                 )
             try:
@@ -438,6 +470,9 @@ class TactileSensor:
                     exists=False,
                     latency_ms=round((time.perf_counter() - t0) * 1000.0, 3),
                 )
+            disk_stat = (st.st_mtime_ns, st.st_size)
+        else:
+            disk_stat = None
 
         if raw_bytes is None and raw_text is not None:
             raw_bytes = raw_text.encode("utf-8", errors="replace")
@@ -460,7 +495,7 @@ class TactileSensor:
             test_fn_list,
         ) = compute_ast_structural_digest(t_data, is_python=is_py)
 
-        return FileTactileSnapshot(
+        snap = FileTactileSnapshot(
             file_path=fpath_str,
             exists=True,
             sha256=sha256_hex,
@@ -475,6 +510,12 @@ class TactileSensor:
             test_funcs=test_fn_list,
             latency_ms=round((time.perf_counter() - t0) * 1000.0, 3),
         )
+        if disk_stat is not None:
+            with _SNAP_CACHE_LOCK:
+                if len(_SNAP_CACHE) >= _SNAP_CACHE_MAX:
+                    _SNAP_CACHE.pop(next(iter(_SNAP_CACHE)), None)
+                _SNAP_CACHE[fpath_str] = (disk_stat[0], disk_stat[1], snap)
+        return snap
 
     @classmethod
     def verify_file_delta(

@@ -18,6 +18,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -750,7 +751,8 @@ def check_package_dependencies() -> List[Dict[str, Any]]:
                     "name": "Tokenizers / MLX-Audio Alignment",
                     "status": "fail",
                     "details": f"tokenizers {tokenizers_ver} incompatible with mlx-audio {mlx_audio_ver}. Requires >= 0.23.1.",
-                    "fix_command": f"{sys.executable} -m pip install 'tokenizers>=0.23.1,<0.24.0'",
+                    "fix_command": f"{shlex.quote(sys.executable)} -m pip install 'tokenizers>=0.23.1,<0.24.0'",
+                    "fix_args": [sys.executable, "-m", "pip", "install", "tokenizers>=0.23.1,<0.24.0"],
                 }
             )
         else:
@@ -1073,12 +1075,12 @@ def apply_doctor_fixes(diagnostics: Dict[str, Any], quiet: bool = False) -> List
 
     # 3. Run package/dependency fix commands
     for c in diagnostics.get("checks", []):
-        if c.get("status") == "fail" and c.get("fix_command"):
-            cmd = c["fix_command"]
+        if c.get("status") == "fail" and (c.get("fix_args") or c.get("fix_command")):
+            cmd_args = c.get("fix_args") or shlex.split(str(c["fix_command"]))
             if not quiet:
                 print(f"🔧 Applying automated fix for {c['name']}...")
             try:
-                res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+                res = subprocess.run(cmd_args, shell=False, capture_output=True, text=True, timeout=60)
                 if res.returncode == 0:
                     actions_taken.append(f"Successfully ran fix for {c['name']}")
                     if not quiet:
@@ -1409,6 +1411,34 @@ def check_organ_brainstem() -> Dict[str, Any]:
 
     details += f" • Radix KV: {radix_hash}"
 
+    hw_accel_info: Dict[str, Any] = {}
+    try:
+        from whole_body_compute.local.metal_accel import get_hardware_accel_status
+
+        hw_st = get_hardware_accel_status()
+        hw_accel_info = hw_st.to_dict()
+        if hw_st.metal_fused_kernels_ready:
+            details += f" • 3-Organ Accel: {hw_st.gpu_name} (Metal Tile + AMX + ANE, {hw_st.page_size_bytes // 1024}KB Zero-Copy)"
+    except Exception:
+        pass
+
+    storage_route_info: Dict[str, Any] = {}
+    try:
+        from whole_body_compute.local.bootstrap import ensure_hot_warm_storage_routes
+
+        storage_route_info = ensure_hot_warm_storage_routes()
+        if storage_route_info.get("external_mounted"):
+            details += (
+                f" • Storage: DOCKED (/Volumes/Local Models • {storage_route_info.get('external_free_gb', 0):.0f}GB free"
+                f" + {len(storage_route_info.get('hot_models', []))} Hot Internal)"
+            )
+        else:
+            details += (
+                f" • Storage: UNPLUGGED (Hot Internal NVMe • {len(storage_route_info.get('hot_models', []))} models active)"
+            )
+    except Exception:
+        pass
+
     return {
         "organ_num": "02",
         "name": "The Brainstem",
@@ -1425,6 +1455,8 @@ def check_organ_brainstem() -> Dict[str, Any]:
             "warm_models": warm_models,
             "secondary_ports": [p["port"] for p in secondary_active],
             "secondary_endpoints": secondary_active,
+            "hardware_accel": hw_accel_info,
+            "storage_routes": storage_route_info,
         },
     }
 
@@ -1692,7 +1724,12 @@ def check_organ_hippocampus() -> Dict[str, Any]:
             try:
                 habits_count = conn.execute("SELECT COUNT(*) FROM user_habits").fetchone()[0]
             except Exception:
-                habits_count = 0
+                try:
+                    habits_count = conn.execute(
+                        "SELECT COUNT(*) FROM memories WHERE category = 'habit_pattern'"
+                    ).fetchone()[0]
+                except Exception:
+                    habits_count = 0
     except Exception:
         pass
 
@@ -1810,6 +1847,15 @@ def check_organ_immune_system(workspace: Optional[Path] = None) -> Dict[str, Any
     hooks_info = _check_workspace_hooks_wired(workspace=workspace)
     hooks_wired = bool(hooks_info.get("hooks_wired"))
     hooks_tag = hooks_info["hooks_tag"]
+    reflex_tag = "reflex:standby"
+    reflex_summary: Dict[str, Any] = {}
+    try:
+        from whole_body_compute.local.reflex_gate import get_reflex_gate_status_summary
+
+        reflex_summary = get_reflex_gate_status_summary()
+        reflex_tag = str(reflex_summary.get("short_tag", "reflex:standby"))
+    except Exception:
+        pass
     lat = round((time.perf_counter() - t0) * 1000.0, 2)
     status = (
         "pass"
@@ -1818,7 +1864,7 @@ def check_organ_immune_system(workspace: Optional[Path] = None) -> Dict[str, Any
     )
     details = (
         f"{cow_note} • 3-Stage AST SecGate ({sec_lat:.2f}ms) • "
-        f"Vascular Guard & {antibody_count} Antibodies active • {hooks_tag}"
+        f"{antibody_count} Antibodies • {reflex_tag} • {hooks_tag}"
     )
 
     return {
@@ -1835,6 +1881,7 @@ def check_organ_immune_system(workspace: Optional[Path] = None) -> Dict[str, Any
             "vascular_guard_active": vascular_ok,
             "antibody_count": antibody_count,
             "secgate_ms": round(sec_lat, 2),
+            "reflex_gates": reflex_summary,
             "hooks_wired": hooks_info["hooks_wired"],
             "claude_hooks_wired": hooks_info["claude_hooks_wired"],
             "hooks_status": hooks_tag,
@@ -2131,7 +2178,7 @@ def format_organ_doctor_table(organ_report: Dict[str, Any]) -> str:
     col_sub = 30
     col_status = 8
     col_lat = 9
-    col_details = 56
+    col_details = 114
 
     top = f"┌─{'─'*col_num}─┬─{'─'*col_organ}─┬─{'─'*col_sub}─┬─{'─'*col_status}─┬─{'─'*col_lat}─┬─{'─'*col_details}─┐"
     hdr = f"│ {'#':<{col_num}} │ {'Organ':<{col_organ}} │ {'Subsystem':<{col_sub}} │ {'Status':<{col_status}} │ {'Latency':<{col_lat}} │ {'Vital Signs & Metrics':<{col_details}} │"
@@ -2266,6 +2313,12 @@ def cmd_doctor(args: Any) -> int:
 
     pipe_checks = diag["checks"][:4]
     print(format_doctor_table(pipe_checks, elapsed_ms=diag.get("elapsed_ms")))
+    try:
+        from whole_body_compute.local.reflex_gate import format_reflex_gate_status_lines
+
+        print("\n".join(format_reflex_gate_status_lines()))
+    except Exception:
+        pass
 
     if is_full and len(diag["checks"]) > 4:
         status_icons = {

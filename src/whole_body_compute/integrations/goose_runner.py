@@ -71,8 +71,18 @@ logger = logging.getLogger("whole_body_compute.integrations.goose_runner")
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_SPECIALIST_ROUTER_URL = "http://127.0.0.1:9380/v1/chat/completions"
 DEFAULT_GOOSE_SESSIONS_DB = Path.home() / ".local" / "share" / "goose" / "sessions" / "sessions.db"
-DEFAULT_VIFI_SOCKET = "/tmp/vifi.sock"
-DEFAULT_GOOSE_ACTIVE_PID_FILE = Path("/tmp/voicefi_goose_active.json")
+def _get_goose_run_dir() -> Path:
+    run_dir = Path.home() / ".whole_body_compute" / "run"
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(run_dir, 0o700)
+    except OSError:
+        pass
+    return run_dir
+
+
+DEFAULT_VIFI_SOCKET = str(_get_goose_run_dir() / "vifi.sock")
+DEFAULT_GOOSE_ACTIVE_PID_FILE = _get_goose_run_dir() / "goose_active.json"
 
 PROTECTED_GRADER_PATTERNS = (
     "eval_models.py",
@@ -1852,18 +1862,21 @@ class GooseHeadlessRunner:
             except Exception:
                 pgid = proc.pid
             try:
-                DEFAULT_GOOSE_ACTIVE_PID_FILE.write_text(
-                    json.dumps(
-                        {
-                            "session_id": session_id,
-                            "pid": proc.pid,
-                            "pgid": pgid,
-                            "sandbox_dir": str(sandbox.sandbox_dir) if sandbox else None,
-                            "timestamp": time.time(),
-                        }
-                    ),
-                    encoding="utf-8",
-                )
+                pid_file = DEFAULT_GOOSE_ACTIVE_PID_FILE
+                pid_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                fd = os.open(str(pid_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(
+                        json.dumps(
+                            {
+                                "session_id": session_id,
+                                "pid": proc.pid,
+                                "pgid": pgid,
+                                "sandbox_dir": str(sandbox.sandbox_dir) if sandbox else None,
+                                "timestamp": time.time(),
+                            }
+                        )
+                    )
             except Exception:
                 pass
 
@@ -1915,10 +1928,15 @@ class GooseHeadlessRunner:
                     sbx.rollback()
                     rolled_back.append(str(sbx.sandbox_dir))
 
-            # Also check cross-process PID file in `/tmp/voicefi_goose_active.json`
+            # Also check cross-process PID file inside 0700 ~/.whole_body_compute/run/
             if DEFAULT_GOOSE_ACTIVE_PID_FILE.exists():
                 try:
-                    info = json.loads(DEFAULT_GOOSE_ACTIVE_PID_FILE.read_text(encoding="utf-8"))
+                    fd = os.open(str(DEFAULT_GOOSE_ACTIVE_PID_FILE), os.O_RDONLY | os.O_NOFOLLOW)
+                    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+                        st = os.fstat(fh.fileno())
+                        if st.st_uid != os.getuid():
+                            raise PermissionError("Untrusted goose_active.json owner")
+                        info = json.loads(fh.read())
                     ext_pgid = int(info.get("pgid") or info.get("pid") or 0)
                     ext_sid = str(info.get("session_id") or "")
                     if ext_pgid > 0 and ext_pgid not in killed_pids:
@@ -1932,10 +1950,17 @@ class GooseHeadlessRunner:
                         except Exception:
                             pass
                     ext_sbx = info.get("sandbox_dir")
-                    if ext_sbx and Path(ext_sbx).exists():
-                        shutil.rmtree(ext_sbx, ignore_errors=True)
-                        if ext_sbx not in rolled_back:
-                            rolled_back.append(ext_sbx)
+                    if ext_sbx:
+                        cand_sbx = Path(ext_sbx).resolve()
+                        expected_root = Path(tempfile.gettempdir()).resolve()
+                        if (
+                            cand_sbx.is_dir()
+                            and cand_sbx.parent == expected_root
+                            and cand_sbx.name.startswith("voicefi_apfs_sandbox_")
+                        ):
+                            shutil.rmtree(cand_sbx, ignore_errors=True)
+                            if ext_sbx not in rolled_back:
+                                rolled_back.append(ext_sbx)
                     DEFAULT_GOOSE_ACTIVE_PID_FILE.unlink(missing_ok=True)
                 except Exception:
                     pass

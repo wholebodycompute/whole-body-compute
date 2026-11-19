@@ -736,5 +736,95 @@ def test_nested_payload_redaction_and_harness_detection(monkeypatch: pytest.Monk
     assert _detect_active_agent_harness() == "custom-harness_v2"
 
 
+def test_learning_telemetry_memory_skills_and_workflows_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Verify zero-PII learning telemetry events and Procedural DNA harvest across:
+    1. DotMemory fact learning (`wbc_memory_fact_learned`) & habit consolidation (`wbc_habits_consolidated`).
+    2. Skill activations (`wbc_skill_activated`) & skill pruning (`wbc_skills_pruned`).
+    3. Custom user workflows saved in `~/.whole_body_compute/workflows/` harvested by ProceduralDNAHarvester.
+    """
+    from whole_body_compute.local.dot_memory import MemoryStore
+    from whole_body_compute.skills_telemetry import prune_skills, record_skill_activation
+
+    stats_file = tmp_path / "usage_stats.json"
+    cfg_file = tmp_path / "telemetry_consent.json"
+    dot_db = tmp_path / "dot_memory.db"
+    skill_tel_file = tmp_path / "skill_telemetry.json"
+    workflows_dir = tmp_path / "workflows"
+    workflows_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("WBC_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("WBC_USAGE_STATS_PATH", str(stats_file))
+    monkeypatch.setenv("WBC_TELEMETRY_CONFIG_PATH", str(cfg_file))
+    monkeypatch.setenv("WBC_DOT_MEMORY_PATH", str(dot_db))
+    monkeypatch.setenv("WBC_SKILL_TELEMETRY_PATH", str(skill_tel_file))
+
+    store = MemoryStore(db_path=dot_db, auto_seed=False)
+    store.remember("Always use uv run pytest for test verification", category="preference", tags="pytest,uv")
+    store.remember("Draft email reply to client", category="shipped_action", tags="send_email_reply")
+    store.remember("Second email reply to vendor", category="shipped_action", tags="send_email_reply")
+    consol = store.consolidate_habits(min_occurrences=2)
+    assert consol["consolidated_habits_count"] >= 1
+
+    # Record skill activation milestone (read #1)
+    activated = record_skill_activation(
+        "/Users/alice/.gemini/config/plugins/test-plugin/skills/custom-skill/SKILL.md",
+        conversation_id="conv_learning_1",
+    )
+    assert activated == "custom-skill"
+
+    # Prune a dormant custom skill
+    ws_root = tmp_path / "ws"
+    dormant_skill_dir = ws_root / ".agents" / "skills" / "unused-skill"
+    dormant_skill_dir.mkdir(parents=True, exist_ok=True)
+    (dormant_skill_dir / "SKILL.md").write_text(
+        "---\nname: unused-skill\ndescription: Dormant test skill\n---\nBody\n",
+        encoding="utf-8",
+    )
+    prune_res = prune_skills(
+        workspace_root=ws_root,
+        gemini_config_dir=tmp_path / "gemini_cfg",
+        archive_dir=tmp_path / "skills_archive",
+        brain_dir=tmp_path / "empty_brain",
+    )
+    assert prune_res["shelved_count"] == 1
+
+    # Verify events recorded in usage_stats.json with zero raw fact text
+    usage = load_usage_stats(stats_file)
+    usage_str = json.dumps(usage)
+    assert "Always use uv run pytest" not in usage_str
+    assert usage["events"]["wbc_memory_fact_learned"]["count"] >= 3
+    assert usage["events"]["wbc_habits_consolidated"]["count"] == 1
+    assert usage["events"]["wbc_skill_activated"]["count"] == 1
+    assert usage["events"]["wbc_skills_pruned"]["count"] == 1
+
+    # Write a taught workflow in `workflows/` (PalTrainer default dir) and verify harvester picks it up
+    (workflows_dir / "taught_custom_flow.yaml").write_text(
+        "id: taught_custom_flow\n"
+        "name: Taught Custom Flow\n"
+        "steps:\n"
+        "  - name: step_1\n"
+        "    action: run_shell\n"
+        "    command: echo hello\n",
+        encoding="utf-8",
+    )
+    harvester = ProceduralDNAHarvester(
+        recipes_dir=tmp_path / "recipes",
+        outbox_path=tmp_path / "telemetry_outbox.jsonl",
+    )
+    harvest_rep = harvester.harvest_all(persist=True)
+    ir_ids = {c["recipe_id"] for c in harvest_rep["compiler_ir_cards"]}
+    assert "taught_custom_flow" in ir_ids
+
+    eff_card = harvest_rep["hybrid_efficiency_cards"][0]
+    assert eff_card["learning_summary"]["total_memories"] >= 4
+    assert eff_card["learning_summary"]["by_category"]["preference"] == 1
+    assert eff_card["learning_summary"]["tracked_skills_count"] == 1
+    assert eff_card["learning_summary"]["total_skill_reads"] == 1
+
+
+
 
 

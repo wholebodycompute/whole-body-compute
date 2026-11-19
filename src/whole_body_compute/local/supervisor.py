@@ -39,11 +39,23 @@ VALID_GATE_STATUSES = ("APPROVED", "AUTO_SWEPT", "FALLBACK", "BLOCKED", "NOMINAL
 # Calibrated Unified Memory Headroom Requirements for Apple Silicon (Weights + KV Cache)
 DEFAULT_MODEL_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
     # Native MLX 64 GB Apple Silicon M5 Pro Tiers (:8080)
+    "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit": {
+        "min_free_ram_gb": 18.5,
+        "max_load_avg": 14.0,
+        "disallow_swap": True,
+        "recommended_fallback": "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit",
+        "arch": "sparse_moe_30b_a3b",
+        "prefill_tok_s": 2234.2,
+        "decode_tok_s": 53.4,
+    },
     "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit": {
         "min_free_ram_gb": 20.0,
         "max_load_avg": 12.0,
         "disallow_swap": True,
         "recommended_fallback": "voicefi-coder-mlx",
+        "speculative_draft_model": "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit",
+        "num_draft_tokens": 4,
+        "speculative_decode_tok_s": 30.9,
     },
     "mlx-community/DeepSeek-R1-Distill-Qwen-32B-4bit": {
         "min_free_ram_gb": 20.0,
@@ -56,6 +68,9 @@ DEFAULT_MODEL_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
         "max_load_avg": 12.0,
         "disallow_swap": False,
         "recommended_fallback": "voicefi-coder-mlx",
+        "speculative_draft_model": "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit",
+        "num_draft_tokens": 5,
+        "speculative_decode_tok_s": 50.5,
     },
     "mlx-community/gemma-2-9b-it-4bit": {
         "min_free_ram_gb": 6.0,
@@ -832,14 +847,19 @@ class ThermalSupervisor:
         if (now - last_ts) < interval_sec:
             return None
 
-        reap_stamp = Path("/tmp/wbc_last_reap.ts")
+        run_dir = Path.home() / ".whole_body_compute" / "run"
+        reap_stamp = run_dir / "wbc_last_reap.ts"
         try:
-            if reap_stamp.exists():
+            run_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(run_dir, 0o700)
+            if reap_stamp.exists() and not reap_stamp.is_symlink():
                 mtime = reap_stamp.stat().st_mtime
                 if (now - mtime) < interval_sec:
                     self._last_opportunistic_reap_ts = now
                     return None
-            reap_stamp.write_text(str(now), encoding="utf-8")
+            fd_r = os.open(str(reap_stamp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd_r, "w", encoding="utf-8") as fh_r:
+                fh_r.write(str(now))
         except Exception:
             pass
 
@@ -853,6 +873,86 @@ class ThermalSupervisor:
     def is_safe_to_run(self) -> bool:
         """Instant boolean check if safe to proceed with compute."""
         return self.get_telemetry().is_safe
+
+    def get_fast_pressures(
+        self,
+        thermal_override: Optional[str] = None,
+    ) -> Tuple[float, float]:
+        """
+        Return `(ram_pressure, thermal_pressure)` bounded in `[0.0, 1.0]` in <0.05ms
+        without spawning subprocesses (`pmset`, `vm_stat`, `sysctl`).
+        """
+        pressure_map = {
+            "NORMAL": 0.0,
+            "NOMINAL": 0.0,
+            "FAIR": 0.33,
+            "MODERATE": 0.33,
+            "SERIOUS": 0.67,
+            "HEAVY": 0.67,
+            "CRITICAL": 1.0,
+        }
+        now = time.perf_counter()
+
+        # 1. Resolve thermal state without subprocesses
+        t_state = (thermal_override or "").strip().upper()
+        if not t_state:
+            env_t = (
+                os.environ.get("WBC_THERMAL_STATE")
+                or os.environ.get("WBC_MOCK_THERMAL_STATE")
+                or os.environ.get("VOICEFI_MOCK_THERMAL_STATE")
+                or ""
+            ).strip().upper()
+            if env_t:
+                t_state = env_t
+            elif self._telemetry_cache is not None and (time.time() - self._telemetry_cache_ts) < 5.0:
+                t_state = str(self._telemetry_cache.thermal_state or "NORMAL").upper()
+            else:
+                fast_ts = getattr(self, "_fast_pressure_ts", 0.0)
+                if (now - fast_ts) < 2.0 and hasattr(self, "_fast_thermal_pressure"):
+                    return (
+                        float(getattr(self, "_fast_ram_pressure", 0.0)),
+                        float(getattr(self, "_fast_thermal_pressure", 0.0)),
+                    )
+                try:
+                    from whole_body_compute.organs.proprioception import get_fast_thermal_state
+
+                    t_state = get_fast_thermal_state()
+                except Exception:
+                    t_state = "NORMAL"
+
+        thermal_pressure = pressure_map.get(t_state, 0.0)
+
+        # 2. Resolve RAM pressure without subprocesses
+        env_ram = os.environ.get("WBC_RAM_PRESSURE")
+        if env_ram is not None:
+            try:
+                ram_pressure = min(1.0, max(0.0, float(env_ram)))
+            except ValueError:
+                ram_pressure = 0.0
+        elif self._telemetry_cache is not None and (time.time() - self._telemetry_cache_ts) < 5.0:
+            ram_pressure = min(1.0, max(0.0, float(self._telemetry_cache.ram_percent) / 100.0))
+        else:
+            fast_ts = getattr(self, "_fast_pressure_ts", 0.0)
+            if (now - fast_ts) < 2.0 and hasattr(self, "_fast_ram_pressure"):
+                ram_pressure = float(getattr(self, "_fast_ram_pressure", 0.0))
+            elif PSUTIL_AVAILABLE:
+                try:
+                    ram_pressure = min(1.0, max(0.0, float(psutil.virtual_memory().percent) / 100.0))
+                except Exception:
+                    ram_pressure = 0.0
+            elif self.is_linux:
+                try:
+                    mem = self.get_memory_and_swap_linux()
+                    ram_pressure = min(1.0, max(0.0, float(mem.get("ram_percent", 0.0)) / 100.0))
+                except Exception:
+                    ram_pressure = 0.0
+            else:
+                ram_pressure = 0.0
+
+        self._fast_ram_pressure = ram_pressure
+        self._fast_thermal_pressure = thermal_pressure
+        self._fast_pressure_ts = now
+        return (ram_pressure, thermal_pressure)
 
     def get_cognitive_telemetry(
         self,

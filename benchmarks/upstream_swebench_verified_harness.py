@@ -288,17 +288,21 @@ def normalize_django_test_label(label: str) -> str:
     """
     Convert SWE-bench Django unittest strings like:
       `test_foo (aggregation.tests.AggregateTestCase.test_foo)` or
-      `test_foo (aggregation.tests.AggregateTestCase)`
+      `test_foo (aggregation.tests.AggregateTestCase)` or
+      `Docstring description (module.Class.test_foo)`
     into `./tests/runtests.py` dotted label `aggregation.tests.AggregateTestCase.test_foo`.
     """
     s = label.strip()
     m = re.match(r"^(\w+)\s+\(([\w\.]+)\)$", s)
-    if not m:
-        return s
-    method, inner = m.groups()
-    if inner.endswith(f".{method}"):
-        return inner
-    return f"{inner}.{method}"
+    if m:
+        method, inner = m.groups()
+        if inner.endswith(f".{method}"):
+            return inner
+        return f"{inner}.{method}"
+    m_end = re.search(r"\(([\w\.]+)\)$", s)
+    if m_end:
+        return m_end.group(1)
+    return s
 
 
 def filter_target_instances(instances_filter: str = "") -> list[dict[str, Any]]:
@@ -604,7 +608,8 @@ def setup_all(
         repo_cache = CACHE_BASE / f"repo_{sid}"
         venv_dir = CACHE_BASE / f"venv_{sid}"
 
-        if not (repo_cache / ".git").exists():
+        if not (repo_cache / ".git").exists() or not (repo_cache / item["primary_file"]).exists():
+            shutil.rmtree(repo_cache, ignore_errors=True)
             repo_cache.mkdir(parents=True, exist_ok=True)
             subprocess.run(["git", "init"], cwd=repo_cache, check=True, capture_output=True)
             subprocess.run(
@@ -627,7 +632,16 @@ def setup_all(
             )
             print(f"Fetched {iid} ({repo} @ {sha[:10]})")
 
-        if not (venv_dir / "bin" / "python").exists():
+        check_mod = "sqlparse" if sid == "dja17084" else ("attr, xmlschema" if sid == "pyt8399" else "pytest")
+        venv_ok = (venv_dir / "bin" / "python").exists() and (
+            subprocess.run(
+                [str(venv_dir / "bin" / "python"), "-c", f"import {check_mod}"],
+                capture_output=True,
+            ).returncode
+            == 0
+        )
+        if not venv_ok:
+            shutil.rmtree(venv_dir, ignore_errors=True)
             subprocess.run(
                 ["uv", "venv", "--python", py_ver, str(venv_dir)],
                 check=True,
@@ -794,13 +808,32 @@ def evaluate_sandbox(
         env["PYTHONPATH"] = ":".join(src_paths)
 
         f2p: list[str] = json.loads(rec["FAIL_TO_PASS"])
-        p2p: list[str] = json.loads(rec["PASS_TO_PASS"])[:10]
+        p2p: list[str] = [
+            p
+            for p in json.loads(rec["PASS_TO_PASS"])
+            if not p.endswith(("[png]", "[pdf]", "[svg]", "[eps]"))
+        ][:10]
         cmd_type = item.get("eval_cmd_type") or (
             "sympy_pytest" if item.get("sympy_test_file") else "pytest"
         )
 
         if cmd_type == "django":
-            labels = [normalize_django_test_label(lbl) for lbl in (f2p + p2p[:5])]
+            f2p_norms = [normalize_django_test_label(lbl) for lbl in f2p]
+            labels = [
+                norm
+                for norm in f2p_norms
+                if re.match(r"^[\w\.]+$", norm)
+            ]
+            if len(labels) < len(f2p):
+                for tpf in test_patch_files:
+                    if tpf.startswith("tests/") and tpf.endswith(".py"):
+                        mod = tpf[len("tests/") : -3].replace("/", ".")
+                        if not mod.endswith(".models") and mod not in labels:
+                            labels.append(mod)
+            for lbl in p2p[:5]:
+                norm = normalize_django_test_label(lbl)
+                if re.match(r"^[\w\.]+$", norm) and norm not in labels:
+                    labels.append(norm)
             cmd = [str(venv_py), "./tests/runtests.py", "--verbosity=1", *labels]
         elif cmd_type == "sympy_pytest" or item.get("sympy_test_file"):
             test_file = item["sympy_test_file"]

@@ -176,10 +176,17 @@ def inspect_shell_command_bloat(cmd_line: str) -> Dict[str, Any]:
 
     sub_commands = re.split(r"(?:\s*&&\s*|\s*\|\|\s*|\s*;\s*)", raw_cmd)
     single_sub = len(sub_commands) == 1
+    cd_dir: Optional[Path] = None  # [direct-edit] track `cd <dir> && cat <file>` so relative paths resolve
 
     for sub_cmd in sub_commands:
         sub = sub_cmd.strip()
         if not sub:
+            continue
+
+        _cd_m = re.match(r"^cd\s+(?:\"([^\"]+)\"|'([^']+)'|(\S+))\s*$", sub)
+        if _cd_m:
+            _tgt = Path(os.path.expanduser(_cd_m.group(1) or _cd_m.group(2) or _cd_m.group(3)))
+            cd_dir = _tgt if _tgt.is_absolute() or cd_dir is None else cd_dir / _tgt
             continue
 
         # [direct-edit] Quote-aware pipe splitting so regex alternation "foo|bar" is not truncated
@@ -458,6 +465,8 @@ def inspect_shell_command_bloat(cmd_line: str) -> Dict[str, Any]:
                     break
                 clean_path = tok.strip("'\"")
                 fpath = Path(clean_path)
+                if cd_dir is not None and not fpath.is_absolute() and (cd_dir / clean_path).is_file():
+                    fpath = cd_dir / clean_path
                 if not fpath.is_file() and not fpath.is_absolute():
                     alt = Path.cwd() / clean_path
                     if alt.is_file():
@@ -477,7 +486,10 @@ def inspect_shell_command_bloat(cmd_line: str) -> Dict[str, Any]:
                             full_tokens_est = max(1, fsize // 4)
                             is_raw_log = fpath.suffix in (".log", ".err", ".jsonl") and total_lines > 100
 
-                            if (total_lines > 250 and is_strict_test) or is_raw_log:
+                            is_large_source = total_lines > 400 and fpath.suffix in (
+                                ".py", ".js", ".ts", ".tsx", ".go", ".rs", ".java", ".c", ".cc", ".cpp", ".h",
+                            )
+                            if (total_lines > 250 and is_strict_test) or is_raw_log or is_large_source:
                                 n_info = f" ({base_cmd} -n {head_n})" if is_head_tail else ""
                                 return {
                                     "blocked": True,

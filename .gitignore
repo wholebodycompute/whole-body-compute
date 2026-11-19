@@ -27,6 +27,12 @@ dist/
 *.db-wal
 *.jsonl
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+config.yaml
+.voicefi.yaml
 .whole_body_compute/
 .voicefi/
 .agents/

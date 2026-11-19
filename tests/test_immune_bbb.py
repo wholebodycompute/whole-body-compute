@@ -1012,5 +1012,93 @@ def test_truncation_cascade_auto_heals_run_command(
     assert "overwrite_args" not in res_bounded or "CommandLine" not in res_bounded["overwrite_args"]
 
 
+def test_cd_then_cat_large_source_blocked_outside_strict_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify `cd <dir> && cat <large_source.py>` is blocked even outside strict test mode, while small files stay allowed."""
+    from whole_body_compute.organs.immune_shell import inspect_shell_command_bloat
+
+    sandbox = tmp_path / "sandbox_cd_cat"
+    sandbox.mkdir()
+    big_py = sandbox / "clone_utils.py"
+    big_py.write_text("\n".join(f"x_{i} = {i}" for i in range(450)) + "\n", encoding="utf-8")
+    task_md = sandbox / "TASK.md"
+    task_md.write_text("# Fix clone_utils\n", encoding="utf-8")
+
+    # Simulate production runtime (outside pytest / strict test mode)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("VOICEFI_STRICT_TEST_HOOK", raising=False)
+
+    blocked = inspect_shell_command_bloat(f'cd "{sandbox}" && cat clone_utils.py')
+    assert blocked["blocked"] is True
+    assert blocked["category"] == "unbounded_dump"
+    assert "clone_utils.py" in blocked["reason"]
+
+    allowed_small = inspect_shell_command_bloat(f'cd "{sandbox}" && cat TASK.md')
+    assert allowed_small["blocked"] is False
+
+
+def test_body_immune_hook_vanilla_conv_id_isolation(tmp_path: Path) -> None:
+    """Verify bin/body-immune-hook honors harness-owned vanilla_conv_ids.txt without trusting command payload."""
+    import os
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[1]
+    hook_bin = repo_root / "bin" / "body-immune-hook"
+
+    sandbox = tmp_path / "sandbox_ab"
+    sandbox.mkdir()
+    big_py = sandbox / "clone_utils.py"
+    big_py.write_text("\n".join(f"x_{i} = {i}" for i in range(450)) + "\n", encoding="utf-8")
+
+    vanilla_file = tmp_path / "vanilla_conv_ids.txt"
+    vanilla_file.write_text("conv-vanilla-123\n", encoding="utf-8")
+
+    env = {
+        **os.environ,
+        "WBC_VANILLA_CONV_IDS_FILE": str(vanilla_file),
+        "WBC_IMMUNE_DEDUP_FILE": str(tmp_path / "dedup_sig"),
+    }
+    env.pop("PYTEST_CURRENT_TEST", None)
+    env.pop("VOICEFI_STRICT_TEST_HOOK", None)
+
+    def _run(cid: str, env_override: dict[str, str] | None = None) -> dict[str, Any]:
+        payload = json.dumps(
+            {
+                "conversationId": cid,
+                "toolCall": {
+                    "name": "run_command",
+                    "args": {"CommandLine": f'cd "{sandbox}" && cat clone_utils.py'},
+                },
+            }
+        )
+        proc = subprocess.run(
+            [str(hook_bin)],
+            input=payload,
+            text=True,
+            capture_output=True,
+            env=env_override or env,
+            cwd=str(repo_root),
+            check=True,
+        )
+        return json.loads(proc.stdout.strip())
+
+    # 1. Registered vanilla conversation_id passes through
+    assert _run("conv-vanilla-123")["decision"] == "allow"
+
+    # 2. Unregistered WBC conversation_id is still blocked by Organ 05/10
+    wbc_res = _run("conv-wbc-456")
+    assert wbc_res["decision"] == "deny"
+    assert "clone_utils.py" in wbc_res["reason"]
+
+    # 3. Symlinked allowlist file is ignored (still blocked)
+    symlink_file = tmp_path / "vanilla_symlink.txt"
+    symlink_file.symlink_to(vanilla_file)
+    sym_env = {**env, "WBC_VANILLA_CONV_IDS_FILE": str(symlink_file)}
+    assert _run("conv-vanilla-123", env_override=sym_env)["decision"] == "deny"
+
+
+
+
 
 

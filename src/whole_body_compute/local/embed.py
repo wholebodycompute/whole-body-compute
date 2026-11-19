@@ -23,10 +23,32 @@ import os
 import re
 import socket
 import sqlite3
+import sys
 import time
 import urllib.request
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+
+
+def _ensure_numpy_site_packages() -> None:
+    try:
+        import numpy  # noqa: F401
+        return
+    except ModuleNotFoundError:
+        pass
+    py_ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    candidates = [
+        Path(os.path.abspath(sys.executable)).parent.parent / "lib" / py_ver / "site-packages",
+        Path(sys.prefix) / "lib" / py_ver / "site-packages",
+        Path(sys.base_prefix) / "lib" / py_ver / "site-packages",
+    ]
+    for cand in candidates:
+        if cand.is_dir() and str(cand) not in sys.path:
+            sys.path.append(str(cand))
+
+
+_ensure_numpy_site_packages()
 
 import numpy as np
 
@@ -157,7 +179,18 @@ class EmbeddingEngine:
         if vec is not None:
             return vec
 
-        # 5. Fast deterministic hash embedding fallback (ensures offline reliability)
+        # 5. Try Apple Silicon ANE / CoreML NaturalLanguage zero-GPU-contention embedder
+        if self.dimension == 768 and not os.environ.get("PYTEST_CURRENT_TEST"):
+            try:
+                from whole_body_compute.local.metal_accel import get_ane_embedder
+
+                ane_vec = get_ane_embedder().embed(safe_text)
+                if ane_vec is not None and ane_vec.shape[0] == self.dimension:
+                    return ane_vec
+            except Exception as e:
+                logger.debug(f"ANE NaturalLanguage fallback skipped ({e}).")
+
+        # 6. Fast deterministic hash embedding fallback (ensures offline reliability)
         return self._heuristic_embed(safe_text)
 
     def _embed_via_service(self, text: str) -> Optional[np.ndarray]:
@@ -343,12 +376,33 @@ class LocalGroundingStore:
         if not rows:
             return []
 
-        results: List[Tuple[sqlite3.Row, float]] = []
+        dim = query_vec.shape[0]
+        valid_rows: List[sqlite3.Row] = []
+        vecs: List[np.ndarray] = []
         for r in rows:
             vec_data = np.frombuffer(r["vector_blob"], dtype=np.float32)
-            similarity = float(np.dot(query_vec, vec_data))
-            if similarity >= min_similarity:
-                results.append((r, similarity))
+            if vec_data.shape[0] == dim:
+                valid_rows.append(r)
+                vecs.append(vec_data)
+
+        if not valid_rows:
+            return []
+
+        results: List[Tuple[sqlite3.Row, float]] = []
+        try:
+            from whole_body_compute.local.metal_accel import batch_cosine_similarity
+
+            mat = np.vstack(vecs)
+            sims = batch_cosine_similarity(mat, query_vec)
+            for r, sim_val in zip(valid_rows, sims):
+                similarity = float(sim_val)
+                if similarity >= min_similarity:
+                    results.append((r, similarity))
+        except Exception:
+            for r, vec_data in zip(valid_rows, vecs):
+                similarity = float(np.dot(query_vec, vec_data))
+                if similarity >= min_similarity:
+                    results.append((r, similarity))
 
         # Sort descending by similarity
         results.sort(key=lambda x: x[1], reverse=True)

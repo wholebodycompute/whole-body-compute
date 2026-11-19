@@ -103,6 +103,97 @@ def _dispatch_main(
             print("\n" + format_usage_stats_table(report) + "\n")
         return 0
 
+    if cmd in ("people", "contacts", "relationships"):
+        from pathlib import Path
+        from whole_body_compute.people import (
+            capture_live_browser_engagement,
+            copy_person_dm_to_clipboard,
+            format_people_table,
+            query_people,
+            record_manual_engagement_or_sent,
+            save_people_config,
+            sync_relationship_archive,
+        )
+
+        is_json = bool(getattr(args, "json", False))
+        imp_path = getattr(args, "import_path", None)
+        if getattr(args, "cta", None) is not None and imp_path:
+            save_people_config({"default_cta": str(args.cta)})
+        if imp_path:
+            resolved_imp = str(Path(imp_path).expanduser().resolve())
+            save_people_config({"archive_path": resolved_imp})
+            res_sync = sync_relationship_archive(archive_path=Path(resolved_imp))
+            if is_json and not getattr(args, "query", None):
+                print(json.dumps(res_sync, indent=2))
+                return 0
+        elif getattr(args, "sync", False):
+            res_sync = sync_relationship_archive()
+            if is_json and not getattr(args, "query", None):
+                print(json.dumps(res_sync, indent=2))
+                return 0
+        if getattr(args, "capture", False):
+            res_cap = capture_live_browser_engagement()
+            if is_json:
+                print(json.dumps(res_cap, indent=2))
+            else:
+                print(f"\n👁️ Organ 03 Live Engagement Capture: {json.dumps(res_cap)}\n")
+            return 2 if res_cap.get("status") == "upgrade_required" else 0
+        if getattr(args, "sent", None):
+            res_sent = record_manual_engagement_or_sent(
+                str(args.sent), mark_sent=True, note=str(getattr(args, "note", "") or "")
+            )
+            if is_json:
+                print(json.dumps(res_sent, indent=2))
+            else:
+                print(f"\n✅ Marked '{res_sent['person_name']}' as contacted on {res_sent['last_outbound_dm_at']}.\n")
+            return 0
+        if getattr(args, "allow", None):
+            res_allow = record_manual_engagement_or_sent(
+                str(args.allow),
+                circle=getattr(args, "circle", "tech_builder"),
+                status_override="allowed_override",
+                note=str(getattr(args, "note", "") or ""),
+            )
+            if is_json:
+                print(json.dumps(res_allow, indent=2))
+            else:
+                print(f"\n✅ Allowed '{res_allow['person_name']}' in circle `{res_allow['circle']}`.\n")
+            return 0
+        if getattr(args, "quarantine", None):
+            res_q = record_manual_engagement_or_sent(
+                str(args.quarantine),
+                circle="quarantined",
+                status_override="quarantined_override",
+                note=str(getattr(args, "note", "") or ""),
+            )
+            if is_json:
+                print(json.dumps(res_q, indent=2))
+            else:
+                print(f"\n🚫 Quarantined '{res_q['person_name']}'.\n")
+            return 0
+
+        q_str = " ".join(getattr(args, "query", []) or []).strip()
+        rep = query_people(
+            query=q_str,
+            circle=str(getattr(args, "circle", "tech_builder")),
+            include_contacted=bool(getattr(args, "include_contacted", False)),
+            limit=int(getattr(args, "limit", 10) or 10),
+            cta_override=getattr(args, "cta", None),
+        )
+        copy_rk = getattr(args, "copy", None)
+        copied_ok = None
+        if copy_rk is not None:
+            for item in rep.get("people", []):
+                if int(item.get("rank", 0)) == int(copy_rk):
+                    if copy_person_dm_to_clipboard(item):
+                        copied_ok = int(copy_rk)
+                    break
+        if is_json:
+            print(json.dumps(rep, indent=2))
+        else:
+            print("\n" + format_people_table(rep, copied_rank=copied_ok) + "\n")
+        return 0
+
     if cmd in ("begin", "init", "awaken", "start"):
         from whole_body_compute.begin import format_body_begin_banner, run_body_begin
 
@@ -179,6 +270,73 @@ def _dispatch_main(
 
         return run_meeting_cli(args)
 
+    if cmd in ("ears", "transcribe", "dictate"):
+        from pathlib import Path
+        from whole_body_compute.organs.ears import OrganEars
+
+        ears = OrganEars(
+            workspace=Path(args.workspace) if getattr(args, "workspace", None) else None,
+            backend=getattr(args, "backend", "auto"),
+            hotkey=getattr(args, "hotkey", "fn"),
+        )
+        as_json = bool(getattr(args, "json", False))
+
+        if getattr(args, "install", False) or getattr(args, "uninstall", False):
+            from whole_body_compute.daemon import manage_daemons
+
+            action = "install" if getattr(args, "install", False) else "uninstall"
+            res = manage_daemons(action=action)
+            if as_json:
+                print(json.dumps(res, indent=2))
+            else:
+                print(res.get("message", ""))
+            return 0 if res.get("status") == "ok" else 1
+
+        if getattr(args, "upgrade_model", False):
+            res = ears.upgrade_model()
+            if as_json:
+                print(json.dumps(res, indent=2))
+            elif res.get("ok"):
+                print(f"✅ Installed {res['package']} ({res['model']}). Local Metal/Whisper turbo ready.")
+            else:
+                print(f"❌ Failed to install {res['package']}: {res.get('stderr', '').strip()}")
+            return 0 if res.get("ok") else 1
+
+        if getattr(args, "status", False):
+            st = ears.status()
+            if as_json:
+                print(json.dumps(st, indent=2))
+            else:
+                fn = st.get("fn_key_check") or {}
+                print(
+                    f"🎙️  Organ 03 Ears  •  backend={st['backend']}  •  "
+                    f"hotkey={st['hotkey']} (hands-free: {st['hands_free_chord']})\n"
+                    f"   AST Vocab: {st['symbols_indexed']} symbols hydrated in {st['hydration_ms']}ms ({st['workspace']})"
+                )
+                if fn.get("conflict") and fn.get("tip"):
+                    print(f"   ⚠️  Fn Key Note: macOS set to '{fn.get('label')}'. {fn['tip']}")
+            return 0
+
+        audio_path = getattr(args, "audio_path", None)
+        if cmd in ("transcribe", "dictate") or audio_path or getattr(args, "paste", False):
+            res = ears.transcribe(
+                audio_path=audio_path,
+                paste=bool(getattr(args, "paste", False)),
+                silence_sec=float(getattr(args, "silence", 1.4)),
+                max_sec=float(getattr(args, "max_seconds", 30.0)),
+                active_file=getattr(args, "active_file", None),
+            )
+            if as_json:
+                print(json.dumps(res.to_dict(), indent=2))
+            elif res.error and not res.text:
+                print(f"[body ears] {res.error}", file=sys.stderr)
+                return 1
+            else:
+                print(res.text)
+            return 0
+
+        return ears.run_push_to_talk_loop()
+
     if cmd in ("import-screenpipe", "import_screenpipe"):
         from pathlib import Path
 
@@ -211,7 +369,9 @@ def _dispatch_main(
             audit_skills,
             format_skills_audit_table,
             list_archived_skills,
+            prune_mcp_servers,
             prune_skills,
+            restore_mcp_server,
             restore_skill,
         )
 
@@ -316,6 +476,52 @@ def _dispatch_main(
                         print(f"❌ {r.get('error', 'Failed to restore skill')}")
             return 0 if all(r.get("restored") for r in results) else 1
 
+        if action == "prune-mcp":
+            res = prune_mcp_servers(
+                server_names=targets or None,
+                max_conversations=int(getattr(args, "max_convs", 0)),
+                dry_run=bool(getattr(args, "dry_run", False)),
+            )
+            if is_json:
+                print(json.dumps(res, indent=2))
+            else:
+                mode = "[DRY-RUN] Would shelve" if res["dry_run"] else "📦 Shelved"
+                print(
+                    f"\n{mode} {res['shelved_count']} dormant MCP servers -> `{res['archive_dir']}` "
+                    f"(reclaiming ~{res['turn0_tokens_saved_per_session']:,} Turn-0 tokens/session, "
+                    f"~{res['quota_burn_saved_per_25_turn_session']:,} 5h-quota tokens/25-turn session):"
+                )
+                for item in res["shelved"]:
+                    print(
+                        f"  • {item['name']:<26} [{item['source']}] "
+                        f"({item['tokens']:,} Turn-0 tok / ~{item['quota_burn_25_turns']:,} 25t-quota tok)"
+                    )
+                print("  💡 Restore any MCP server anytime with: `body skills restore-mcp <name>` (or `all`)\n")
+            return 0
+
+        if action == "restore-mcp":
+            if not targets:
+                if is_json:
+                    print(json.dumps({"error": "Specify MCP server name(s) or 'all' to restore"}, indent=2))
+                else:
+                    print("Usage: body skills restore-mcp <server_name|all>")
+                return 1
+            results = [restore_mcp_server(t) for t in targets]
+            if is_json:
+                print(json.dumps(results if len(results) > 1 else results[0], indent=2))
+            else:
+                for r in results:
+                    if r.get("restored"):
+                        if "items" in r:
+                            print(f"✅ Restored {r['restored_count']} archived MCP servers:")
+                            for sub in r["items"]:
+                                print(f"  • {sub['server_name']} -> `{sub.get('restored_schema_dir') or 'configs re-enabled'}`")
+                        else:
+                            print(f"✅ Restored `{r['server_name']}` -> `{r.get('restored_schema_dir') or 'configs re-enabled'}`")
+                    else:
+                        print(f"❌ {r.get('error', 'Failed to restore MCP server')}")
+            return 0 if all(r.get("restored") for r in results) else 1
+
         if action == "archive":
             archived = list_archived_skills()
             if is_json:
@@ -343,6 +549,45 @@ def _dispatch_main(
             ShieldInstaller,
             format_shield_status,
         )
+
+        reset_gate_id = getattr(args, "reset_gate", None)
+        prune_reflex = bool(getattr(args, "prune_reflex", False))
+        bootstrap_reflex = bool(getattr(args, "bootstrap_reflex", False))
+        if reset_gate_id or prune_reflex or bootstrap_reflex:
+            from whole_body_compute.local.reflex_gate import (
+                bootstrap_reflex_gates_from_logs,
+                get_default_reflex_gate,
+            )
+
+            rg = get_default_reflex_gate()
+            action_res: dict[str, object] = {}
+            if prune_reflex:
+                deleted_rows = rg.prune_test_repo_keys()
+                action_res["pruned_rows"] = deleted_rows
+                if not getattr(args, "json", False):
+                    print(f"🧹 Pruned {deleted_rows} stale test/temp reflex gate row(s).")
+            if bootstrap_reflex:
+                boot_res = bootstrap_reflex_gates_from_logs(
+                    gate=rg,
+                    reset_existing=bool(getattr(args, "fresh_reflex", False)),
+                )
+                action_res["bootstrap"] = boot_res
+                if not getattr(args, "json", False):
+                    print(
+                        f"⚡ Bootstrapped SpinalReflexGates: "
+                        f"+{boot_res['recon_scout_samples']} recon_scout_sufficiency, "
+                        f"+{boot_res.get('read_autoslice_samples', 0)} read_autoslice_window, "
+                        f"+{boot_res['stdout_compaction_samples']} stdout_compaction sample(s)."
+                    )
+            if reset_gate_id:
+                r_key = str(getattr(args, "repo_key", "__global__") or "__global__")
+                rg.reset_circuit_breaker(reset_gate_id, repo_key=r_key)
+                action_res["reset_gate"] = {"gate_id": reset_gate_id, "repo_key": r_key, "state": "SHADOW"}
+                if not getattr(args, "json", False):
+                    print(f"🔄 Reset SpinalReflexGate `{reset_gate_id}` [{r_key}] back to SHADOW.")
+            if getattr(args, "json", False):
+                print(json.dumps(action_res, indent=2))
+            return 0
 
         installer = ShieldInstaller(workspace_dir=getattr(args, "workspace", None))
         scope = getattr(args, "scope", "workspace") or "workspace"

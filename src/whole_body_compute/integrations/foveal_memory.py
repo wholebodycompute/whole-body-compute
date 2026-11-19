@@ -211,6 +211,33 @@ class FovealMemoryRecord:
         }
 
 
+def get_or_create_foveal_http_token(create: bool = True) -> str:
+    """Return the per-user 0600 bearer token for the local :9382 Foveal Memory HTTP daemon."""
+    import secrets
+
+    run_dir = Path.home() / ".whole_body_compute" / "run"
+    tok_path = run_dir / "foveal_http.token"
+    if tok_path.is_file() and not tok_path.is_symlink():
+        try:
+            existing = tok_path.read_text(encoding="utf-8").strip()
+            if len(existing) >= 16:
+                return existing
+        except OSError:
+            pass
+    if not create:
+        return ""
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(run_dir, 0o700)
+        token = secrets.token_urlsafe(32)
+        fd = os.open(str(tok_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(token + "\n")
+        return token
+    except OSError:
+        return ""
+
+
 def _resolve_foveal_db_path(db_path: Optional[Path] = None) -> Path:
     return Path(db_path or os.environ.get("FOVEAL_MEMORY_DB_PATH") or DEFAULT_FOVEAL_MEMORY_DB).expanduser()
 
@@ -776,7 +803,9 @@ def search_screen_content(
                 params["minutes_ago"] = minutes_ago
 
             qs = urllib.parse.urlencode(params)
-            req = urllib.request.Request(f"{base_url.rstrip('/')}/search?{qs}", method="GET")
+            tok = get_or_create_foveal_http_token(create=False)
+            hdrs = {"Authorization": f"Bearer {tok}"} if tok else {}
+            req = urllib.request.Request(f"{base_url.rstrip('/')}/search?{qs}", headers=hdrs, method="GET")
             with urllib.request.urlopen(req, timeout=1.5) as resp:
                 if resp.status == 200:
                     payload = json.loads(resp.read().decode("utf-8"))
@@ -911,6 +940,8 @@ class _FovealMemoryHTTPHandler(BaseHTTPRequestHandler):
     """Lightweight localhost:9382 Foveal Memory HTTP handler backed by `~/.whole_body/foveal_memory.sqlite`."""
 
     db_path: Path = DEFAULT_FOVEAL_MEMORY_DB
+    auth_token: str = ""
+    MAX_POST_BYTES: int = 262_144
 
     def log_message(self, format: str, *args: Any) -> None:
         # Suppress noisy access logs in headless daemon mode
@@ -920,13 +951,38 @@ class _FovealMemoryHTTPHandler(BaseHTTPRequestHandler):
         raw = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
 
+    def _check_loopback_and_browser_isolation(self, require_auth: bool = True) -> bool:
+        import hmac
+
+        host_hdr = (self.headers.get("Host") or "").strip().lower()
+        host_only = host_hdr.split("]")[0].lstrip("[") if host_hdr.startswith("[") else host_hdr.split(":", 1)[0]
+        if host_only not in ("127.0.0.1", "localhost", "::1"):
+            self._send_json(403, {"error": "Forbidden Host header"})
+            return False
+        if self.headers.get("Origin"):
+            self._send_json(403, {"error": "Browser cross-origin requests forbidden"})
+            return False
+        if self.headers.get("Sec-Fetch-Site", "").lower() in ("cross-site", "same-site"):
+            self._send_json(403, {"error": "Browser fetch requests forbidden"})
+            return False
+        if require_auth and self.auth_token:
+            auth_hdr = (self.headers.get("Authorization") or "").strip()
+            expected = f"Bearer {self.auth_token}"
+            if not hmac.compare_digest(auth_hdr, expected):
+                self._send_json(401, {"error": "Unauthorized"})
+                return False
+        return True
+
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/health":
+            if not self._check_loopback_and_browser_isolation(require_auth=False):
+                return
             self._send_json(
                 200,
                 {
@@ -937,6 +993,9 @@ class _FovealMemoryHTTPHandler(BaseHTTPRequestHandler):
                     "message": "Whole Body Compute Sovereign Foveal Memory Service healthy",
                 },
             )
+            return
+
+        if not self._check_loopback_and_browser_isolation(require_auth=True):
             return
 
         if parsed.path == "/search":
@@ -967,11 +1026,21 @@ class _FovealMemoryHTTPHandler(BaseHTTPRequestHandler):
                 limit=limit,
                 db_path=self.db_path,
             )
+            from whole_body_compute.integrations.ambient_discovery import AmbientPrivacyGuard
+            from whole_body_compute.redaction import redact_secrets
+
+            safe_recs = []
+            for r in recs:
+                if AmbientPrivacyGuard.is_app_blocked(r.app_name):
+                    continue
+                r.text = redact_secrets(r.text)
+                safe_recs.append(r)
+
             self._send_json(
                 200,
                 {
-                    "data": [r.to_api_item() for r in recs],
-                    "pagination": {"limit": limit, "offset": 0, "total": len(recs)},
+                    "data": [r.to_api_item() for r in safe_recs],
+                    "pagination": {"limit": limit, "offset": 0, "total": len(safe_recs)},
                 },
             )
             return
@@ -996,9 +1065,18 @@ class _FovealMemoryHTTPHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": f"Unknown path: {parsed.path}"})
 
     def do_POST(self) -> None:
+        if not self._check_loopback_and_browser_isolation(require_auth=True):
+            return
         parsed = urllib.parse.urlparse(self.path)
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        body_raw = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            self._send_json(400, {"error": "Invalid Content-Length"})
+            return
+        if length < 0 or length > self.MAX_POST_BYTES:
+            self._send_json(413, {"error": "Payload too large"})
+            return
+        body_raw = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else "{}"
         try:
             body = json.loads(body_raw)
         except Exception:
@@ -1083,6 +1161,7 @@ def serve_local_foveal_http(
         pass
 
     BoundHandler.db_path = resolved_db
+    BoundHandler.auth_token = get_or_create_foveal_http_token(create=True)
     server = ThreadingHTTPServer((host, port), BoundHandler)
 
     if poll_windows:

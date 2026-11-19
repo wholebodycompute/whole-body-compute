@@ -148,14 +148,31 @@ def find_ollama_binary() -> Optional[str]:
 
 def ensure_ollama_running(auto_install: bool = False) -> Tuple[bool, str]:
     """
-    Ensure the local Ollama daemon is installed and running.
+    Ensure the local Ollama daemon is installed and running, and heal the Hot/Warm
+    storage symlink (`~/.ollama/models`) based on whether `/Volumes/Local Models` is mounted.
     Returns (is_running, status_message).
     """
     import subprocess
     import time
 
-    if is_ollama_running():
+    route_switched = False
+    try:
+        from whole_body_compute.local.bootstrap import ensure_hot_warm_storage_routes
+
+        route_info = ensure_hot_warm_storage_routes()
+        route_switched = bool(route_info.get("ollama_route_switched"))
+    except Exception:
+        pass
+
+    if is_ollama_running() and not route_switched:
         return True, "Ollama daemon is active on 127.0.0.1:11434"
+
+    if route_switched and is_ollama_running():
+        try:
+            subprocess.run(["pkill", "-f", "ollama serve"], capture_output=True, timeout=3)
+            time.sleep(0.4)
+        except Exception:
+            pass
 
     ollama_bin = find_ollama_binary()
     if not ollama_bin and auto_install:
@@ -703,7 +720,18 @@ def capture_active_window_image(output_path: Optional[str] = None) -> Optional[s
     import subprocess
     import tempfile
 
-    target = output_path or os.path.join(tempfile.gettempdir(), "vifi_vision_frame.png")
+    if output_path:
+        target = output_path
+    else:
+        run_dir = Path.home() / ".whole_body_compute" / "run"
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(run_dir, 0o700)
+            fd_tmp, target = tempfile.mkstemp(prefix="vifi_vision_frame_", suffix=".png", dir=str(run_dir))
+            os.close(fd_tmp)
+        except OSError:
+            fd_tmp, target = tempfile.mkstemp(prefix="vifi_vision_frame_", suffix=".png")
+            os.close(fd_tmp)
     window_id: Optional[int] = None
 
     if platform.system() == "Darwin":

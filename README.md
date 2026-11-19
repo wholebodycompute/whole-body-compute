@@ -60,6 +60,7 @@ Cloud coding agents burn massive context windows re-ingesting full files, noisy 
 | **Desktop Vision** | Full-screen PNG loops (`7,650+` tokens/step) or heavy 24/7 video recorders | **Foveal Vision (`AXUIElement` DOM)** + `<50ms` Tactile git/file delta sensor (`<50MB` RAM) | **96.9%–99.5% sensory token reduction** |
 | **Session Hygiene** | $O(N^2)$ turn accumulation until context degrades | **Cognitive Sentry (`body context`)** + **StateCapsule Flush (`body flush`)** `[Pro]` | **Zero-loss handoff** in `<30` steps |
 | **Pre-Egress Security** | Cloud classifiers run *after* data leaves your machine | `<1ms` 23-vendor secret redaction, `1Password`/Keychain blindfold, `<2ms` APFS CoW airlock & AST SecGate | **`0` secret leaks · `0.0%` ASR** on `AgentDojo` |
+| **Apple Silicon 3-Organ & 3-Tier Memory Turbo** | Single-queue GPU contention, Python vector loops & JSON IPC | Auto-splits compute across **ANE (`CoreML`) + CPU AMX (`Accelerate`) + Metal 3 `threadgroup` Tile Shaders** over `16KB` Zero-Copy Unified Memory (with automatic Linux/Windows fallback) | **`4,661x` faster** memory dedup · **`4,596x` faster** IPC · **`7.84x` less** Q4 RAM |
 
 ---
 
@@ -92,6 +93,7 @@ body doctor         # Sub-second 5-organ health check (--exercise runs closed-lo
 body heart          # Thermal state, Unified RAM headroom & model perfusion status
 body eyes           # Live macOS AXUIElement Foveal DOM snapshot + on-demand Apple Vision OCR
 body hands          # Deterministic UI actuation (ax_act) & <50ms tactile git/file delta sensor
+body ears           # 100% local code dictation (Hold Fn / Fn+Space) grounded in live symbols.db AST vocab
 body bbb            # Blood-Brain Barrier audit (--window 24h --tools --blocked --blob; alias: body immune)
 body telemetry show # Inspect exact zero-PII outbound payload or opt out (`body telemetry disable`)
 body daemon status  # Manage portable macOS LaunchAgents (install / status / logs)

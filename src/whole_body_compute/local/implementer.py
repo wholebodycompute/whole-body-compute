@@ -22,6 +22,38 @@ from whole_body_compute.local.scout import ReconScout, estimate_tokens
 logger = logging.getLogger("whole_body_compute.local.implementer")
 
 LOCAL_SERVER_URL = "http://127.0.0.1:9379/v1/chat/completions"
+MLX_8080_SERVER_URL = "http://127.0.0.1:8080/v1/chat/completions"
+
+PRIMARY_FAST_MLX_CODER = "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+HEAVY_FALLBACK_MLX_CODER = "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit"
+SPECULATIVE_DRAFT_MLX_CODER = "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit"
+
+
+def resolve_mlx_coder_cascade(total_ram_gb: float = 64.0) -> Dict[str, Any]:
+    """
+    Return the calibrated M5 Pro 2-stage MLX coder cascade for `body implement`:
+      1. Primary Fast Coder (64GB+): `Qwen3-Coder-30B-A3B-Instruct-4bit` (Sparse MoE,
+         ~1,800-2,234 tok/s prefill, ~53-58 tok/s decode, no draft overhead).
+      2. Heavy Escalation Fallback: `Qwen2.5-Coder-32B-Instruct-4bit` paired with
+         `Qwen2.5-Coder-1.5B-Instruct-4bit` speculative draft at k=4 (30.9 tok/s, 2.53x speedup).
+    """
+    if total_ram_gb >= 48.0:
+        return {
+            "primary_coder": PRIMARY_FAST_MLX_CODER,
+            "primary_use_speculative": False,
+            "heavy_fallback_coder": HEAVY_FALLBACK_MLX_CODER,
+            "heavy_fallback_draft_model": SPECULATIVE_DRAFT_MLX_CODER,
+            "heavy_fallback_num_draft_tokens": 4,
+        }
+    return {
+        "primary_coder": "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit",
+        "primary_use_speculative": True,
+        "primary_draft_model": SPECULATIVE_DRAFT_MLX_CODER,
+        "primary_num_draft_tokens": 5,
+        "heavy_fallback_coder": PRIMARY_FAST_MLX_CODER,
+        "heavy_fallback_draft_model": None,
+        "heavy_fallback_num_draft_tokens": 0,
+    }
 
 
 @dataclass
@@ -553,6 +585,28 @@ def resolve_best_local_coder_endpoint(
                 "latency_ms": round((time.perf_counter() - t0) * 1000.0, 2),
             }
 
+    # If caller explicitly requested an MLX :8080 model (30B-A3B / 32B / 14B) or auto when :8080 is online
+    if _is_tcp_port_open("127.0.0.1", 8080, timeout=timeout_sec) and req_clean not in (
+        "voicefi-coder-mlx",
+        "gemma4-2b",
+        "gemma4-26b",
+    ):
+        chosen_mlx = (
+            req_clean
+            if req_clean and req_clean != "auto" and ("mlx" in req_clean or "Qwen" in req_clean)
+            else PRIMARY_FAST_MLX_CODER
+        )
+        return {
+            "available": True,
+            "provider": "mlx_8080",
+            "endpoint": MLX_8080_SERVER_URL,
+            "model": chosen_mlx,
+            "fallback_model": HEAVY_FALLBACK_MLX_CODER,
+            "fallback_draft_model": SPECULATIVE_DRAFT_MLX_CODER,
+            "fallback_num_draft_tokens": 4,
+            "latency_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        }
+
     # Priority 1: :9380 (gemma4-26b)
     if _is_tcp_port_open("127.0.0.1", 9380, timeout=timeout_sec):
         return {
@@ -784,7 +838,36 @@ async def query_model(
         "temperature": temperature,
     }
 
-    # 1. Query dedicated warm local Metal GPU HTTP servers (9379 for voicefi-coder-mlx & 2b, 9380 for 26b)
+    # 1a. Query Native MLX :8080 server (Primary Fast: Qwen3-Coder-30B-A3B, Heavy Fallback: 32B + k=4 draft)
+    if model_name.startswith("mlx-community/") or "Qwen3-Coder-30B-A3B" in model_name:
+        mlx_payload = dict(payload)
+        try:
+            from whole_body_compute.local.bootstrap import get_mlx_speculative_config
+
+            spec_cfg = get_mlx_speculative_config(model_name)
+            if spec_cfg.get("use_speculative") and spec_cfg.get("draft_model"):
+                mlx_payload["draft_model"] = spec_cfg["draft_model"]
+                mlx_payload["num_draft_tokens"] = spec_cfg["num_draft_tokens"]
+        except Exception:
+            pass
+        try:
+            req = urllib.request.Request(
+                MLX_8080_SERVER_URL,
+                data=json.dumps(mlx_payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                choices = data.get("choices", [])
+                if choices and "message" in choices[0]:
+                    return choices[0]["message"].get("content", "")
+        except Exception as e:
+            logger.debug(
+                f"HTTP MLX :8080 server query failed for {model_name} ({e}), checking fallback."
+            )
+
+    # 1b. Query dedicated warm local Metal GPU HTTP servers (9379 for voicefi-coder-mlx & 2b, 9380 for 26b)
     if model_name in ("voicefi-coder-mlx", "gemma4-2b", "gemma4-26b"):
         server_url = (
             "http://127.0.0.1:9380/v1/chat/completions"
@@ -1088,6 +1171,24 @@ class ReconImplementer:
         """
         start_total = time.perf_counter()
         path = Path(os.path.expanduser(str(target_path))).resolve()
+        if ".git" in path.parts or path.suffix.lower() == ".pth":
+            return ImplementResult(
+                target_path=str(path),
+                instruction=instruction,
+                diff="",
+                applied=False,
+                scout_duration=0.0,
+                coder_duration=0.0,
+                total_duration=0.0,
+                tokens_saved=0,
+                savings_pct=0.0,
+                input_tokens_est=0,
+                diff_tokens_est=0,
+                model_scout=self.model_scout,
+                model_coder=self.model_coder,
+                scout_findings="",
+                error=f"Security Gate blocked modification of protected path: {path}",
+            )
 
         if not path.exists() or not path.is_file():
             return ImplementResult(
@@ -1242,6 +1343,40 @@ class ReconImplementer:
                 instruction=instruction,
             )
 
+        # Heavy MLX escalation: if Primary Fast Coder (Qwen3-Coder-30B-A3B) did not apply cleanly,
+        # escalate to Heavy Fallback (Qwen2.5-Coder-32B + 1.5B k=4 speculative draft) when :8080 is online
+        if (
+            not applied_any
+            and active_coder_model == PRIMARY_FAST_MLX_CODER
+            and _is_tcp_port_open("127.0.0.1", 8080)
+        ):
+            logger.info(
+                f"[ReconImplementer] Primary fast coder '{PRIMARY_FAST_MLX_CODER}' did not apply cleanly; "
+                f"escalating to heavy fallback '{HEAVY_FALLBACK_MLX_CODER}' (k=4 speculative draft)"
+            )
+            try:
+                heavy_out = await query_model(
+                    model_name=HEAVY_FALLBACK_MLX_CODER,
+                    prompt=coder_prompt,
+                    system_prompt=profile.get("system_prompt", self.DEFAULT_CODER_PROMPT),
+                    max_tokens=3000,
+                )
+                if heavy_out:
+                    cand_content, cand_applied = _apply_search_replace_or_fallbacks(
+                        original_content,
+                        heavy_out,
+                        target_line_hint=target_line_hint,
+                        instruction=instruction,
+                    )
+                    if cand_applied:
+                        updated_content = cand_content
+                        applied_any = True
+                        coder_output = heavy_out
+                        active_coder_model = HEAVY_FALLBACK_MLX_CODER
+                        coder_error = None
+            except Exception as h_err:
+                logger.debug(f"[ReconImplementer] Heavy MLX fallback failed: {h_err}")
+
         # Fallback to available local Ollama coder models if primary endpoint
         # (:9380 or :9379) failed to produce matching SEARCH/REPLACE blocks
         # or suffered connection/format failure
@@ -1305,6 +1440,7 @@ class ReconImplementer:
         if applied_any and path.suffix == ".py":
             try:
                 import ast
+                from whole_body_compute.integrations.goose_runner import run_three_stage_ast_secgate
 
                 cand_tree = ast.parse(updated_content)
                 try:
@@ -1320,6 +1456,18 @@ class ReconImplementer:
                         applied_any = False
                 except SyntaxError:
                     pass
+                if applied_any:
+                    secgate = run_three_stage_ast_secgate(
+                        parent_code=original_content,
+                        candidate_code=updated_content,
+                        file_path=str(path),
+                    )
+                    if not secgate.get("passed", False):
+                        syntax_error_msg = (
+                            f"3-Stage AST SecGate rejected edit: {secgate.get('reason', 'Failed security gate')}"
+                        )
+                        logger.warning(f"[ReconImplementer] {syntax_error_msg}")
+                        applied_any = False
             except SyntaxError as syn_err:
                 syntax_error_msg = (
                     f"AST SyntaxGuard rejected edit at line {syn_err.lineno}: {syn_err.msg}"

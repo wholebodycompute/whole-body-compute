@@ -4,7 +4,7 @@ Handles loading, validating, and saving YAML configuration files with defaults.
 """
 
 from pathlib import Path
-from typing import Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 import os
 import sys
 import subprocess
@@ -845,6 +845,15 @@ class VoiceFiConfig(BaseModel):
     subagents: dict[str, AgentVoiceProfile] = Field(default_factory=dict)
     projects: dict[str, AgentVoiceProfile] = Field(default_factory=dict)
 
+    @staticmethod
+    def _find_persona_safe(name_or_id: str) -> Any:
+        try:
+            from whole_body_compute.tts.catalog import find_persona
+
+            return find_persona(name_or_id)
+        except ImportError:
+            return None
+
     @field_validator("projects", "agents", "subagents", mode="before")
     @classmethod
     def _normalize_voice_profiles(cls, val):
@@ -853,9 +862,7 @@ class VoiceFiConfig(BaseModel):
         normalized = {}
         for k, v in val.items():
             if isinstance(v, str):
-                from whole_body_compute.tts.catalog import find_persona
-
-                p = find_persona(v)
+                p = cls._find_persona_safe(v)
                 if p:
                     normalized[k] = AgentVoiceProfile(
                         voice=p.id,
@@ -868,9 +875,7 @@ class VoiceFiConfig(BaseModel):
                 v_copy = dict(v)
                 v_str = v_copy.get("voice")
                 if v_str and isinstance(v_str, str):
-                    from whole_body_compute.tts.catalog import find_persona
-
-                    p = find_persona(v_str)
+                    p = cls._find_persona_safe(v_str)
                     if p:
                         v_copy["voice"] = p.id
                         if not v_copy.get("provider"):
@@ -903,9 +908,7 @@ class VoiceFiConfig(BaseModel):
 
         def _extract_profile(prof) -> tuple[str, str, int]:
             if isinstance(prof, str):
-                from whole_body_compute.tts.catalog import find_persona
-
-                p = find_persona(prof)
+                p = self._find_persona_safe(prof)
                 return (
                     p.provider if p else default_provider,
                     p.id if p else prof,
@@ -913,9 +916,7 @@ class VoiceFiConfig(BaseModel):
                 )
             elif isinstance(prof, dict):
                 v_str = prof.get("voice", default_voice)
-                from whole_body_compute.tts.catalog import find_persona
-
-                p = find_persona(str(v_str))
+                p = self._find_persona_safe(str(v_str))
                 raw_rate = prof.get("rate")
                 scaled_rate = (
                     int(round(raw_rate * speed_mult)) if raw_rate is not None else default_rate
@@ -986,9 +987,7 @@ class VoiceFiConfig(BaseModel):
                                 ws_data = yaml.safe_load(f) or {}
                             v_val = ws_data.get("voice") or ws_data.get("tts", {}).get("voice")
                             if v_val:
-                                from whole_body_compute.tts.catalog import find_persona
-
-                                p = find_persona(str(v_val))
+                                p = self._find_persona_safe(str(v_val))
                                 matched_project_profile = AgentVoiceProfile(
                                     voice=p.id if p else str(v_val),
                                     provider=p.provider
@@ -1111,9 +1110,19 @@ def save_config(config: VoiceFiConfig, target_path: Optional[Union[Path, str]] =
     else:
         env_cfg = os.getenv("WBC_CONFIG") or os.getenv("VOICEFI_CONFIG")
         dest = Path(env_cfg) if env_cfg else get_default_config_path()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with open(dest, "w", encoding="utf-8") as f:
-        yaml.safe_dump(config.model_dump(), f, default_flow_style=False, sort_keys=False)
+    dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp_path = dest.with_name(f".{dest.name}.tmp.{os.getpid()}")
+    fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yaml.safe_dump(config.model_dump(), f, default_flow_style=False, sort_keys=False)
+        os.replace(tmp_path, dest)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return dest
 
 

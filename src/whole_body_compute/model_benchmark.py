@@ -306,8 +306,24 @@ def select_recommended_daily_driver(models: List[Dict[str, Any]]) -> Optional[Di
     if not candidates:
         return None
 
+    # Prefer statistically representative models (>=5 threads, >=100 turns, healthy CSI <= 0.90)
+    # before falling back to small-sample or near-saturation cohorts.
+    representative = [
+        r
+        for r in candidates
+        if int(r.get("threads") or 0) >= 5
+        and int(r.get("planner_turns") or 0) >= 100
+        and (r.get("med_peak_csi") is None or float(r["med_peak_csi"]) <= 0.90)
+    ]
+    pool = representative or [
+        r
+        for r in candidates
+        if int(r.get("planner_turns") or 0) >= 50
+        and (r.get("med_peak_csi") is None or float(r["med_peak_csi"]) <= 0.90)
+    ] or candidates
+
     winner = min(
-        candidates,
+        pool,
         key=lambda r: (
             float(
                 r["fleet_task_llm_s"]
@@ -769,9 +785,9 @@ def format_model_comparison_terminal(report: Dict[str, Any]) -> str:
         )
         lines.append("╟" + "─" * inner + "╢")
         for s in sub_cohorts:
-            s_name = ("  " + str(s["model"]))[:48]
+            s_name = ("  " + str(s["model"]))[:52]
             sub_body = (
-                f" {s_name:<48} │ Child Threads: {s['threads']:>4} │ "
+                f" {s_name:<52} │ Child Threads: {s['threads']:>4} │ "
                 f"Turns: {s['planner_turns']:>6} │ Dispatch: {_fmt_sec(s.get('med_tool_dispatch_s')):>6} │ "
                 f"Turns/Task: {_fmt_num(s.get('med_turns_per_req'), 1):>5} │ "
                 f"Out: {s.get('total_out_m_tok', 0.0):>6.3f}M tok"

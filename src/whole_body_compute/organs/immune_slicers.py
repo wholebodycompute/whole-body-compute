@@ -28,8 +28,14 @@ PROTECTED_CONFIG_FILES = (
     ".agents/mcp_config.json",
     ".gemini/config/hooks.json",
     ".gemini/config/mcp_config.json",
+    ".gemini/settings.json",
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".cursor/hooks.json",
+    ".codex/hooks.json",
     "bin/body-immune-hook",
     "bin/body-immune-watchdog",
+    "bundled/body_immune_hook.sh",
     "eval_models.py",
     "evaluate.py",
     "eval_localbench.py",
@@ -194,7 +200,17 @@ def _fast_three_stage_ast_secgate(
 ) -> Dict[str, Any]:
     """Zero-import stdlib 3-Stage AST SecGate for sub-30ms `-S` hook execution."""
     fname = Path(file_path).name if file_path else ""
-    if fname and any(fname == pat or file_path.endswith(pat) for pat in PROTECTED_CONFIG_FILES):
+    norm_candidates = []
+    if file_path:
+        norm_candidates.append(file_path.replace("\\", "/"))
+        try:
+            norm_candidates.append(str(Path(file_path).expanduser().resolve()).replace("\\", "/"))
+        except OSError:
+            pass
+    if fname and any(
+        fname == pat or any(nc.endswith(pat) for nc in norm_candidates)
+        for pat in PROTECTED_CONFIG_FILES
+    ):
         return {
             "passed": False,
             "stage": 1,
@@ -223,6 +239,12 @@ def _fast_three_stage_ast_secgate(
             "passed": False,
             "stage": 1,
             "reason": f"Stage 1 (Syntax Error): {exc.msg} at line {exc.lineno}",
+        }
+    except (ValueError, RecursionError, MemoryError) as exc:
+        return {
+            "passed": False,
+            "stage": 1,
+            "reason": f"Stage 1 (AST Parse Guard): {type(exc).__name__}",
         }
 
     parent_summary = {"assert_count": 0, "tautological_asserts": 0, "test_funcs": set(), "unsafe_calls": []}
@@ -299,15 +321,21 @@ def _get_audit_log_path(audit_log_path: Optional[Path | str] = None) -> Path:
     return _get_wbc_data_dir() / "immune_audit.jsonl"
 
 
+_AUDIT_KNOWN_DIRS: set[str] = set()
+
+
 def _append_immune_audit_event(
     event: Dict[str, Any],
     audit_log_path: Optional[Path | str] = None,
 ) -> None:
     try:
-        log_path = _get_audit_log_path(audit_log_path)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(event) + "\n")
+        log_path_str = str(audit_log_path) if audit_log_path is not None else str(_get_audit_log_path(None))
+        parent_dir = os.path.dirname(log_path_str)
+        if parent_dir and parent_dir not in _AUDIT_KNOWN_DIRS:
+            os.makedirs(parent_dir, exist_ok=True)
+            _AUDIT_KNOWN_DIRS.add(parent_dir)
+        with open(log_path_str, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event, separators=(",", ":")) + "\n")
     except Exception:
         pass
 
@@ -1514,7 +1542,7 @@ _SHELL_OUTPUT_TOOL_NAMES = {
 }
 
 _GIT_PORCELAIN_LINE_RE = re.compile(
-    r"^(?:[ MADRCU?!]{1,2})\s+\S+"
+    r"^(?:[MADRCU?!][ MADRCU?!]| [MADRCU?!])\s+\S+"
 )
 _PYTEST_ITEM_RE = re.compile(
     r"^(?:\S+::\S+\s+(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\b|(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\s+\S+::\S+)"
@@ -1797,11 +1825,17 @@ def _build_git_diff_status_digest(lines: List[str], max_bytes: int = 8000) -> st
     return manifest_str
 
 
-def _build_test_suite_stdout_digest(lines: List[str], max_bytes: int = 8000) -> str:
+def _build_test_suite_stdout_digest(
+    lines: List[str],
+    max_bytes: int = 8000,
+    preserve_fuller_tail: bool = False,
+) -> str:
     """
     Deterministic `test_suite_stdout` digest across `pytest`, `cargo test`, `go test`, and `jest`:
     collapses passing progress noise into summary counters while preserving 100.0% of
     middle-of-log and section-grouped `FAILED` / `ERROR` / `AssertionError` blocks.
+    When `preserve_fuller_tail=True` (`stdout_compaction` graduated_escalate), retains fuller
+    warning/tail lines so the agent does not need a verbose retry turn.
     """
     passed_count = 0
     failed_count = 0
@@ -1812,6 +1846,7 @@ def _build_test_suite_stdout_digest(lines: List[str], max_bytes: int = 8000) -> 
     in_inline_failure = False
     in_noise_section = False
     warning_lines_collapsed = 0
+    retained_warning_tail: List[str] = []
     pending_run_header: Optional[Tuple[int, str]] = None
     recent_context_buf: List[Tuple[int, str]] = []
     failure_lines: List[str] = []
@@ -1844,11 +1879,15 @@ def _build_test_suite_stdout_digest(lines: List[str], max_bytes: int = 8000) -> 
             in_failure_section = False
             in_inline_failure = False
             in_noise_section = True
+            if preserve_fuller_tail and stripped:
+                retained_warning_tail.append(f"L{idx}: {ln}")
             continue
 
         if in_noise_section:
             if stripped:
                 warning_lines_collapsed += 1
+                if preserve_fuller_tail:
+                    retained_warning_tail.append(f"L{idx}: {ln}")
             continue
 
         if in_failure_section:
@@ -2034,6 +2073,22 @@ def _build_test_suite_stdout_digest(lines: List[str], max_bytes: int = 8000) -> 
     else:
         out_parts.append("[All Passing - 0 Failure / Error Blocks Detected]")
 
+    if preserve_fuller_tail:
+        if retained_warning_tail:
+            tail_budget_lines = retained_warning_tail[-120:]
+            out_parts.append(
+                f"[Retained Warnings & Diagnostics Tail ({len(tail_budget_lines)} lines, reflex graduated_escalate)]:"
+            )
+            out_parts.extend(tail_budget_lines)
+        elif lines:
+            tail_start = max(1, len(lines) - 119)
+            raw_tail = [f"L{i}: {lines[i - 1]}" for i in range(tail_start, len(lines) + 1) if lines[i - 1].strip()]
+            if raw_tail:
+                out_parts.append(
+                    f"[Retained Fuller Tail ({len(raw_tail)} lines, reflex graduated_escalate)]:"
+                )
+                out_parts.extend(raw_tail)
+
     if summary_lines:
         out_parts.append("[Summary]:")
         out_parts.extend(summary_lines[-6:])
@@ -2191,6 +2246,7 @@ def slice_post_tool_output_buffer(
     step_idx: int = 0,
     head_lines: int = 30,
     tail_lines: int = 15,
+    preserve_fuller_tail: bool = False,
 ) -> Dict[str, Any]:
     """
     PostToolOutput / Pre-Context-Ingestion Buffer Slicer (Blood-Brain Barrier).
@@ -2211,9 +2267,25 @@ def slice_post_tool_output_buffer(
             "airlock_receipt": "",
         }
 
-    if isinstance(raw_output, (dict, list)):
+    if isinstance(raw_output, dict) and str(tool_name or "").strip().lower() in _SHELL_OUTPUT_TOOL_NAMES:
+        # Unwrap shell response envelopes (`{"output": "..."}` / `{"stdout": "..."}`) so
+        # multi-line CLI stdout schemas (`pytest`, `git diff`, `rg`) are not escaped into a 3-line JSON string.
+        unwrapped_shell_str: Optional[str] = None
+        for k in ("output", "stdout", "result", "content", "stderr"):
+            v = raw_output.get(k)
+            if isinstance(v, str) and v.strip():
+                unwrapped_shell_str = (
+                    f"{unwrapped_shell_str}\n{v}" if unwrapped_shell_str else v
+                )
+        if unwrapped_shell_str is not None:
+            raw_text = unwrapped_shell_str
+            default_path = target_path
+        else:
+            raw_text = json.dumps(raw_output, indent=2)
+            default_path = target_path or "payload.json"
+    elif isinstance(raw_output, (dict, list)):
         raw_text = json.dumps(raw_output, indent=2)
-        default_path: Optional[str | Path] = target_path or "payload.json"
+        default_path = target_path or "payload.json"
     elif isinstance(raw_output, (bytes, bytearray)):
         raw_text = bytes(raw_output).decode("utf-8", errors="replace")
         default_path = target_path
@@ -2251,7 +2323,11 @@ def slice_post_tool_output_buffer(
             f"{outline}\n"
         )
     elif fmt_name == "test_suite_stdout":
-        outline = _build_test_suite_stdout_digest(lines, max_bytes=max_bytes)
+        outline = _build_test_suite_stdout_digest(
+            lines,
+            max_bytes=max_bytes,
+            preserve_fuller_tail=preserve_fuller_tail,
+        )
         compressed_str = (
             f"🛡️ Blood-Brain Barrier PostToolOutput Semantic CLI Digest ({fmt_name}):\n"
             f"Tool `{tool_name}` test log ({total_lines:,} lines, {byte_len / 1024:.1f} KB) "
@@ -2268,21 +2344,28 @@ def slice_post_tool_output_buffer(
         )
     else:
         outline = _build_fast_file_symbol_outline(virtual_path, raw_text, max_items=30)
-        max_preview_chars = max(300, min(2000, max_bytes // 4))
+        eff_tail_lines = max(tail_lines, 120) if preserve_fuller_tail else tail_lines
+        max_head_chars = max(300, min(2000, max_bytes // 4))
+        max_tail_chars = (
+            max(6000, min(16000, max_bytes * 2))
+            if preserve_fuller_tail
+            else max_head_chars
+        )
+        line_trunc_limit = 500 if preserve_fuller_tail else 200
         head_slice_lines = [
             (ln[:200] + "...[line truncated]") if len(ln) > 200 else ln
             for ln in lines[: max(1, head_lines)]
         ]
-        head_preview = "\n".join(head_slice_lines)[:max_preview_chars]
+        head_preview = "\n".join(head_slice_lines)[:max_head_chars]
         tail_preview = ""
         if total_lines > head_lines:
             tail_slice_lines = [
-                (ln[:200] + "...[line truncated]") if len(ln) > 200 else ln
-                for ln in lines[-max(1, tail_lines) :]
+                (ln[:line_trunc_limit] + "...[line truncated]") if len(ln) > line_trunc_limit else ln
+                for ln in lines[-max(1, eff_tail_lines) :]
             ]
-            tail_preview = "\n".join(tail_slice_lines)[:max_preview_chars]
+            tail_preview = "\n".join(tail_slice_lines)[:max_tail_chars]
         elif total_lines == 1 and len(raw_text) > 400:
-            tail_preview = "..." + raw_text[-min(200, max_preview_chars // 2) :]
+            tail_preview = "..." + raw_text[-min(200, max_tail_chars // 2) :]
 
         compressed_str = (
             f"🛡️ Blood-Brain Barrier PostToolOutput Pre-Ingestion Context Shield ({fmt_name}):\n"
@@ -2296,7 +2379,7 @@ def slice_post_tool_output_buffer(
         )
         if tail_preview:
             compressed_str += (
-                f"--- [TAIL SLICE (L{max(1, total_lines - tail_lines + 1)}-L{total_lines})] ---\n"
+                f"--- [TAIL SLICE (L{max(1, total_lines - eff_tail_lines + 1)}-L{total_lines})] ---\n"
                 f"{tail_preview}\n"
             )
 

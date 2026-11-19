@@ -22,6 +22,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from whole_body_compute.procedural_telemetry import get_wbc_data_dir
 
 SKILL_PATH_RE = re.compile(r"/skills/([a-zA-Z0-9_-]+)/SKILL\.md")
+MCP_SERVER_NAME_RE = re.compile(r'"ServerName"\s*:\s*"([a-zA-Z0-9_-]+)"')
+MCP_EAGER_TOOL_RE = re.compile(r'"(?:tool_)?name"\s*:\s*"mcp_+([a-zA-Z0-9_-]+?)__?[a-zA-Z0-9_-]+"')
+# 5-hour rolling quota multiplier per 25-turn session: 1.25x Turn-0 cache write + 2x 1.25x >5m idle re-writes + 22x 0.10x warm reads = 5.95x
+QUOTA_25_TURN_MULTIPLIER = 5.95
 
 # Core WBC & VoiceFi operational skills protected from automatic zero-use pruning unless explicitly named
 PROTECTED_CORE_SKILLS = frozenset(
@@ -56,6 +60,14 @@ def get_skills_archive_dir() -> Path:
     if env_p:
         return Path(env_p).expanduser()
     return Path.home() / ".gemini" / "config" / "skills_archive"
+
+
+def get_mcp_archive_dir() -> Path:
+    """Return path to the reversible Cold-Storage MCP Schema Archive shelf."""
+    env_p = os.environ.get("WBC_MCP_ARCHIVE_DIR")
+    if env_p:
+        return Path(env_p).expanduser()
+    return Path.home() / ".gemini" / "config" / "mcp_archive"
 
 
 def _parse_skill_frontmatter(skill_md_path: Path) -> Tuple[str, str, int]:
@@ -200,6 +212,24 @@ def record_skill_activation(
         entry["last_workspace"] = workspace
 
     save_skill_telemetry(ledger)
+    total_reads_for_skill = int(entry.get("total_reads", 1))
+    if total_reads_for_skill in (1, 5, 10, 25) or total_reads_for_skill % 50 == 0:
+        try:
+            from whole_body_compute.procedural_telemetry import track_wbc_event
+
+            track_wbc_event(
+                "wbc_skill_activated",
+                {
+                    "skill_name": re.sub(r"[^a-zA-Z0-9_\-]", "", skill_name)[:48],
+                    "is_protected_core": skill_name in PROTECTED_CORE_SKILLS,
+                    "total_reads_for_skill": total_reads_for_skill,
+                    "conversations_count_for_skill": len(convs),
+                    "tracked_skills_total": len(skills_map),
+                },
+                detached_hook=True,
+            )
+        except Exception:
+            pass
     return skill_name
 
 
@@ -216,6 +246,7 @@ def backfill_from_transcripts(
     ledger = load_skill_telemetry()
     scanned_map: Dict[str, float] = ledger.setdefault("scanned_transcripts", {})
     skills_map: Dict[str, Any] = ledger.setdefault("skills", {})
+    mcp_map: Dict[str, Any] = ledger.setdefault("mcp_servers", {})
 
     if not target_brain.is_dir():
         return ledger
@@ -242,33 +273,54 @@ def backfill_from_transcripts(
         try:
             with t_path.open("r", encoding="utf-8", errors="ignore") as fh:
                 for line in fh:
-                    if "SKILL.md" not in line or (
-                        "read_file" not in line and "view_file" not in line
-                    ):
-                        continue
-                    for match in SKILL_PATH_RE.finditer(line):
-                        s_name = match.group(1)
-                        entry = skills_map.setdefault(
-                            s_name,
-                            {
-                                "total_reads": 0,
-                                "conversations": [],
-                                "first_used_ts": mtime,
-                                "last_used_ts": mtime,
-                                "last_path": match.group(0),
-                            },
-                        )
-                        convs = list(entry.get("conversations", []))
-                        entry["total_reads"] = int(entry.get("total_reads", 0)) + 1
-                        if conv_id not in convs:
-                            convs.append(conv_id)
-                            entry["conversations"] = convs
-                        entry["first_used_ts"] = min(
-                            float(entry.get("first_used_ts", mtime)), mtime
-                        )
-                        entry["last_used_ts"] = max(
-                            float(entry.get("last_used_ts", 0.0)), mtime
-                        )
+                    if "SKILL.md" in line and ("read_file" in line or "view_file" in line):
+                        for match in SKILL_PATH_RE.finditer(line):
+                            s_name = match.group(1)
+                            entry = skills_map.setdefault(
+                                s_name,
+                                {
+                                    "total_reads": 0,
+                                    "conversations": [],
+                                    "first_used_ts": mtime,
+                                    "last_used_ts": mtime,
+                                    "last_path": match.group(0),
+                                },
+                            )
+                            convs = list(entry.get("conversations", []))
+                            entry["total_reads"] = int(entry.get("total_reads", 0)) + 1
+                            if conv_id not in convs:
+                                convs.append(conv_id)
+                                entry["conversations"] = convs
+                            entry["first_used_ts"] = min(
+                                float(entry.get("first_used_ts", mtime)), mtime
+                            )
+                            entry["last_used_ts"] = max(
+                                float(entry.get("last_used_ts", 0.0)), mtime
+                            )
+                    if "ServerName" in line or "mcp_" in line:
+                        matched_srvs = [m.group(1) for m in MCP_SERVER_NAME_RE.finditer(line)]
+                        matched_srvs.extend(m.group(1) for m in MCP_EAGER_TOOL_RE.finditer(line))
+                        for srv in matched_srvs:
+                            m_entry = mcp_map.setdefault(
+                                srv,
+                                {
+                                    "total_calls": 0,
+                                    "conversations": [],
+                                    "first_used_ts": mtime,
+                                    "last_used_ts": mtime,
+                                },
+                            )
+                            m_convs = list(m_entry.get("conversations", []))
+                            m_entry["total_calls"] = int(m_entry.get("total_calls", 0)) + 1
+                            if conv_id not in m_convs:
+                                m_convs.append(conv_id)
+                                m_entry["conversations"] = m_convs
+                            m_entry["first_used_ts"] = min(
+                                float(m_entry.get("first_used_ts", mtime)), mtime
+                            )
+                            m_entry["last_used_ts"] = max(
+                                float(m_entry.get("last_used_ts", 0.0)), mtime
+                            )
         except Exception:
             continue
 
@@ -523,6 +575,13 @@ def audit_skills(
         int(a.get("prompt_tokens_saved_per_turn", 0)) for a in archived
     )
 
+    mcp_audit = audit_mcp_servers(
+        workspace_root=workspace_root,
+        home_dir=gemini_config_dir.parent.parent if gemini_config_dir else None,
+        brain_dir=brain_dir,
+        ledger=ledger,
+    )
+
     return {
         "timestamp": now,
         "total_conversations_scanned": len(ledger.get("scanned_transcripts", {})),
@@ -538,6 +597,367 @@ def audit_skills(
         "archived_tokens_saved_per_turn": archived_tokens_saved,
         "skills": enriched,
         "archived_skills": archived,
+        "mcp_audit": mcp_audit,
+    }
+
+
+def _canonical_mcp_id(raw_name: str) -> str:
+    norm = re.sub(r"[^a-z0-9]+", "", str(raw_name or "").lower())
+    for suffix in ("mcpserver", "server", "mcp"):
+        if norm.endswith(suffix) and len(norm) > len(suffix):
+            norm = norm[: -len(suffix)]
+            break
+    return norm
+
+
+def list_archived_mcp_servers(archive_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """List all MCP servers currently stored in the reversible Cold-Storage MCP Archive."""
+    arch_root = archive_dir or get_mcp_archive_dir()
+    if not arch_root.is_dir():
+        return []
+
+    archived: List[Dict[str, Any]] = []
+    for m_dir in sorted(arch_root.iterdir()):
+        if not m_dir.is_dir():
+            continue
+        meta_path = m_dir / "archive_meta.json"
+        if not meta_path.is_file():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            continue
+        tok = int(meta.get("tokens", 1800))
+        archived.append(
+            {
+                "name": meta.get("name", m_dir.name),
+                "archive_path": str(m_dir),
+                "source": meta.get("source", "unknown"),
+                "tokens": tok,
+                "quota_burn_25_turns": int(round(tok * QUOTA_25_TURN_MULTIPLIER)),
+                "archived_at": float(meta.get("archived_at", 0.0)),
+                "disabled_in_configs": meta.get("disabled_in_configs", []),
+                "original_schema_dir": meta.get("original_schema_dir", ""),
+            }
+        )
+    return archived
+
+
+def audit_mcp_servers(
+    workspace_root: Optional[Path] = None,
+    home_dir: Optional[Path] = None,
+    brain_dir: Optional[Path] = None,
+    ledger: Optional[Dict[str, Any]] = None,
+    archive_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """
+    Audit active MCP servers against empirical transcript tool-call usage and quantify
+    their Turn-0 schema tax + 5-hour rolling quota burn (5.95x over a 25-turn session).
+    """
+    from whole_body_compute.finops_audit import audit_turn0_static_overhead
+
+    ws_root = (workspace_root or Path.cwd()).resolve()
+    h_dir = (home_dir or Path.home()).resolve()
+    active_ledger = ledger or backfill_from_transcripts(brain_dir=brain_dir)
+    mcp_usage_map = active_ledger.get("mcp_servers", {})
+    t0 = audit_turn0_static_overhead(workspace_dir=ws_root, home_dir=h_dir)
+
+    canon_usage: Dict[str, Dict[str, Any]] = {}
+    for k, u in mcp_usage_map.items():
+        if not isinstance(u, dict):
+            continue
+        ck = _canonical_mcp_id(k)
+        prev = canon_usage.get(ck)
+        if prev is None:
+            canon_usage[ck] = {
+                "total_calls": int(u.get("total_calls", 0)),
+                "conversations": list(u.get("conversations", [])),
+                "last_used_ts": float(u.get("last_used_ts", 0.0)),
+            }
+        else:
+            prev["total_calls"] += int(u.get("total_calls", 0))
+            for cid in u.get("conversations", []):
+                if cid not in prev["conversations"]:
+                    prev["conversations"].append(cid)
+            prev["last_used_ts"] = max(prev["last_used_ts"], float(u.get("last_used_ts", 0.0)))
+
+    servers_enriched: List[Dict[str, Any]] = []
+    reclaimable_turn0_tokens = 0
+    reclaimable_quota_25t = 0
+    dormant_mcp_count = 0
+
+    for srv in t0.get("mcp_servers", []):
+        s_name = srv["name"]
+        tok = int(srv.get("tokens", 0))
+        quota_25t = int(round(tok * QUOTA_25_TURN_MULTIPLIER))
+        u = mcp_usage_map.get(s_name) or canon_usage.get(_canonical_mcp_id(s_name)) or {}
+        convs = u.get("conversations", [])
+        conv_count = len(convs)
+        total_calls = int(u.get("total_calls", 0))
+        last_ts = float(u.get("last_used_ts", 0.0))
+        last_date = (
+            datetime.datetime.fromtimestamp(last_ts).strftime("%Y-%m-%d")
+            if last_ts > 0
+            else "never"
+        )
+        if conv_count >= 2:
+            tier = "ACTIVE"
+        elif conv_count == 1:
+            tier = "OCCASIONAL"
+        else:
+            tier = "DORMANT"
+            dormant_mcp_count += 1
+            reclaimable_turn0_tokens += tok
+            reclaimable_quota_25t += quota_25t
+
+        servers_enriched.append(
+            {
+                **srv,
+                "conversations_count": conv_count,
+                "total_calls": total_calls,
+                "last_used_ts": last_ts,
+                "last_used_date": last_date,
+                "tier": tier,
+                "quota_burn_25_turns": quota_25t,
+                "prune_candidate": tier == "DORMANT",
+            }
+        )
+
+    archived_mcp = list_archived_mcp_servers(archive_dir=archive_dir)
+    archived_turn0_saved = sum(int(a.get("tokens", 0)) for a in archived_mcp)
+    archived_quota_saved = sum(int(a.get("quota_burn_25_turns", 0)) for a in archived_mcp)
+    total_turn0_mcp = int(t0.get("mcp_turn0_tokens", 0))
+    total_quota_25t = int(round(total_turn0_mcp * QUOTA_25_TURN_MULTIPLIER))
+
+    return {
+        "mcp_servers_count": len(servers_enriched),
+        "dormant_mcp_count": dormant_mcp_count,
+        "mcp_turn0_tokens": total_turn0_mcp,
+        "mcp_quota_burn_25_turns": total_quota_25t,
+        "reclaimable_turn0_tokens": reclaimable_turn0_tokens,
+        "reclaimable_quota_burn_25_turns": reclaimable_quota_25t,
+        "archived_mcp_count": len(archived_mcp),
+        "archived_turn0_tokens_saved": archived_turn0_saved,
+        "archived_quota_burn_saved_25_turns": archived_quota_saved,
+        "servers": servers_enriched,
+        "archived_servers": archived_mcp,
+    }
+
+
+def prune_mcp_servers(
+    server_names: Optional[List[str]] = None,
+    max_conversations: int = 0,
+    dry_run: bool = False,
+    workspace_root: Optional[Path] = None,
+    home_dir: Optional[Path] = None,
+    archive_dir: Optional[Path] = None,
+    brain_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """
+    Shelve dormant (`<= max_conversations` empirical calls) or explicitly named MCP servers.
+    """
+    ws_root = (workspace_root or Path.cwd()).resolve()
+    h_dir = (home_dir or Path.home()).resolve()
+    arch_root = archive_dir or get_mcp_archive_dir()
+    mcp_report = audit_mcp_servers(
+        workspace_root=ws_root,
+        home_dir=h_dir,
+        brain_dir=brain_dir,
+        archive_dir=arch_root,
+    )
+    explicit_set = set(server_names or [])
+
+    cfg_candidates = [
+        ws_root / ".mcp.json",
+        ws_root / ".cursor" / "mcp.json",
+        ws_root / ".vscode" / "mcp.json",
+        ws_root / ".gemini" / "mcp_config.json",
+        ws_root / ".agents" / "mcp_config.json",
+        h_dir / ".claude.json",
+        h_dir / ".claude" / "mcp.json",
+        h_dir / ".claude" / "claude_desktop_config.json",
+        h_dir / ".cursor" / "mcp.json",
+        h_dir / ".gemini" / "antigravity" / "mcp_config.json",
+        h_dir / ".gemini" / "settings.json",
+        h_dir / ".codeium" / "windsurf" / "mcp_config.json",
+    ]
+    schema_roots = [
+        h_dir / ".gemini" / "antigravity" / "mcp",
+        ws_root / ".mcp-schemas",
+    ]
+
+    shelved: List[Dict[str, Any]] = []
+    turn0_saved = 0
+    quota_25t_saved = 0
+
+    for srv in mcp_report["servers"]:
+        s_name = srv["name"]
+        if explicit_set:
+            if s_name not in explicit_set:
+                continue
+        else:
+            if srv["conversations_count"] > max_conversations:
+                continue
+
+        disabled_configs: List[str] = []
+        target_canon = _canonical_mcp_id(s_name)
+
+        for cfg_p in cfg_candidates:
+            if not cfg_p.is_file():
+                continue
+            try:
+                raw_data = json.loads(cfg_p.read_text(encoding="utf-8", errors="ignore"))
+                if not isinstance(raw_data, dict):
+                    continue
+                modified = False
+                for key_field in ("mcpServers", "servers"):
+                    srvs_obj = raw_data.get(key_field)
+                    if isinstance(srvs_obj, dict):
+                        for raw_k, srv_cfg in list(srvs_obj.items()):
+                            if (
+                                raw_k == s_name
+                                or _canonical_mcp_id(raw_k) == target_canon
+                            ) and isinstance(srv_cfg, dict):
+                                if srv_cfg.get("disabled") is not True:
+                                    srv_cfg["disabled"] = True
+                                    modified = True
+                                    disabled_configs.append(f"{cfg_p}::{key_field}::{raw_k}")
+                if modified and not dry_run:
+                    cfg_p.write_text(json.dumps(raw_data, indent=2) + "\n", encoding="utf-8")
+            except Exception:
+                continue
+
+        orig_schema_dir = ""
+        dest_dir = arch_root / s_name
+        for s_root in schema_roots:
+            if not s_root.is_dir():
+                continue
+            for cand_dir in sorted(s_root.iterdir()):
+                if not cand_dir.is_dir():
+                    continue
+                if cand_dir.name == s_name or _canonical_mcp_id(cand_dir.name) == target_canon:
+                    if not orig_schema_dir:
+                        orig_schema_dir = str(cand_dir)
+                    if not dry_run:
+                        arch_root.mkdir(parents=True, exist_ok=True)
+                        if dest_dir.exists():
+                            shutil.rmtree(dest_dir)
+                        shutil.move(str(cand_dir), str(dest_dir))
+
+        meta = {
+            "name": s_name,
+            "source": srv.get("source", "unknown"),
+            "tokens": int(srv.get("tokens", 0)),
+            "quota_burn_25_turns": int(srv.get("quota_burn_25_turns", 0)),
+            "conversations_count": int(srv.get("conversations_count", 0)),
+            "total_calls": int(srv.get("total_calls", 0)),
+            "disabled_in_configs": disabled_configs,
+            "original_schema_dir": orig_schema_dir,
+            "archived_at": time.time(),
+        }
+        if not dry_run:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            (dest_dir / "archive_meta.json").write_text(
+                json.dumps(meta, indent=2), encoding="utf-8"
+            )
+
+        shelved.append(meta)
+        turn0_saved += meta["tokens"]
+        quota_25t_saved += meta["quota_burn_25_turns"]
+
+    if shelved and not dry_run:
+        try:
+            from whole_body_compute.procedural_telemetry import track_wbc_event
+
+            track_wbc_event(
+                "wbc_mcp_pruned",
+                {
+                    "shelved_count": len(shelved),
+                    "turn0_tokens_saved_per_session": turn0_saved,
+                    "quota_burn_saved_per_25_turn_session": quota_25t_saved,
+                    "max_conversations_threshold": max_conversations,
+                },
+            )
+        except Exception:
+            pass
+
+    return {
+        "dry_run": dry_run,
+        "archive_dir": str(arch_root),
+        "shelved_count": len(shelved),
+        "turn0_tokens_saved_per_session": turn0_saved,
+        "quota_burn_saved_per_25_turn_session": quota_25t_saved,
+        "shelved": shelved,
+    }
+
+
+def restore_mcp_server(
+    server_name: str,
+    archive_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """
+    Restore an archived MCP server from `~/.gemini/config/mcp_archive/<server_name>`.
+    """
+    arch_root = archive_dir or get_mcp_archive_dir()
+    if server_name == "all":
+        restored_list = []
+        for entry in list_archived_mcp_servers(archive_dir=arch_root):
+            res = restore_mcp_server(entry["name"], archive_dir=arch_root)
+            if res.get("restored"):
+                restored_list.append(res)
+        return {
+            "restored": len(restored_list) > 0,
+            "restored_count": len(restored_list),
+            "items": restored_list,
+        }
+
+    src_dir = arch_root / server_name
+    meta_path = src_dir / "archive_meta.json"
+    if not src_dir.is_dir() or not meta_path.is_file():
+        return {
+            "restored": False,
+            "server_name": server_name,
+            "error": f"MCP server '{server_name}' not found in archive ({arch_root})",
+        }
+
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception as exc:
+        return {"restored": False, "server_name": server_name, "error": str(exc)}
+
+    for spec in meta.get("disabled_in_configs", []):
+        parts = str(spec).split("::", 2)
+        if len(parts) != 3:
+            continue
+        cfg_p = Path(parts[0])
+        key_field, raw_k = parts[1], parts[2]
+        if not cfg_p.is_file():
+            continue
+        try:
+            raw_data = json.loads(cfg_p.read_text(encoding="utf-8", errors="ignore"))
+            srvs_obj = raw_data.get(key_field)
+            if isinstance(srvs_obj, dict) and isinstance(srvs_obj.get(raw_k), dict):
+                srvs_obj[raw_k].pop("disabled", None)
+                cfg_p.write_text(json.dumps(raw_data, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            continue
+
+    orig_schema_str = str(meta.get("original_schema_dir") or "")
+    meta_path.unlink(missing_ok=True)
+    if orig_schema_str:
+        dest_dir = Path(orig_schema_str)
+        dest_dir.parent.mkdir(parents=True, exist_ok=True)
+        if dest_dir.exists():
+            shutil.rmtree(dest_dir)
+        shutil.move(str(src_dir), str(dest_dir))
+    else:
+        shutil.rmtree(src_dir, ignore_errors=True)
+
+    return {
+        "restored": True,
+        "server_name": server_name,
+        "restored_schema_dir": orig_schema_str,
+        "reenabled_configs": meta.get("disabled_in_configs", []),
     }
 
 
@@ -617,6 +1037,22 @@ def prune_skills(
 
         shelved.append(meta)
         tokens_saved_per_turn += int(item["prompt_tokens_per_turn"])
+
+    if shelved and not dry_run:
+        try:
+            from whole_body_compute.procedural_telemetry import track_wbc_event
+
+            track_wbc_event(
+                "wbc_skills_pruned",
+                {
+                    "shelved_count": len(shelved),
+                    "tokens_saved_per_turn": tokens_saved_per_turn,
+                    "estimated_100_turn_token_savings": tokens_saved_per_turn * 100,
+                    "max_conversations_threshold": max_conversations,
+                },
+            )
+        except Exception:
+            pass
 
     return {
         "dry_run": dry_run,
@@ -742,12 +1178,51 @@ def format_skills_audit_table(report: Dict[str, Any], show_all: bool = False) ->
 
     if report.get("archived_skills"):
         lines.append("-" * 94)
-        lines.append("  📦 Cold-Storage Shelf (`~/.gemini/config/skills_archive/` — restore via `body skills restore <name>`):")
+        lines.append("  📦 Cold-Storage Shelf (`~/.gemini/config/skills_archive/` - restore via `body skills restore <name>`):")
         arch_names = [
             f"{a['name']} (~{a['prompt_tokens_saved_per_turn']} tok/turn)"
             for a in report["archived_skills"]
         ]
         lines.append("     " + ", ".join(arch_names))
+
+    mcp_audit = report.get("mcp_audit") or {}
+    mcp_srvs = mcp_audit.get("servers") or []
+    mcp_arch = mcp_audit.get("archived_servers") or []
+    lines.append("-" * 94)
+    lines.append(
+        f"  🔌 MCP Server Schema & 5-Hour Quota Audit: {mcp_audit.get('mcp_servers_count', 0)} active "
+        f"({mcp_audit.get('mcp_turn0_tokens', 0):,} Turn-0 tok | "
+        f"~{mcp_audit.get('mcp_quota_burn_25_turns', 0):,} 5h-quota tok/25-turn session)"
+    )
+    if mcp_srvs:
+        if mcp_audit.get("reclaimable_turn0_tokens", 0) > 0:
+            lines.append(
+                f"     ⚠️  Reclaimable 0-Use MCP Tax: {mcp_audit['reclaimable_turn0_tokens']:,} Turn-0 tok "
+                f"(~{mcp_audit['reclaimable_quota_burn_25_turns']:,} 5h-quota tok/session) -> run `body skills prune-mcp`"
+            )
+        for ms in mcp_srvs:
+            m_badge = {
+                "ACTIVE": "🟢 ACTIVE",
+                "OCCASIONAL": "🟡 1-HIT",
+                "DORMANT": "⚪ 0-USE",
+            }.get(ms["tier"], ms["tier"])
+            lines.append(
+                f"     • {ms['name'][:24]:<24} {m_badge:<10} "
+                f"calls={ms['total_calls']:<4} turn0={ms['tokens']:>6,} tok  "
+                f"25t_quota=~{ms['quota_burn_25_turns']:>7,} tok  ({ms['source']})"
+            )
+    else:
+        lines.append(
+            "     🟢 0-MCP LEAN MODE: 0 MCP schema tokens/session (~3.4x longer 5-hour quota runway preserved)"
+        )
+    if mcp_arch:
+        arch_mcp_names = [
+            f"{a['name']} ({a['tokens']:,} tok / ~{a['quota_burn_25_turns']:,} 25t-quota)"
+            for a in mcp_arch
+        ]
+        lines.append(
+            "     📦 Shelved MCP Servers (`body skills restore-mcp <name>`): " + ", ".join(arch_mcp_names)
+        )
 
     lines.append("=" * 94 + "\n")
     return "\n".join(lines)

@@ -886,8 +886,10 @@ def _load_recipe_dict(recipe_or_id: dict[str, Any] | Path | str | Any) -> dict[s
     search_dirs = [
         Path.cwd() / "recipes",
         Path.cwd() / "recipes" / "candidates",
+        Path.cwd() / "workflows",
         get_wbc_data_dir() / "recipes",
         get_wbc_data_dir() / "recipes" / "candidates",
+        get_wbc_data_dir() / "workflows",
         DEFAULT_RECIPES_DIR,
         DEFAULT_RECIPES_DIR / "candidates",
     ]
@@ -1061,7 +1063,15 @@ class ProceduralDNAHarvester:
     def _iter_recipe_files(self) -> list[Path]:
         files: list[Path] = []
         seen_stems: set[str] = set()
-        for directory in (self.recipes_dir, self.recipes_dir / "candidates"):
+        search_dirs = [
+            self.recipes_dir,
+            self.recipes_dir / "candidates",
+            self.recipes_dir.parent / "workflows",
+            get_wbc_data_dir() / "workflows",
+            get_wbc_data_dir() / "recipes",
+            get_wbc_data_dir() / "recipes" / "candidates",
+        ]
+        for directory in search_dirs:
             if directory.is_dir():
                 for ypath in sorted(directory.glob("*.yaml")):
                     if ypath.stem not in seen_stems:
@@ -1475,6 +1485,58 @@ class ProceduralDNAHarvester:
         except Exception:
             pass
 
+        # Hippocampus memory & skill learning summary (zero-PII category counts only)
+        learning_summary: dict[str, Any] = {
+            "total_memories": 0,
+            "by_category": {},
+            "state_capsules_saved": 0,
+            "tracked_skills_count": 0,
+            "total_skill_reads": 0,
+        }
+        try:
+            dot_db = get_wbc_data_dir() / "dot_memory.db"
+            env_dot = os.environ.get("WBC_DOT_MEMORY_PATH") or os.environ.get("VOICEFI_DOT_MEMORY_DB")
+            if env_dot:
+                dot_db = Path(env_dot).expanduser()
+            if dot_db.is_file():
+                with sqlite3.connect(f"file:{dot_db}?mode=ro", uri=True, timeout=1.0) as conn:
+                    tables = {
+                        r[0]
+                        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                    }
+                    if "memories" in tables:
+                        cat_rows = conn.execute(
+                            "SELECT category, COUNT(*) FROM memories WHERE COALESCE(archived, 0) = 0 GROUP BY category"
+                        ).fetchall()
+                        by_cat_mem: dict[str, int] = {}
+                        tot_mem = 0
+                        for cat_name, cnt in cat_rows:
+                            safe_cat = re.sub(r"[^a-zA-Z0-9_\-]", "", str(cat_name or "general"))[:32] or "general"
+                            c_val = int(cnt or 0)
+                            by_cat_mem[safe_cat] = by_cat_mem.get(safe_cat, 0) + c_val
+                            tot_mem += c_val
+                        learning_summary["total_memories"] = tot_mem
+                        learning_summary["by_category"] = by_cat_mem
+                    if "state_capsules" in tables:
+                        cap_row = conn.execute(
+                            "SELECT COUNT(*) FROM state_capsules WHERE COALESCE(is_test, 0) = 0"
+                        ).fetchone()
+                        learning_summary["state_capsules_saved"] = int(cap_row[0] or 0) if cap_row else 0
+        except Exception:
+            pass
+
+        try:
+            from whole_body_compute.skills_telemetry import load_skill_telemetry
+
+            sk_ledger = load_skill_telemetry()
+            sk_map = sk_ledger.get("skills", {}) if isinstance(sk_ledger, dict) else {}
+            learning_summary["tracked_skills_count"] = len(sk_map)
+            learning_summary["total_skill_reads"] = sum(
+                int(v.get("total_reads", 0)) for v in sk_map.values() if isinstance(v, dict)
+            )
+        except Exception:
+            pass
+
         sig_seed = (
             f"hybrid_compute_efficiency_card|{sys_env.get('os')}|{sys_env.get('arch')}|"
             f"{sys_env.get('chip_family')}|{sys_env.get('ram_gb_bucket')}|{sys_env.get('active_agent_harness')}"
@@ -1499,6 +1561,7 @@ class ProceduralDNAHarvester:
                 "shield_pareto": shield_metrics,
                 "hybrid_division_of_labor": hybrid_division,
                 "workflow_habit_summary": wf_habits,
+                "learning_summary": learning_summary,
                 "reliability_score": float(hybrid_division.get("local_success_rate", 1.0)),
                 "zero_pii_guarantees": [
                     "no_code",
@@ -1572,6 +1635,12 @@ class ProceduralDNAHarvester:
                 merged["reliability_score"] = rolling_rel
                 merged["first_seen_at"] = prev.get("first_seen_at", now_ts)
                 merged["last_seen_at"] = now_ts
+                # Re-sync updated efficiency/learning rollup cards on milestones (1, 5, 10, 25, ...)
+                if (
+                    card.get("card_type") == "hybrid_compute_efficiency_card"
+                    and (new_count in (1, 5, 10, 25) or new_count % 50 == 0)
+                ):
+                    merged.pop("synced_at", None)
                 by_sig[sig] = merged
                 updated += 1
             else:
@@ -2182,10 +2251,13 @@ def track_wbc_event(
     clean_props["$is_server"] = True
     clean_props["$geoip_disable"] = True
     clean_props["$ip"] = None
+    _cwd_str = str(Path.cwd()).replace("\\", "/")
     if (
         clean_props.get("is_internal_dev") is True
         or os.environ.get("WBC_INTERNAL_DEV") == "1"
         or Path.cwd().name == "Whole Body Compute"
+        or "/wbc_wbc_arm/" in _cwd_str
+        or "/wbc_vanilla_arm/" in _cwd_str
     ):
         clean_props["is_internal_dev"] = True
         clean_props["$internal_or_test_user"] = True
@@ -2309,7 +2381,8 @@ def fetch_posthog_cloud_funnel_summary(
         "AND coalesce(toString(properties.is_internal), 'false') != 'true' "
         "AND coalesce(toString(properties.utm_source), '') != 'wbc_canary' "
         "AND coalesce(toString(properties.acquisition_source), '') != 'wbc_canary' "
-        "AND coalesce(toString(properties.is_bot), 'false') != 'true'"
+        "AND coalesce(toString(properties.is_bot), 'false') != 'true' "
+        "AND NOT (coalesce(toString(properties.chip_family), '') = 'Apple M5 Pro' AND toIntOrZero(toString(properties.cpu_cores)) = 18)"
     )
     sql = f"""
         SELECT
@@ -2321,7 +2394,7 @@ def fetch_posthog_cloud_funnel_summary(
             count(DISTINCT if(event = 'wbc_quota_event' AND ({ext_pred}) AND (toString(properties.limit_reached) = 'true' OR toString(properties.allowed) = 'false'), distinct_id, NULL)) AS ext_cohorts_hitting_limits,
             countIf(event = 'wbc_quota_event' AND ({ext_pred})) AS ext_quota_events,
             countIf(event IN ('wbc_edge_pricing_click', 'wbc_pricing_viewed') AND ({ext_pred})) AS ext_pricing_intents,
-            countIf(event = 'wbc_checkout_clicked' AND ({ext_pred})) AS ext_checkout_clicks,
+            countIf(event = 'wbc_checkout_clicked' AND ({ext_pred}) AND NOT (toString(properties.surface) = 'edge_redirect' AND coalesce(toString(properties.cohort_id), '') = '' AND coalesce(toString(properties.$referrer), '') = '')) AS ext_checkout_clicks,
             countIf(event = 'wbc_license_activated' AND ({ext_pred})) AS ext_licenses_activated,
             countIf(event = 'wbc_license_activation_failed' AND ({ext_pred})) AS ext_license_failures,
             countIf(event = 'wbc_web_install_copied' AND ({ext_pred})) AS ext_web_install_copies,
@@ -2329,7 +2402,11 @@ def fetch_posthog_cloud_funnel_summary(
             countIf(event = 'wbc_quota_bypass_detected' AND ({ext_pred})) AS ext_quota_bypasses,
             count(DISTINCT if(event = 'wbc_audit_completed' AND ({ext_pred}), distinct_id, NULL)) AS ext_audits_completed,
             count(DISTINCT if(event = 'wbc_audit_completed' AND ({ext_pred}) AND toFloatOrZero(toString(properties.conversations_scanned)) > 0, distinct_id, NULL)) AS ext_qualified_audits,
-            count(DISTINCT if(event = 'wbc_audit_completed' AND ({ext_pred}) AND toFloatOrZero(toString(properties.conversations_scanned)) = 0, distinct_id, NULL)) AS ext_empty_audits
+            count(DISTINCT if(event = 'wbc_audit_completed' AND ({ext_pred}) AND toFloatOrZero(toString(properties.conversations_scanned)) = 0, distinct_id, NULL)) AS ext_empty_audits,
+            countIf(event = 'wbc_procedural_dna_card' AND ({ext_pred})) AS ext_procedural_dna_cards,
+            count(DISTINCT if(event = 'wbc_procedural_dna_card' AND ({ext_pred}), distinct_id, NULL)) AS ext_dna_cohorts,
+            countIf(event IN ('wbc_memory_fact_learned', 'wbc_habits_consolidated', 'wbc_pal_training_completed', 'wbc_workflow_executed', 'wbc_candidate_promoted', 'wbc_rem_sleep_completed', 'wbc_skill_activated', 'wbc_skills_pruned', 'wbc_mcp_pruned', 'wbc_state_capsule_saved') AND ({ext_pred})) AS ext_learning_events,
+            count(DISTINCT if(event IN ('wbc_memory_fact_learned', 'wbc_habits_consolidated', 'wbc_pal_training_completed', 'wbc_workflow_executed', 'wbc_candidate_promoted', 'wbc_rem_sleep_completed', 'wbc_skill_activated', 'wbc_skills_pruned', 'wbc_mcp_pruned', 'wbc_state_capsule_saved') AND ({ext_pred}), distinct_id, NULL)) AS ext_learning_cohorts
         FROM events
     """
     url = f"https://us.posthog.com/api/projects/{project_id}/query/"
@@ -2349,7 +2426,7 @@ def fetch_posthog_cloud_funnel_summary(
             payload = json.loads(resp.read().decode("utf-8"))
         rows = payload.get("results") or []
         row = list(rows[0]) if rows else []
-        while len(row) < 17:
+        while len(row) < 21:
             row.append(0)
         return {
             "status": "ok",
@@ -2371,6 +2448,10 @@ def fetch_posthog_cloud_funnel_summary(
             "ext_audits_completed": int(row[14] or 0),
             "ext_qualified_audits": int(row[15] or 0),
             "ext_empty_audits": int(row[16] or 0),
+            "ext_procedural_dna_cards": int(row[17] or 0),
+            "ext_dna_cohorts": int(row[18] or 0),
+            "ext_learning_events": int(row[19] or 0),
+            "ext_learning_cohorts": int(row[20] or 0),
         }
     except Exception as exc:
         return {"status": "error", "reason": str(exc)}
@@ -2402,9 +2483,15 @@ def get_comprehensive_usage_stats_report(
             "total_interceptions": int(s_all.get("total_events", 0)),
             "direct_tokens_saved": int(s_all.get("direct_tokens_saved", 0)),
             "cumulative_tokens_saved": int(s_all.get("cumulative_tokens_saved", 0)),
-            "estimated_usd_saved": float(s_all.get("estimated_usd_saved", 0.0)),
-            "wall_time_saved_sec": float(s_all.get("wall_time_saved_sec", 0.0)),
-            "secrets_scrubbed": int(s_all.get("secrets_scrubbed", 0)),
+            "estimated_usd_saved": float(
+                s_all.get("estimated_usd_saved") or s_all.get("api_dollars_saved_est", 0.0)
+            ),
+            "wall_time_saved_sec": float(
+                s_all.get("wall_time_saved_sec") or s_all.get("time_saved_sec", 0.0)
+            ),
+            "secrets_scrubbed": int(
+                s_all.get("secrets_scrubbed") or s_all.get("secrets_blocked", 0)
+            ),
         }
     except Exception:
         pass
@@ -2443,7 +2530,7 @@ def get_comprehensive_usage_stats_report(
     except Exception:
         pass
 
-    # Skills telemetry summary
+    # Skills & Hippocampus memory telemetry summary
     skills_info: dict[str, Any] = {}
     try:
         from whole_body_compute.skills_telemetry import load_skill_telemetry
@@ -2455,6 +2542,43 @@ def get_comprehensive_usage_stats_report(
             "total_skill_reads": sum(int(v.get("total_reads", 0)) for v in sk_map.values() if isinstance(v, dict)),
             "scanned_transcripts_count": len(sk_ledger.get("scanned_transcripts", {})),
         }
+    except Exception:
+        pass
+
+    memory_learning_info: dict[str, Any] = {
+        "total_memories": 0,
+        "by_category": {},
+        "state_capsules_saved": 0,
+    }
+    try:
+        dot_db = get_wbc_data_dir() / "dot_memory.db"
+        env_dot = os.environ.get("WBC_DOT_MEMORY_PATH") or os.environ.get("VOICEFI_DOT_MEMORY_DB")
+        if env_dot:
+            dot_db = Path(env_dot).expanduser()
+        if dot_db.is_file():
+            with sqlite3.connect(f"file:{dot_db}?mode=ro", uri=True, timeout=1.0) as conn:
+                tables = {
+                    r[0]
+                    for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                }
+                if "memories" in tables:
+                    cat_rows = conn.execute(
+                        "SELECT category, COUNT(*) FROM memories WHERE COALESCE(archived, 0) = 0 GROUP BY category"
+                    ).fetchall()
+                    by_cat_m: dict[str, int] = {}
+                    tot_m = 0
+                    for cat_name, cnt in cat_rows:
+                        safe_cat = re.sub(r"[^a-zA-Z0-9_\-]", "", str(cat_name or "general"))[:32] or "general"
+                        c_val = int(cnt or 0)
+                        by_cat_m[safe_cat] = by_cat_m.get(safe_cat, 0) + c_val
+                        tot_m += c_val
+                    memory_learning_info["total_memories"] = tot_m
+                    memory_learning_info["by_category"] = by_cat_m
+                if "state_capsules" in tables:
+                    cap_row = conn.execute(
+                        "SELECT COUNT(*) FROM state_capsules WHERE COALESCE(is_test, 0) = 0"
+                    ).fetchone()
+                    memory_learning_info["state_capsules_saved"] = int(cap_row[0] or 0) if cap_row else 0
     except Exception:
         pass
 
@@ -2479,6 +2603,7 @@ def get_comprehensive_usage_stats_report(
             "procedural_dna_by_type": tel_status.get("outbox_cards_by_type", {}),
         },
         "skills_telemetry": skills_info,
+        "memory_learning": memory_learning_info,
     }
     if include_cloud:
         out_report["posthog_cloud"] = fetch_posthog_cloud_funnel_summary()
@@ -2495,10 +2620,12 @@ def format_usage_stats_table(report: dict[str, Any]) -> str:
     wf = report.get("workflow_automations", {})
     amb = report.get("ambient_and_dreaming", {})
     sk = report.get("skills_telemetry", {})
+    mem = report.get("memory_learning", {})
 
     audit_runs = (
         int(evts.get("wbc_audit_completed", {}).get("count", 0))
         + int(cmds.get("audit-spend", {}).get("count", 0))
+        + int(cmds.get("audit", {}).get("count", 0))
     )
     begin_runs = (
         int(evts.get("wbc_body_begin", {}).get("count", 0))
@@ -2507,6 +2634,9 @@ def format_usage_stats_table(report: dict[str, Any]) -> str:
     edit_applies = int(evts.get("wbc_pal_edit_applied", {}).get("count", 0))
     edit_sessions = int(evts.get("wbc_pal_edit_session", {}).get("count", 0))
     rem_runs = int(evts.get("wbc_rem_sleep_completed", {}).get("count", 0))
+    mem_learned_evts = int(evts.get("wbc_memory_fact_learned", {}).get("count", 0))
+    hab_consol_evts = int(evts.get("wbc_habits_consolidated", {}).get("count", 0))
+    pal_train_evts = int(evts.get("wbc_pal_training_completed", {}).get("count", 0))
 
     lines = [
         "📊 Whole Body Compute - Unified Usage, Funnel & Automation Telemetry (`body telemetry stats`)",
@@ -2535,9 +2665,11 @@ def format_usage_stats_table(report: dict[str, Any]) -> str:
             f"      • Skill Activations (`SKILL.md` reads): {sk.get('total_skill_reads', 0):,} reads across "
             f"{sk.get('tracked_skills_count', 0)} skills ({sk.get('scanned_transcripts_count', 0)} transcripts audited)",
             "",
-            "  [3] Workflow Automations, Live Edit Mode & Nocturnal REM Dreaming:",
-            f"      • PalWorkflow Executions:    {wf.get('total_runs', 0):,} run(s) across {wf.get('workflows_count', 0)} recipes "
-            f"({wf.get('total_tokens_saved', 0):,} cloud tokens saved)",
+            "  [3] Workflow Automations, Hippocampus Learning & Nocturnal REM Dreaming:",
+            f"      • Hippocampus Memory Graph:  {mem.get('total_memories', 0):,} active fact(s) | "
+            f"{mem.get('state_capsules_saved', 0):,} state capsule(s) ({mem_learned_evts:,} learned events, {hab_consol_evts:,} habit passes)",
+            f"      • PalWorkflow & Teach Mode:  {wf.get('total_runs', 0):,} run(s) across {wf.get('workflows_count', 0)} recipes "
+            f"({wf.get('total_tokens_saved', 0):,} cloud tokens saved | {pal_train_evts:,} taught)",
             f"      • Pal Live Edit Mode:        {edit_sessions:,} session(s) | {edit_applies:,} voice edit(s) applied on-device",
             f"      • Ambient Workflow Mining:   {amb.get('ambient_transitions_logged', 0):,} transitions observed -> "
             f"{amb.get('staged_candidates_count', 0)} staged candidates / {amb.get('active_recipes_count', 0)} active recipes",
@@ -2560,6 +2692,8 @@ def format_usage_stats_table(report: dict[str, Any]) -> str:
                     f"{cloud.get('ext_audits_completed', 0):,} total ({cloud.get('ext_empty_audits', 0):,} empty)",
                     f"      • Active Product Cohorts:     {cloud.get('ext_product_cohorts', 0):,} external cohort(s) | "
                     f"Limit Hits: {cloud.get('ext_cohorts_hitting_limits', 0):,} cohort(s) ({cloud.get('ext_quota_events', 0):,} quota, {cloud.get('ext_quota_bypasses', 0):,} bypass)",
+                    f"      • External Learning & DNA:    {cloud.get('ext_procedural_dna_cards', 0):,} Procedural DNA card(s) ({cloud.get('ext_dna_cohorts', 0):,} cohorts) • "
+                    f"{cloud.get('ext_learning_events', 0):,} learning event(s) ({cloud.get('ext_learning_cohorts', 0):,} cohorts)",
                     f"      • Upgrade Conversion Funnel:  {cloud.get('ext_pricing_intents', 0):,} pricing views -> "
                     f"{cloud.get('ext_checkout_clicks', 0):,} checkout clicks -> {cloud.get('ext_licenses_activated', 0):,} activated "
                     f"({cloud.get('ext_license_failures', 0):,} failed)",

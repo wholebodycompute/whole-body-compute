@@ -43,7 +43,15 @@ SINGLE_ORGAN_DISPATCH = {
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="body",
-        description="Whole Body Compute — 5-Organ Sovereign Agent Runtime",
+        description="Whole Body Compute - 5-Organ Sovereign Agent Runtime",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Power-user & plumbing commands (all active, run `body <cmd> --help`):\n"
+            "  Local Metal & Git : implement, loop, commit, checkpoint, rem-sleep, radix-cache, perfusion\n"
+            "  Telemetry & Hub   : stats, telemetry, logs, team-sync, search, pull, publish, airlock\n"
+            "  Diagnostics/Hooks : exercise, chaos, arena, immune-hook, import-screenpipe\n"
+            "  Legacy Organ Alias: skeleton, brainstem, prefrontal, nervous, voice, hippocampus, immune, circadian, sleep"
+        ),
     )
     parser.add_argument("--version", action="version", version=f"body (whole-body-compute) {__version__}")
     parser.add_argument("--json", action="store_true", help="Output structured JSON")
@@ -54,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_beg = subparsers.add_parser(
         "begin",
         aliases=["init", "awaken", "start"],
-        help="60-second workspace awakening: wire Whole Body Compute Blood-Brain Barrier, Bicameral rules & FinOps ROI receipt",
+        help="[Setup] 60s workspace awakening: wire Blood-Brain Barrier hooks & FinOps ROI receipt",
     )
     p_beg.add_argument("target", nargs="?", default=None, help="Target workspace directory (default: current directory)")
     p_beg.add_argument("--workspace", "-w", dest="workspace_opt", default=None, help="Target workspace directory (alias for target)")
@@ -79,33 +87,30 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc = subparsers.add_parser(
         "doctor",
         aliases=["status", "organs"],
-        help="Run concurrent 5-Organ anatomical health audit",
+        help="[Setup] Concurrent 5-Organ anatomical health audit (--exercise, --chaos)",
     )
     p_doc.add_argument("--json", action="store_true", help="Output structured JSON")
     p_doc.add_argument("--exercise", action="store_true", help="Also run closed-loop 5-step reflex exercise")
     p_doc.add_argument("--chaos", "--gauntlet", dest="chaos", action="store_true", help="Also run adversarial ChaosOrganFuzzer stress suite")
 
-    # body exercise (aliases: reflex)
+    # body exercise (aliases: reflex) - hidden (use `body doctor --exercise`)
     p_ex = subparsers.add_parser(
         "exercise",
         aliases=["reflex"],
-        help="Run closed-loop 5-step physiological reflex pass across all core organs",
     )
     p_ex.add_argument("--json", action="store_true", help="Output structured JSON")
 
-    # body chaos (aliases: gauntlet)
+    # body chaos (aliases: gauntlet) - hidden (use `body doctor --chaos`)
     p_chaos = subparsers.add_parser(
         "chaos",
         aliases=["gauntlet"],
-        help="Run 11-scenario adversarial ChaosOrganFuzzer stress suite",
     )
     p_chaos.add_argument("--json", action="store_true", help="Output structured JSON")
 
-    # body rem-sleep (aliases: remsleep, consolidate, nightly)
+    # body rem-sleep (aliases: remsleep, consolidate, nightly) - hidden power-user command
     p_rem = subparsers.add_parser(
         "rem-sleep",
         aliases=["remsleep", "consolidate", "nightly"],
-        help="Run nocturnal REM sleep consolidation pass (memory hygiene, distillation, LoRA trigger, 30/30 gate)",
     )
     p_rem.add_argument("--dry-run", action="store_true", help="Run without triggering long GPU training runs")
     p_rem.add_argument("--force-lora", action="store_true", help="Force full Metal GPU LoRA distillation even if 0 new pairs were harvested")
@@ -116,7 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cand = subparsers.add_parser(
         "candidates",
         aliases=["candidate", "recipes"],
-        help="Inspect, discover, or promote staged ambient workflow candidates in recipes/candidates/",
+        help="[Workflow] Inspect, discover, or promote staged ambient workflow candidates",
     )
     p_cand.add_argument("--discover", action="store_true", help="Run on-demand motif discovery across ambient transitions journal & Screenpipe OCR")
     p_cand.add_argument("--promote", metavar="CANDIDATE_ID", help="Validate and promote a candidate YAML into active recipes/")
@@ -124,10 +129,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_cand.add_argument("--share", action="store_true", help="Also harvest & export sanitized Procedural DNA learning card to telemetry outbox")
     p_cand.add_argument("--json", action="store_true", help="Output structured JSON")
 
-    # body pull <org/recipe> [--version VER] [--hub-url URL] [--install-dir DIR] [--trust-key KEY=PUB] [--force] [--dry-run] [--offline] [--json]
+    # body pull <org/recipe> (covered by `body hub pull`)
     p_pull = subparsers.add_parser(
         "pull",
-        help="Download, verify (SHA-256 + Ed25519 + Hoare contracts), and install a signed PalWorkflow recipe from the Procedural DNA Hub",
     )
     p_pull.add_argument("recipe_ref", help="Recipe reference (<org>/<recipe> or <recipe>, e.g. wbc/github-pr-triage)")
     p_pull.add_argument("--version", dest="version_pin", default=None, help="Pin exact semver version to pull")
@@ -140,10 +144,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_pull.add_argument("--offline", action="store_true", help="Resolve strictly against bundled offline signed Hub seed catalog")
     p_pull.add_argument("--json", action="store_true", help="Output structured JSON")
 
-    # body search [query...] [--tag TAG] [--app APP] [--tier TIER] [--hub-url URL] [--offline] [--json]
+    # body search [query...] (covered by `body hub search`)
     p_search = subparsers.add_parser(
         "search",
-        help="Search signed $0.00 PalWorkflow recipes in the Procedural DNA Hub (wholebodycompute.com/hub)",
     )
     p_search.add_argument("query", nargs="*", default=[], help="Search keywords (e.g. github, linear, stripe, slack)")
     p_search.add_argument("--tag", default=None, help="Filter by recipe tag (e.g. git, finops, devops, browser)")
@@ -153,10 +156,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--offline", action="store_true", help="Search bundled offline signed Hub seed catalog")
     p_search.add_argument("--json", action="store_true", help="Output structured JSON")
 
-    # body publish <recipe.yaml> [--namespace ORG] [--out-dir DIR] [--sanitize] [--upload] [--registry-url URL] [--dry-run] [--json]
+    # body publish <recipe.yaml> (covered by `body hub publish`)
     p_pub = subparsers.add_parser(
         "publish",
-        help="Validate PalWorkflow v1 schema + Zero-PII guarantees, sign with Ed25519 + SHA-256, and package/publish to the Hub",
     )
     p_pub.add_argument("recipe_path", help="Path to PalWorkflow YAML/JSON file to validate and sign")
     p_pub.add_argument("--namespace", "-n", default=None, help="Publisher namespace/org slug (default: recipe namespace or 'community')")
@@ -172,7 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     # body hub <list|search|pull|publish|verify|installed|keygen|trust> [targets...]
     p_hub = subparsers.add_parser(
         "hub",
-        help="Unified Procedural DNA Hub & Signed Recipe Registry manager (list, search, pull, publish, verify, installed, keygen, trust)",
+        help="[Workflow] Signed $0.00 PalWorkflow Recipe Hub (list, search, pull, publish, verify)",
     )
     p_hub.add_argument(
         "hub_action",
@@ -206,7 +208,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_dna = subparsers.add_parser(
         "telemetry",
         aliases=["dna", "learnings"],
-        help="Federated Procedural DNA & Ethical Telemetry Engine (status, show, stats, harvest, inspect, generalize, compact, enable, disable)",
     )
     p_dna.add_argument(
         "action",
@@ -273,7 +274,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_stats = subparsers.add_parser(
         "stats",
         aliases=["usage", "analytics"],
-        help="Unified Usage & Funnel Telemetry Report (Audits, body begin, CLI commands, Workflow Automations, Edit Mode & REM Dreaming)",
     )
     p_stats.add_argument("--json", action="store_true", help="Output structured JSON")
     p_stats.add_argument(
@@ -282,11 +282,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include live PostHog Cloud Project #730830 external funnel, limit-hit, and conversion stats",
     )
 
+    # body people (aliases: contacts, relationships)
+    p_people = subparsers.add_parser(
+        "people",
+        aliases=["contacts", "relationships"],
+        help="[Organ 04] Sovereign Relationship Memory (5-Gate warm builder & circle search)",
+    )
+    p_people.add_argument("query", nargs="*", help="Optional topic or name query (e.g. 'local models', 'mcp')")
+    p_people.add_argument(
+        "--circle",
+        default="tech_builder",
+        help="Relationship circle filter (tech_builder, personal_sacred, sparring_partner, all, or custom circle)",
+    )
+    p_people.add_argument("--limit", type=int, default=10, help="Max contacts to return (Community: top 5, Pro: unlimited)")
+    p_people.add_argument("--copy", type=int, default=None, help="Copy rank #N's 2-line DM opener to clipboard")
+    p_people.add_argument("--cta", default=None, help="Custom CTA line (or '' for no link) for DM opener")
+    p_people.add_argument("--import", dest="import_path", default=None, help="Import archive (.jsonl, .csv, or .zip) and save path to people_config.json")
+    p_people.add_argument("--sent", default=None, help="Mark a person as contacted today (30-day cooldown)")
+    p_people.add_argument("--allow", default=None, help="Explicitly allow/un-quarantine a person")
+    p_people.add_argument("--quarantine", default=None, help="Explicitly quarantine a person from suggestions")
+    p_people.add_argument("--note", default="", help="Optional note when marking sent or updating a contact")
+    p_people.add_argument("--include-contacted", action="store_true", help="Include people already DM'd recently")
+    p_people.add_argument("--sync", action="store_true", help="Re-sync relationship graph from configured archive")
+    p_people.add_argument("--capture", action="store_true", help="[Pro] Capture live browser reply from Organ 03 Foveal DOM")
+    p_people.add_argument("--json", action="store_true", help="Output structured JSON")
+
     # body radix-cache (aliases: radix, prewarm, kv-cache)
     p_rad = subparsers.add_parser(
         "radix-cache",
         aliases=["radix", "prewarm", "kv-cache"],
-        help="Pre-warm and pin circulatory Radix KV-Cache (.goosehints, system guard, tool schemas) on Metal GPU",
     )
     p_rad.add_argument("--url", default="http://127.0.0.1:9379/v1/chat/completions", help="Target Metal GPU URL")
     p_rad.add_argument("--status", action="store_true", help="Display cached prefix metadata and warm TTFB status")
@@ -295,7 +319,7 @@ def build_parser() -> argparse.ArgumentParser:
     # body daemon [status|logs|install|uninstall] [--dry-run] [--json]
     p_daemon = subparsers.add_parser(
         "daemon",
-        help="Inspect or manage Whole Body Compute background LaunchAgents (Foveal Socket, Foveal HTTP, REM Sleep & HUD)",
+        help="[Setup] Manage background LaunchAgents (Foveal Socket, REM Sleep & HUD)",
     )
     p_daemon.add_argument(
         "action",
@@ -311,7 +335,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_mtg = subparsers.add_parser(
         "meeting",
         aliases=["meetings", "calls"],
-        help="Inspect or control automatic call & microphone meeting text capture (~/.whole_body_compute/meetings & dot_memory.db)",
+        help="[Workflow] Sovereign call & mic meeting text capture (~/.whole_body_compute/meetings)",
     )
     p_mtg.add_argument(
         "action",
@@ -330,11 +354,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_mtg.add_argument("--target", dest="target_flag", default=None, help="Target meeting filename or query for `show`")
     p_mtg.add_argument("--json", action="store_true", help="Output structured JSON")
 
+    # body ears (aliases: transcribe, dictate) - Community Free AST-grounded local dictation
+    p_ears = subparsers.add_parser(
+        "ears",
+        aliases=["transcribe", "dictate"],
+        help="[Organ 03] Community Free 100%% local dictation & transcription grounded in symbols.db AST vocab",
+    )
+    p_ears.add_argument("audio_path", nargs="?", default=None, help="Optional audio file path (.wav/.m4a) for offline transcription")
+    p_ears.add_argument("--status", action="store_true", help="Show active local STT backend, hotkey, macOS Fn check, and indexed AST symbol count")
+    p_ears.add_argument("--hotkey", default="fn", help="Push-to-talk hotkey (default: fn; override e.g. opt+space)")
+    p_ears.add_argument("--backend", default="auto", choices=["auto", "ane", "mlx", "faster_whisper"], help="Local STT backend (default: auto)")
+    p_ears.add_argument("--workspace", "-w", default=None, help="Target repo directory for symbols.db AST vocab hydration (default: cwd)")
+    p_ears.add_argument("--active-file", default=None, help="Explicit active file path to prioritize in P0 AST vocab")
+    p_ears.add_argument("--paste", action="store_true", help="Paste AST-grounded transcript into the focused macOS app without stealing focus")
+    p_ears.add_argument("--upgrade-model", action="store_true", help="Opt-in 1-command install of mlx-whisper (Apple Silicon) or faster-whisper")
+    p_ears.add_argument("--daemon", action="store_true", help="Run silently in background as a LaunchAgent (used by com.wholebodycompute.ears)")
+    p_ears.add_argument("--install", action="store_true", help="Install & start com.wholebodycompute.ears background LaunchAgent (no terminal needed)")
+    p_ears.add_argument("--uninstall", action="store_true", help="Stop & remove com.wholebodycompute.ears background LaunchAgent")
+    p_ears.add_argument("--silence", type=float, default=1.4, help="Silence timeout in seconds for one-shot mic capture (default: 1.4)")
+    p_ears.add_argument("--max-seconds", type=float, default=30.0, help="Maximum utterance duration in seconds (default: 30)")
+    p_ears.add_argument("--json", action="store_true", help="Output structured JSON receipt including AST snap proofs")
+
     # body hud (aliases: dashboard) # [direct-edit]
     p_tel = subparsers.add_parser(
         "hud",
         aliases=["dashboard"],
-        help="Launch living health app telemetry dashboard & WebSocket server",
+        help="[Setup] Launch living health telemetry dashboard & WebSocket server (:9381)",
     )
     p_tel.add_argument("--port", type=int, default=9381, help="Server port (default: 9381)")
     p_tel.add_argument("--host", default="127.0.0.1", help="Server host (default: 127.0.0.1)")
@@ -347,7 +392,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_hist = subparsers.add_parser(
         "logs",
         aliases=["history"],
-        help="Inspect persistent Apple Silicon Readiness, Thermal, and Strain state history (~/.whole_body_compute/telemetry_history.jsonl)",
     )
     p_hist.add_argument("--limit", "-n", type=int, default=25, help="Number of entries to show (default: 25)")
     p_hist.add_argument("--transitions", "-t", action="store_true", help="Only show state transition events")
@@ -357,7 +401,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_perf = subparsers.add_parser(
         "perfusion",
         aliases=["glymphatic", "ram-hygiene"],
-        help="Selective Vascular Perfusion & Ultradian Glymphatic RAM Hygiene (evict idle Tier-1/2 models or trigger Cephalic Pre-Warm)",
     )
     p_perf.add_argument("--evict", action="store_true", help="Evict idle Tier-1/Tier-2 model servers into Darwin Inactive File Cache")
     p_perf.add_argument("--recycle-tachycardic", "--recycle", action="store_true", help="Recycle Tier-0 autonomic processes exhibiting tachycardia (>120%% CPU)")
@@ -370,7 +413,6 @@ def build_parser() -> argparse.ArgumentParser:
     # body immune-hook --phase [pre|post]
     p_ihook = subparsers.add_parser(
         "immune-hook",
-        help="Execute Whole Body Compute PreToolUse / PostToolUse IDE hook handler (reads JSON on stdin, emits JSON on stdout)",
     )
     p_ihook.add_argument("--phase", choices=["pre", "post"], default="pre", help="Hook lifecycle phase")
 
@@ -378,7 +420,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ctx = subparsers.add_parser(
         "context",
         aliases=["csi", "watchdog"],
-        help="Drill-down Context Bloat Debugger & Watchdog (top bloat tools, auto-flush trigger)",
+        help="[Metrics] Thread saturation (CSI), bloat debugger & model leaderboard (--by-model)",
     )
     p_ctx.add_argument("--conv-id", metavar="CONV_ID", help="Target conversation ID or prefix")
     p_ctx.add_argument("--all", action="store_true", help="Inspect all recent conversations")
@@ -396,7 +438,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_fl = subparsers.add_parser(
         "flush",
         aliases=["handoff"],
-        help="Ultradian Glymphatic Flush & State Capsule Handoff (grounded serialization to SQLite WAL + Zero-Click bridge)",
+        help="[Metrics] Glymphatic state capsule handoff & zero-click thread reset",
     )
     p_fl.add_argument("--conv-id", metavar="CONV_ID", help="Target conversation ID or prefix")
     p_fl.add_argument("--goal", help="Active goal override")
@@ -416,7 +458,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep = subparsers.add_parser(
         "scorecard",
         aliases=["report", "metrics", "kpi"],
-        help="Primary Consolidated KPI Scorecard (Turn Inflation, CSI, BBB Shield, Local %%, & Gate Attempt-#1 FTR)",
+        help="[Metrics] Primary 5-pillar KPI scorecard (Turn Inflation, CSI, BBB Shield, Local %%, FTR)",
     )
     p_rep.add_argument("--window", default=None, help="Primary reporting window (1h, 24h, 7d, 30d, all; default: 24h, or 30d with --by-model)")
     p_rep.add_argument("--trend", default="7d", help="Trend comparison window (default: 7d)")
@@ -429,11 +471,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep.add_argument("--receipt", action="store_true", help="Print compact End-of-Session Handoff Receipt format")
     p_rep.add_argument("--json", action="store_true", help="Output structured JSON")
 
-    # body audit-spend (aliases: roi, finops) - 30-day Historical FinOps Invoice
+    # body audit-spend (aliases: audit, roi, finops) - 30-day Historical FinOps Invoice & Model-Opportunity Insights
     p_fin = subparsers.add_parser(
         "audit-spend",
-        aliases=["roi", "finops"],
-        help="30-Day Historical Token Waste & USD Savings Calculator (Monthly FinOps ROI Invoice)",
+        aliases=["audit", "roi", "finops"],
+        help="[Metrics] 30-day historical token waste, model-opportunity insights & FinOps ROI invoice",
     )
     p_fin.add_argument("--days", type=int, default=30, help="Historical window in days to scan (default: 30)")
     p_fin.add_argument("--price-per-m", type=float, default=5.0, dest="price_per_m", help="Frontier input USD per 1M tokens (default: 5.0)")
@@ -446,7 +488,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync = subparsers.add_parser(
         "team-sync",
         aliases=["hive-sync", "share-exemplars"],
-        help="Synchronize verified cloud exemplars & LGTM lessons with git-committable .agents/team_exemplars.jsonl",
     )
     p_sync.add_argument("--path", default=".agents/team_exemplars.jsonl", help="Path to shared team exemplars JSONL ledger")
     p_sync.add_argument("--json", action="store_true", help="Output structured JSON")
@@ -455,7 +496,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_lic = subparsers.add_parser(
         "license",
         aliases=["tier", "pricing", "upgrade", "plan", "activate"],
-        help="Inspect or switch Whole Body Compute PLG license tier (community, pro, team, enterprise) and ROI payback",
+        help="[Account] Inspect or activate Whole Body Compute Pro / Team / Enterprise license tier",
     )
     p_lic.add_argument(
         "license_key_pos",
@@ -567,7 +608,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_brief = subparsers.add_parser(
         "brief",
         aliases=["duet", "morning"],
-        help="Sovereign Duet on Local Metal: <30s 4-pillar morning/channel briefing (Eyes + Hippocampus + Git + FinOps)",
+        help="[Workflow] <30s Local Metal morning/channel briefing (Eyes + Hippocampus + Git + FinOps)",
     )
     p_brief.add_argument(
         "--channel",
@@ -615,7 +656,6 @@ def build_parser() -> argparse.ArgumentParser:
     # body airlock <skeleton|zoom|bundle|classify|benchmark|learn|mastery> [target] [-q query] [--symbol sym]
     p_airlock = subparsers.add_parser(
         "airlock",
-        help="Sovereign Airlock & 3-Mode Biological BBB Permeability Valve (skeleton, zoom, bundle, classify, benchmark, learn, mastery)",
     )
     p_airlock.add_argument(
         "action",
@@ -634,7 +674,7 @@ def build_parser() -> argparse.ArgumentParser:
     # body shield [--status] [--install] [--bot <bot>] [--all] [--scope workspace|user] [--dry-run] [--json] # [direct-edit]
     p_shield = subparsers.add_parser(
         "shield",
-        help="Zero-Schema-Bloat Whole Body Compute Hook Installer & Status Auditor (Antigravity, Claude Code, Cursor, Codex)",
+        help="[Setup] Zero-schema BBB hook installer & status auditor (Antigravity, Claude Code, Cursor, Codex)",
     )
     p_shield.add_argument("--status", action="store_true", help="Audit zero-token hook installation status across bots (default)")
     p_shield.add_argument("--install", action="store_true", help="Idempotently wire PreToolUse and PostToolUse hooks into bot configs")
@@ -643,12 +683,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_shield.add_argument("--scope", choices=["workspace", "user"], default="workspace", help="Target config scope (default: workspace)")
     p_shield.add_argument("--workspace", default=None, help="Target workspace directory (default: current directory)")
     p_shield.add_argument("--dry-run", action="store_true", help="Preview hook installation without modifying files")
+    p_shield.add_argument("--reset-gate", default=None, metavar="GATE_ID", help="Reset a TRIPPED SpinalReflexGate back to SHADOW")
+    p_shield.add_argument("--repo-key", default="__global__", metavar="REPO", help="Target repo_key for --reset-gate (default: __global__)")
+    p_shield.add_argument("--prune-reflex", action="store_true", help="Prune stale pytest/temp repo_key rows from reflex_gates.sqlite")
+    p_shield.add_argument("--bootstrap-reflex", action="store_true", help="Warm-bootstrap SpinalReflexGates from local audit/transcript history")
+    p_shield.add_argument("--fresh-reflex", action="store_true", help="Clear existing reflex samples/models before --bootstrap-reflex")
     p_shield.add_argument("--json", action="store_true", help="Output structured JSON")
 
     # body savings [--json] [--bot <bot>] [--today] [--window <w>] [--leaderboard] [--reset] # [direct-edit]
     p_savings = subparsers.add_parser(
         "savings",
-        help="Live Local Metal Shield Telemetry Ledger & Token/USD/Time Receipt",
+        help="[Metrics] Live Local Metal Shield ledger & token/USD/time receipt",
     )
     p_savings.add_argument("--bot", default=None, help="Filter ledger by bot name (e.g. antigravity, claude-code, cursor, codex)")
     p_savings.add_argument("--price-per-m", type=float, default=None, dest="price_per_m", help="Override frontier input USD per 1M tokens (default: auto-detected active model rate)")
@@ -663,7 +708,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_lb = subparsers.add_parser(
         "leaderboard",
         aliases=["rank"],
-        help="Ranked Savings Leaderboard across Organs, Files/Apps, Bots & Sessions (Tokens, USD & Time Saved)",
+        help="[Metrics] Ranked savings leaderboard across organs, files, bots & sessions",
     )
     p_lb.add_argument("--bot", default=None, help="Filter ledger by bot name (e.g. antigravity, claude-code, cursor, codex)")
     p_lb.add_argument("--price-per-m", type=float, default=None, dest="price_per_m", help="Override frontier input USD per 1M tokens")
@@ -677,7 +722,7 @@ def build_parser() -> argparse.ArgumentParser:
     # body scout <target> [-q <query>] [--slice <specs...>] [--json]
     p_scout = subparsers.add_parser(
         "scout",
-        help="On-device Local Metal ReconScout context digest & AST symbol slicer",
+        help="[Organ 02] On-device Local Metal ReconScout context digest & AST symbol slicer",
     )
     p_scout.add_argument("target", nargs="?", default=None, help="Target file or log path to scout")
     p_scout.add_argument(
@@ -695,7 +740,6 @@ def build_parser() -> argparse.ArgumentParser:
     # body implement <target> -i <instruction> [--model-coder <model>] [--no-apply] [--json]
     p_impl = subparsers.add_parser(
         "implement",
-        help="On-device Local Metal ReconImplementer surgical single-file code edit",
     )
     p_impl.add_argument("target", help="Target file path to modify")
     p_impl.add_argument("-i", "--instruction", required=True, help="Surgical edit instruction")
@@ -706,7 +750,6 @@ def build_parser() -> argparse.ArgumentParser:
     # body loop <goal> [-m <model>] [-t <max_turns>] [--json]
     p_loop = subparsers.add_parser(
         "loop",
-        help="On-device LocalAutonomousLoop multi-turn engineering agent",
     )
     p_loop.add_argument("goal", help="Engineering goal or bug-fix objective")
     p_loop.add_argument("-m", "--model", default="auto", help="Local model identifier or 'auto'")
@@ -716,7 +759,6 @@ def build_parser() -> argparse.ArgumentParser:
     # body arena [--arena-dir <path>] [--setup-only] [--no-claude-parity] [--json]
     p_arena = subparsers.add_parser(
         "arena",
-        help="Run the 4-Way WBC Head-to-Head Benchmark Arena & Claude Code Parity Suite",
     )
     p_arena.add_argument("--arena-dir", default="/tmp/wbc_arena", help="Arena sandbox directory")
     p_arena.add_argument("--setup-only", action="store_true", help="Only create Arena fixtures")
@@ -726,7 +768,6 @@ def build_parser() -> argparse.ArgumentParser:
     # body commit [paths...] [-m message] [-a] [--no-lint] [--no-llm] [--wip] [--session-id ID] [--json]
     p_commit = subparsers.add_parser(
         "commit",
-        help="Sub-20ms AST-guided smart git commit with pre-flight secret/lint SecGate",
     )
     p_commit.add_argument(
         "paths",
@@ -771,7 +812,6 @@ def build_parser() -> argparse.ArgumentParser:
     # body checkpoint [label] [--commit] [--list] [--restore REF] [--json]
     p_checkpoint = subparsers.add_parser(
         "checkpoint",
-        help="Zero-risk working-tree snapshot to refs/checkpoints/* or HEAD",
     )
     p_checkpoint.add_argument(
         "label",
@@ -800,7 +840,6 @@ def build_parser() -> argparse.ArgumentParser:
     # 1-Way Trojan Horse migration from legacy Screenpipe DB to Sovereign Foveal Memory
     p_import_sp = subparsers.add_parser(
         "import-screenpipe",
-        help="1-Way Trojan Horse migration from Screenpipe SQLite to sovereign Foveal Memory (~/.whole_body/foveal_memory.sqlite)",
     )
     p_import_sp.add_argument(
         "--source",
@@ -823,14 +862,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_skills = subparsers.add_parser(
         "skills",
         aliases=["skill"],
-        help="Audit skill usage frequency, export PalWorkflow recipes as portable skills, and prune/restore dormant skills",
+        help="[Workflow] Audit skill token tax, export recipes as skills, and prune dormant skills",
     )
     p_skills.add_argument(
         "action",
         nargs="?",
-        choices=["audit", "prune", "restore", "archive", "export"],
+        choices=["audit", "prune", "restore", "archive", "export", "prune-mcp", "restore-mcp"],
         default="audit",
-        help="Action: audit (default), export (<recipe_or_id>), prune (shelve 0-use skills), restore (<name> or 'all'), archive (list shelf)",
+        help="Action: audit (default), export (<recipe_or_id>), prune (shelve 0-use skills), prune-mcp (shelve 0-use MCP servers), restore (<name> or 'all'), restore-mcp (<name> or 'all'), archive (list shelf)",
     )
     p_skills.add_argument(
         "targets",
@@ -876,9 +915,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_skills.add_argument("--json", action="store_true", help="Emit structured JSON output")
 
-    # Individual organ subcommands
+    # Individual organ subcommands (canonical 5-Organ surface visible; legacy 10-organ aliases suppressed in --help)
+    visible_organ_help = {
+        "heart": "[Organ 01] Thermal pressure, Unified RAM, swap & hardware vitals",
+        "eyes": "[Organ 03] Foveal AXUIElement DOM inspection & live app snapshots",
+        "hands": "[Organ 03] Zero-cursor background GUI actuation & tactile verification",
+        "memory": "[Organ 04] DotMemory WAL remember/recall, deja-vu & timeline rewind",
+        "bbb": "[Organ 05] Blood-Brain Barrier shield audit (--tools, --blocked, --blob)",
+    }
     for organ_key in SINGLE_ORGAN_DISPATCH:
-        p_org = subparsers.add_parser(organ_key, help=f"Inspect organ '{organ_key}' vital signs and latency")
+        if organ_key in visible_organ_help:
+            p_org = subparsers.add_parser(
+                organ_key,
+                help=visible_organ_help[organ_key],
+            )
+        else:
+            p_org = subparsers.add_parser(organ_key)
         p_org.add_argument("--json", action="store_true", help="Output structured JSON")
         if organ_key in ("eyes", "hands"):
             p_org.add_argument("--app", type=str, default=None, help="Target application name (e.g. 'Claude', 'Muse', 'Google Chrome')")

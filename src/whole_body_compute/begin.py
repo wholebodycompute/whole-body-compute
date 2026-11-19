@@ -175,10 +175,14 @@ def _find_persistent_binary(names: Sequence[str]) -> Optional[str]:
 
 
 def _quote_hook_path(path_str: str) -> str:
-    """Quote a binary path safely for the active OS shell (`"..."` on Windows, `'...'` on POSIX)."""
+    """Quote a binary path safely for the active OS shell (`"..."` on Windows, POSIX `shlex.quote` on Unix)."""
     if os.name == "nt":
-        return f'"{path_str}"' if " " in path_str else path_str
-    return f"'{path_str}'"
+        clean_nt = str(path_str).replace('"', "")
+        return f'"{clean_nt}"' if " " in clean_nt else clean_nt
+    import shlex
+
+    quoted = shlex.quote(str(path_str))
+    return quoted if quoted.startswith("'") else f"'{quoted}'"
 
 
 def resolve_hook_command() -> str:
@@ -198,7 +202,7 @@ def resolve_hook_command() -> str:
 
     # 1. Source checkout fast-path POSIX sh hook
     if DEFAULT_HOOK_SCRIPT.is_file() and not _is_ephemeral_uvx_path(str(DEFAULT_HOOK_SCRIPT)):
-        return f"'{DEFAULT_HOOK_SCRIPT}'"
+        return _quote_hook_path(str(DEFAULT_HOOK_SCRIPT))
 
     # 2. Bundled <2ms POSIX sh hook inside a persistent wheel / Homebrew / uv tool install
     if BUNDLED_HOOK_SCRIPT.is_file() and not _is_ephemeral_uvx_path(str(BUNDLED_HOOK_SCRIPT)):
@@ -208,15 +212,15 @@ def resolve_hook_command() -> str:
         except Exception:
             pass
         if os.access(BUNDLED_HOOK_SCRIPT, os.X_OK):
-            return f"'{BUNDLED_HOOK_SCRIPT}'"
+            return _quote_hook_path(str(BUNDLED_HOOK_SCRIPT))
 
     # 3. Persistent global CLI binary (`body-immune-hook` or `body`)
     hook_bin = _find_persistent_binary(("body-immune-hook",))
     if hook_bin:
-        return f"'{hook_bin}'"
+        return _quote_hook_path(hook_bin)
     body_bin = _find_persistent_binary(("body",))
     if body_bin:
-        return f"'{body_bin}' immune-hook"
+        return f"{_quote_hook_path(body_bin)} immune-hook"
 
     # 4. Fallback (e.g., if running inside `uvx` with no global install yet, use `body immune-hook` so installing later heals it)
     return "body immune-hook"
@@ -320,30 +324,45 @@ def wire_workspace_hooks(
     )
     if has_claude_harness:
         wired_harnesses.append("claude")
-        claude_settings: Dict[str, Any] = {}
-        existed_before = claude_settings_path.exists()
-        if existed_before:
+        # Avoid double-firing in Claude Code when global ~/.claude/settings.json already wires body-immune-hook
+        global_claude_settings = Path.home() / ".claude" / "settings.json"
+        global_already_wired = False
+        if "PYTEST_CURRENT_TEST" not in os.environ and global_claude_settings.is_file():
             try:
-                claude_settings = json.loads(claude_settings_path.read_text(encoding="utf-8"))
+                g_cfg = json.loads(global_claude_settings.read_text(encoding="utf-8"))
+                g_hooks = g_cfg.get("hooks", {}) if isinstance(g_cfg, dict) else {}
+                global_already_wired = _hook_entries_contain_wbc(g_hooks.get("PreToolUse"))
             except Exception:
-                claude_settings = {}
-        hooks_section = claude_settings.setdefault("hooks", {})
-        claude_updated = False
-        if "PreToolUse" not in hooks_section or force_rules:
-            hooks_section["PreToolUse"] = gate_cfg["PreToolUse"]
-            claude_updated = True
-        if "PostToolUse" not in hooks_section or force_rules:
-            hooks_section["PostToolUse"] = gate_cfg["PostToolUse"]
-            claude_updated = True
-        if claude_updated:
-            claude_hooks_status = "updated"
-            if not dry_run:
-                claude_dir.mkdir(parents=True, exist_ok=True)
-                claude_settings_path.write_text(
-                    json.dumps(claude_settings, indent=2) + "\n", encoding="utf-8"
-                )
+                global_already_wired = False
+        if global_already_wired:
+            claude_hooks_status = _prune_duplicate_local_claude_hooks(
+                claude_settings_path, dry_run=dry_run
+            )
         else:
-            claude_hooks_status = "verified"
+            claude_settings: Dict[str, Any] = {}
+            existed_before = claude_settings_path.exists()
+            if existed_before:
+                try:
+                    claude_settings = json.loads(claude_settings_path.read_text(encoding="utf-8"))
+                except Exception:
+                    claude_settings = {}
+            hooks_section = claude_settings.setdefault("hooks", {})
+            claude_updated = False
+            if "PreToolUse" not in hooks_section or force_rules:
+                hooks_section["PreToolUse"] = gate_cfg["PreToolUse"]
+                claude_updated = True
+            if "PostToolUse" not in hooks_section or force_rules:
+                hooks_section["PostToolUse"] = gate_cfg["PostToolUse"]
+                claude_updated = True
+            if claude_updated:
+                claude_hooks_status = "updated"
+                if not dry_run:
+                    claude_dir.mkdir(parents=True, exist_ok=True)
+                    claude_settings_path.write_text(
+                        json.dumps(claude_settings, indent=2) + "\n", encoding="utf-8"
+                    )
+            else:
+                claude_hooks_status = "verified"
 
     # Optional Cursor (.cursor/) wiring: .cursor/hooks.json (removes stale agent_efficiency.mdc bloat)
     cursor_dir = workspace / ".cursor"
@@ -447,28 +466,39 @@ def wire_workspace_hooks(
         )
         codex_hooks_status = codex_res["status"]
 
+    is_home_dir = (
+        "PYTEST_CURRENT_TEST" not in os.environ
+        and workspace == Path.home().expanduser().resolve()
+    )
+
     agents_md_path = workspace / "AGENTS.md"
     agents_md_status = "skipped"
-    if agents_md_path.exists() or has_codex_harness:
+    if agents_md_path.exists() or (has_codex_harness and not is_home_dir):
         if "agents.md" not in wired_harnesses:
             wired_harnesses.append("agents.md")
         agents_md_status = _upsert_marked_rule_file(
             agents_md_path, rule_body, dry_run=dry_run, force_rules=force_rules
         )
 
-    # Universal CLAUDE.md wiring
+    # Universal CLAUDE.md wiring (skip creating ~/CLAUDE.md when run directly in $HOME unless it already exists)
     claude_md_path = workspace / "CLAUDE.md"
-    claude_md_status = _upsert_marked_rule_file(
-        claude_md_path, rule_body, dry_run=dry_run, force_rules=force_rules
-    )
+    if claude_md_path.exists() or not is_home_dir:
+        claude_md_status = _upsert_marked_rule_file(
+            claude_md_path, rule_body, dry_run=dry_run, force_rules=force_rules
+        )
+    else:
+        claude_md_status = "skipped_home_dir"
     if "claude" not in wired_harnesses:
         wired_harnesses.append("claude")
 
-    # Universal .cursorrules wiring
+    # Universal .cursorrules wiring (skip creating ~/.cursorrules when run directly in $HOME unless it already exists)
     cursorrules_path = workspace / ".cursorrules"
-    cursorrules_status = _upsert_marked_rule_file(
-        cursorrules_path, rule_body, dry_run=dry_run, force_rules=force_rules
-    )
+    if cursorrules_path.exists() or not is_home_dir:
+        cursorrules_status = _upsert_marked_rule_file(
+            cursorrules_path, rule_body, dry_run=dry_run, force_rules=force_rules
+        )
+    else:
+        cursorrules_status = "skipped_home_dir"
     if "cursor" not in wired_harnesses:
         wired_harnesses.append("cursor")
 
@@ -702,6 +732,177 @@ def install_claude_hooks(
         "status": status,
         "path": str(claude_settings_path),
         "settings_path": str(claude_settings_path),
+        "dry_run": dry_run,
+    }
+
+
+def _hook_entries_contain_wbc(entries: Any) -> bool:
+    """Return True if a Claude Code hook list already references body-immune-hook."""
+    if not isinstance(entries, list):
+        return False
+    for item in entries:
+        if isinstance(item, dict):
+            for h in item.get("hooks", []) or []:
+                if isinstance(h, dict) and (
+                    "body-immune-hook" in str(h.get("command", ""))
+                    or "immune-hook" in str(h.get("command", ""))
+                ):
+                    return True
+    return False
+
+
+def _hook_entries_match_exact_wbc(entries: Any, target_entries: Any) -> bool:
+    """Return True if the WBC hook entry in `entries` matches `target_entries` command & matcher."""
+    if not isinstance(entries, list) or not isinstance(target_entries, list) or not target_entries:
+        return False
+    wbc_items = [item for item in entries if _hook_entries_contain_wbc([item])]
+    return wbc_items == list(target_entries)
+
+
+def _prune_duplicate_local_claude_hooks(
+    settings_path: Path,
+    dry_run: bool = False,
+) -> str:
+    """
+    Remove duplicate WBC hook entries from `<repo>/.claude/settings.local.json` when
+    global `~/.claude/settings.json` is active, preventing double-execution per tool call.
+    Preserves all non-WBC hooks and settings; removes the file if it becomes empty.
+    """
+    if not settings_path.is_file():
+        return "delegated_to_global"
+    try:
+        raw = settings_path.read_text(encoding="utf-8")
+        data = json.loads(raw) if raw.strip() else {}
+        if not isinstance(data, dict):
+            return "delegated_to_global"
+    except Exception:
+        return "delegated_to_global"
+
+    hooks_section = data.get("hooks")
+    if not isinstance(hooks_section, dict):
+        return "delegated_to_global"
+
+    changed = False
+    for event_key in ("PreToolUse", "PostToolUse"):
+        existing_list = hooks_section.get(event_key)
+        if isinstance(existing_list, list) and _hook_entries_contain_wbc(existing_list):
+            filtered = [item for item in existing_list if not _hook_entries_contain_wbc([item])]
+            changed = True
+            if filtered:
+                hooks_section[event_key] = filtered
+            else:
+                hooks_section.pop(event_key, None)
+
+    if not changed:
+        return "delegated_to_global"
+
+    if not hooks_section:
+        data.pop("hooks", None)
+
+    if not dry_run:
+        if not data:
+            try:
+                settings_path.unlink()
+            except OSError:
+                pass
+        else:
+            settings_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    return "pruned_duplicate_to_global"
+
+
+def install_global_claude_hooks(
+    hook_cmd: Optional[str] = None,
+    dry_run: bool = False,
+    force_rules: bool = False,
+    home_dir: Optional[Path] = None,
+    create_if_missing: bool = False,
+) -> Dict[str, Any]:
+    """
+    Safely merge Blood-Brain Barrier hooks into global `~/.claude/settings.json`
+    when Claude Code is installed (`~/.claude` exists or `claude` CLI is on PATH)
+    or when invoked from `$HOME` (`create_if_missing=True`), so hooks fire across
+    every repository without requiring per-repo setup.
+    Preserves all existing user settings and existing hooks; never overwrites corrupt JSON.
+    """
+    if home_dir is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        return {
+            "status": "skipped",
+            "reason": "pytest_isolation",
+            "path": str(Path.home() / ".claude" / "settings.json"),
+            "dry_run": dry_run,
+        }
+    home = (home_dir or Path.home()).expanduser().resolve()
+    claude_dir = home / ".claude"
+    has_claude_cli = shutil.which("claude") is not None if home_dir is None else False
+    if not claude_dir.is_dir() and not has_claude_cli and not create_if_missing:
+        return {
+            "status": "skipped",
+            "reason": "no_global_claude_dir",
+            "path": str(claude_dir / "settings.json"),
+            "dry_run": dry_run,
+        }
+
+    settings_path = claude_dir / "settings.json"
+    resolved = hook_cmd.strip() if (hook_cmd and hook_cmd.strip()) else resolve_hook_command()
+    gate_cfg = build_immune_gate_config(resolved)
+
+    settings: Dict[str, Any] = {}
+    existed_before = settings_path.exists()
+    if existed_before:
+        try:
+            raw = settings_path.read_text(encoding="utf-8")
+            if raw.strip():
+                loaded = json.loads(raw)
+                if not isinstance(loaded, dict):
+                    return {
+                        "status": "skipped",
+                        "reason": "invalid_json_preserved",
+                        "path": str(settings_path),
+                        "dry_run": dry_run,
+                    }
+                settings = loaded
+        except Exception:
+            return {
+                "status": "skipped",
+                "reason": "invalid_json_preserved",
+                "path": str(settings_path),
+                "dry_run": dry_run,
+            }
+
+    hooks_section = settings.setdefault("hooks", {})
+    if not isinstance(hooks_section, dict):
+        hooks_section = {}
+        settings["hooks"] = hooks_section
+
+    updated = False
+    for event_key in ("PreToolUse", "PostToolUse"):
+        existing_list = hooks_section.get(event_key)
+        if not isinstance(existing_list, list):
+            hooks_section[event_key] = gate_cfg[event_key]
+            updated = True
+        elif force_rules or not _hook_entries_match_exact_wbc(existing_list, gate_cfg[event_key]):
+            filtered = [
+                item for item in existing_list
+                if not _hook_entries_contain_wbc([item])
+            ]
+            hooks_section[event_key] = filtered + list(gate_cfg[event_key])
+            updated = True
+
+    if not existed_before:
+        status = "created"
+    elif updated:
+        status = "updated"
+    else:
+        status = "verified"
+
+    if not dry_run and updated:
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+
+    return {
+        "status": status,
+        "path": str(settings_path),
         "dry_run": dry_run,
     }
 
@@ -1249,6 +1450,12 @@ def run_body_begin(
         if (workspace / rel.rstrip("/")).exists()
     }
 
+    cwd_is_home = workspace == Path.home().expanduser().resolve()
+    global_claude_hook = install_global_claude_hooks(
+        dry_run=dry_run,
+        force_rules=force_rules,
+        create_if_missing=cwd_is_home,
+    )
     wiring = wire_workspace_hooks(
         workspace=workspace,
         dry_run=dry_run,
@@ -1264,11 +1471,22 @@ def run_body_begin(
         dry_run=dry_run,
         force_rules=force_rules,
     )
-    claude_hook = install_claude_hooks(
-        workspace=workspace,
-        dry_run=dry_run,
-        force_rules=force_rules,
-    )
+    if global_claude_hook.get("status") in ("created", "updated", "verified"):
+        pruned_status = _prune_duplicate_local_claude_hooks(
+            workspace / ".claude" / "settings.local.json", dry_run=dry_run
+        )
+        claude_hook = {
+            "status": pruned_status,
+            "path": global_claude_hook.get("path"),
+            "settings_path": global_claude_hook.get("path"),
+            "dry_run": dry_run,
+        }
+    else:
+        claude_hook = install_claude_hooks(
+            workspace=workspace,
+            dry_run=dry_run,
+            force_rules=force_rules,
+        )
     git_precommit_secgate = install_git_precommit_secgate(
         workspace=workspace,
         dry_run=dry_run,
@@ -1513,7 +1731,10 @@ def run_body_begin(
         telemetry_policy["error"] = str(exc)
 
     try:
-        from whole_body_compute.procedural_telemetry import track_wbc_event
+        from whole_body_compute.procedural_telemetry import (
+            ProceduralDNAHarvester,
+            track_wbc_event,
+        )
 
         fin_d = finops if isinstance(finops, dict) else {}
         track_wbc_event(
@@ -1523,6 +1744,8 @@ def run_body_begin(
                 "skip_audit": bool(skip_audit),
                 "wired_harnesses": ",".join(wired_list),
                 "wired_harnesses_count": len(wired_list),
+                "cwd_is_home": bool(cwd_is_home),
+                "global_claude_hook_status": str(global_claude_hook.get("status", "skipped")),
                 "elapsed_ms": float(elapsed_ms),
                 "conversations_scanned": int(
                     fin_d.get("conversations_scanned") or fin_d.get("threads_scanned", 0)
@@ -1533,6 +1756,13 @@ def run_body_begin(
                 "effective_telemetry_tier": str(telemetry_policy.get("effective_tier", "TIER_0_LOCAL")),
             },
         )
+        if not dry_run and not os.environ.get("PYTEST_CURRENT_TEST"):
+            import threading
+
+            threading.Thread(
+                target=lambda: ProceduralDNAHarvester().harvest_all(persist=True),
+                daemon=True,
+            ).start()
     except Exception:
         pass
 
@@ -1541,9 +1771,11 @@ def run_body_begin(
         "elapsed_ms": elapsed_ms,
         "wiring": wiring,
         "wired_harnesses": wired_list,
+        "cwd_is_home": cwd_is_home,
         "cursor_hook": cursor_hook,
         "opencode_hook": opencode_hook,
         "claude_hook": claude_hook,
+        "global_claude_hook": global_claude_hook,
         "git_precommit_secgate": git_precommit_secgate,
         "git_excluded_paths": git_excluded_paths,
         "instant_reflex_proof": reflex_demo,
@@ -1793,6 +2025,11 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
         lines.append(f"  • {day0_comp['summary']}")
     if wiring.get("claude_hooks_status") and wiring.get("claude_hooks_status") != "skipped":
         lines.append(f"  • Claude Code Hook:  {wiring.get('claude_hooks_status').upper()} (.claude/settings.local.json)")
+    if g_claude := result.get("global_claude_hook"):
+        if g_claude.get("status") not in (None, "skipped"):
+            lines.append(f"  • Global Claude Hook: {g_claude.get('status').upper()} -> {g_claude.get('path')} (active across all repos)")
+    if result.get("cwd_is_home"):
+        lines.append("  • [TIP] Ran from $HOME: run `body begin` inside any project repo to wire workspace-local Cursor/Codex/Git hooks too.")
     if wiring.get("codex_hooks_status") and wiring.get("codex_hooks_status") != "skipped":
         lines.append(f"  • OpenAI Codex Hook: {wiring.get('codex_hooks_status').upper()} (.codex/hooks.json)")
     if cursor_h := result.get("cursor_hook"):
@@ -1906,11 +2143,24 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
             ]
         )
 
+    ears_lines = [
+        "  • Local Code Dictation:      Hold [Fn] anywhere (or Fn+Space hands-free) • 100% local AST vocab (`body ears --status`)",
+    ]
+    try:
+        from whole_body_compute.stt.local_ears import check_macos_fn_key_conflict
+
+        fn_chk = check_macos_fn_key_conflict()
+        if fn_chk.get("conflict") and fn_chk.get("tip"):
+            ears_lines.append(f"    Tip: {fn_chk['tip']}")
+    except Exception:
+        pass
+
     lines.extend(
         [
             "",
             "READY - NEXT COMMANDS",
             "─" * 84,
+            *ears_lines,
             "  • Full 5-Organ Audit:        body doctor --exercise",
             "  • Retroactive Spend Audit:   body audit-spend",
             "  • Verified Token Savings:    body savings",
