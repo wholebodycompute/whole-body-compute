@@ -1,6 +1,6 @@
 # 📊 `wholebodycompute/whole-body-compute` - Permanent Clone, Traffic & Adoption Archive
 
-_Last updated: `2026-11-20T15:21:32Z` (automated daily snapshot preventing GitHub's 14-day traffic wipe)_
+_Last updated: `2026-11-21T14:33:55Z` (automated daily snapshot preventing GitHub's 14-day traffic wipe)_
 
 | Metric | Value | Source |
 | :--- | ---: | :--- |
@@ -10,7 +10,7 @@ _Last updated: `2026-11-20T15:21:32Z` (automated daily snapshot preventing GitHu
 | **Cumulative Daily Unique Visitors** | **0** | `views_daily.csv` |
 | **GitHub Stars / Forks** | **4 ⭐ / 1 🍴** | `adoption_daily.csv` |
 | **GitHub Release Asset Downloads** | **12** | `adoption_daily.csv` |
-| **PyPI Downloads (Last 30d / 7d)** | **333 / 219** | `pypistats.org` |
+| **PyPI Downloads (Last 30d / 7d)** | **336 / 212** | `pypistats.org` |
 
 > **Setup Note (`TRAFFIC_PAT`):** GitHub's `/traffic/clones` & `/traffic/views` endpoints require a Fine-Grained PAT
 > with `Administration: Read-only` (or `Contents: Read`) added under **Settings → Secrets and variables → Actions → `TRAFFIC_PAT`**.
