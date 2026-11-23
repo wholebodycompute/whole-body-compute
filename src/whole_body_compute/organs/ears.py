@@ -21,13 +21,12 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from whole_body_compute.stt.local_ears import (
     LocalEarsEngine,
     PTTSession,
     TranscriptionResult,
-    check_macos_fn_key_conflict,
 )
 
 logger = logging.getLogger("whole_body_compute.organs.ears")
@@ -154,6 +153,96 @@ def is_voicefi_dictation_active() -> bool:
     return False
 
 
+def _send_backspaces(count: int) -> None:
+    """Send `count` Delete/Backspace keystrokes with flags=0 (ignores held Fn key)."""
+    if count <= 0 or platform.system() != "Darwin":
+        return
+    try:
+        import Quartz
+
+        src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+        for _ in range(count):
+            down = Quartz.CGEventCreateKeyboardEvent(src, 51, True)   # kVK_Delete = 51
+            up = Quartz.CGEventCreateKeyboardEvent(src, 51, False)
+            Quartz.CGEventSetFlags(down, 0)
+            Quartz.CGEventSetFlags(up, 0)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+    except Exception as exc:
+        logger.debug("_send_backspaces failed: %s", exc)
+
+
+def type_unicode_direct(text: str) -> bool:
+    """
+    Type Unicode text directly into the focused macOS app via `CGEventKeyboardSetUnicodeString`
+    with `flags = 0`, so it works cleanly even while `Fn` is physically held down (zero
+    clipboard touching, zero `Fn+Cmd+V` collision).
+    """
+    if not text or platform.system() != "Darwin":
+        return False
+    try:
+        import Quartz
+
+        src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+        # Chunk at 16 UTF-16 code units per event (macOS CGEventKeyboardSetUnicodeString limit is ~20)
+        chunk_size = 16
+        for idx in range(0, len(text), chunk_size):
+            chunk = text[idx : idx + chunk_size]
+            down = Quartz.CGEventCreateKeyboardEvent(src, 0, True)
+            up = Quartz.CGEventCreateKeyboardEvent(src, 0, False)
+            Quartz.CGEventSetFlags(down, 0)
+            Quartz.CGEventSetFlags(up, 0)
+            Quartz.CGEventKeyboardSetUnicodeString(down, len(chunk), chunk)
+            Quartz.CGEventKeyboardSetUnicodeString(up, len(chunk), chunk)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+        return True
+    except Exception as exc:
+        logger.debug("type_unicode_direct failed: %s", exc)
+        return False
+
+
+class LiveDifferentialTyper:
+    """
+    Types streaming partial transcripts into the focused app in real time,
+    computing the minimal backspace + suffix diff whenever Apple Speech revises
+    earlier words or Stage-2 ASTSymbolSnapper snaps an identifier on finalization.
+    """
+
+    def __init__(self, *, type_fn: Optional[Callable[[str], bool]] = None, backspace_fn: Optional[Callable[[int], None]] = None):
+        self._emitted: str = ""
+        self._lock = threading.Lock()
+        self._type_fn = type_fn or type_unicode_direct
+        self._backspace_fn = backspace_fn or _send_backspaces
+
+    def update(self, new_text: str) -> Tuple[int, str]:
+        """Apply differential update to match `new_text`. Returns `(backspaces, appended)`."""
+        with self._lock:
+            old = self._emitted
+            if new_text == old:
+                return 0, ""
+            # Compute longest common prefix
+            prefix_len = 0
+            limit = min(len(old), len(new_text))
+            while prefix_len < limit and old[prefix_len] == new_text[prefix_len]:
+                prefix_len += 1
+            backspaces = len(old) - prefix_len
+            suffix = new_text[prefix_len:]
+            if backspaces > 0:
+                self._backspace_fn(backspaces)
+            if suffix:
+                self._type_fn(suffix)
+            self._emitted = new_text
+            return backspaces, suffix
+
+    def finalize(self, final_text: str) -> Tuple[int, str]:
+        """Apply final AST-snapped text with a trailing space so consecutive dictations don't glue together."""
+        clean = final_text.strip()
+        if not clean:
+            return self.update("")
+        return self.update(clean + " ")
+
+
 def paste_into_focused_app(text: str) -> bool:
     """Inject transcribed text into the currently focused macOS app without stealing focus."""
     if not text:
@@ -195,6 +284,7 @@ class OrganEars:
         self.engine = LocalEarsEngine(workspace=workspace, db_path=db_path, backend=backend)
         self.hotkey = (hotkey or "fn").strip().lower()
         self._active_session: Optional[PTTSession] = None
+        self._active_typer: Optional[LiveDifferentialTyper] = None
         self._session_lock = threading.Lock()
 
     def status(self) -> Dict[str, Any]:
@@ -209,6 +299,21 @@ class OrganEars:
 
     def upgrade_model(self) -> Dict[str, Any]:
         return self.engine.upgrade_model()
+
+    def _record_foveal_transcript(self, res: TranscriptionResult) -> None:
+        """Persist finalized AST-grounded transcript into Foveal Memory (`foveal_memory.sqlite`) with secret redaction."""
+        if not res.text or os.environ.get("WBC_EARS_DISABLE_MEMORY") == "1":
+            return
+        try:
+            from whole_body_compute.integrations.foveal_memory import record_foveal_audio_transcription
+
+            record_foveal_audio_transcription(
+                transcription=res.text,
+                device="body_ears",
+                transcription_engine=res.backend or "ane_sfspeech",
+            )
+        except Exception as exc:
+            logger.debug("_record_foveal_transcript skipped: %s", exc)
 
     def transcribe(
         self,
@@ -227,6 +332,8 @@ class OrganEars:
                 max_sec=max_sec,
                 active_file=active_file,
             )
+        if res.text:
+            self._record_foveal_transcript(res)
         if paste and res.text:
             paste_into_focused_app(res.text)
         return res
@@ -238,19 +345,28 @@ class OrganEars:
         with self._session_lock:
             if self._active_session is not None:
                 return
-            session = self.engine.start_ptt_mic_session()
+            # Live-type in BOTH Hold-Fn and Hands-Free modes using `type_unicode_direct` (flags=0)
+            typer = LiveDifferentialTyper()
+
+            def _on_partial(partial_text: str) -> None:
+                typer.update(partial_text)
+
+            session = self.engine.start_ptt_mic_session(on_partial=_on_partial)
             if session is None:
                 print("⚠️  Local ANE mic helper unavailable.", flush=True)
                 return
             self._active_session = session
+            self._active_typer = typer
             sym_cnt = len(session.bundle.all_symbols)
             mode_label = "Hands-Free" if mode == "hands_free" else "Hold Fn"
-            print(f"🔴 Listening ({mode_label} • {sym_cnt} AST symbols)...", flush=True)
+            print(f"🔴 Listening ({mode_label} • {sym_cnt} AST symbols • live-type)...", flush=True)
 
     def _on_ptt_stop(self) -> None:
         with self._session_lock:
             session = self._active_session
+            typer = self._active_typer
             self._active_session = None
+            self._active_typer = None
         if session is None:
             return
 
@@ -259,7 +375,11 @@ class OrganEars:
             if res.error and not res.text:
                 print(f"⚠️  {res.error}", flush=True)
             elif res.text:
-                paste_into_focused_app(res.text)
+                if typer is not None:
+                    typer.finalize(res.text)
+                else:
+                    paste_into_focused_app(res.text + " ")
+                self._record_foveal_transcript(res)
                 snaps = len(res.ast_snaps)
                 badge = f" [{snaps} AST snap{'s' if snaps != 1 else ''}]" if snaps else ""
                 print(f"✅ {res.text}{badge} ({res.latency_ms:.0f}ms)", flush=True)

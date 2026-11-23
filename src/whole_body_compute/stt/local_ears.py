@@ -24,7 +24,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from whole_body_compute.stt.vocab_fusion import ASTSymbolSnapper, ASTVocabHydrator, SnapReceipt, VocabBundle
 
@@ -80,6 +80,41 @@ func parseArgs() -> (mode: String, filePath: String?, contextStrings: [String], 
         i += 1
     }
     return (mode, filePath, contextStrings, silenceSec, maxSec)
+}
+
+let rawArgs = CommandLine.arguments
+if rawArgs.count >= 3 && rawArgs[1] == "--launch-daemon" {
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: rawArgs[2])
+    task.arguments = Array(rawArgs.dropFirst(3))
+    task.standardInput = FileHandle.standardInput
+    task.standardOutput = FileHandle.standardOutput
+    task.standardError = FileHandle.standardError
+
+    signal(SIGINT, SIG_IGN)
+    signal(SIGTERM, SIG_IGN)
+    let intSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global(qos: .userInteractive))
+    let termSrc = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global(qos: .userInteractive))
+    intSrc.setEventHandler {
+        if task.isRunning { kill(task.processIdentifier, SIGINT) }
+    }
+    termSrc.setEventHandler {
+        if task.isRunning { kill(task.processIdentifier, SIGTERM) }
+    }
+    intSrc.resume()
+    termSrc.resume()
+
+    do {
+        try task.run()
+        task.waitUntilExit()
+        exit(task.terminationStatus)
+    } catch {
+        let msg = "WholeBodyComputeEars --launch-daemon failed: \(error.localizedDescription)\n"
+        if let data = msg.data(using: .utf8) {
+            FileHandle.standardError.write(data)
+        }
+        exit(1)
+    }
 }
 
 let cfg = parseArgs()
@@ -161,13 +196,27 @@ inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buf, _ in
 
 signal(SIGINT, SIG_IGN)
 signal(SIGTERM, SIG_IGN)
-let sigSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-let termSrc = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+let sigSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global(qos: .userInteractive))
+let termSrc = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global(qos: .userInteractive))
+
+var finished = false
+var lastEmittedPartial = ""
+func emitAndExit() {
+    if finished { return }
+    finished = true
+    emitJSON(["type": "final", "text": bestText, "backend": "ane_sfspeech"])
+    fflush(stdout)
+    exit(0)
+}
 
 func finishMic() {
     engine.stop()
     inputNode.removeTap(onBus: 0)
     req.endAudio()
+    // Give ANE recognizer up to 1.8s to deliver isFinal, then flush bestText
+    DispatchQueue.global().asyncAfter(deadline: .now() + 1.8) {
+        emitAndExit()
+    }
 }
 
 sigSrc.setEventHandler { finishMic() }
@@ -183,19 +232,18 @@ do {
     exit(4)
 }
 
-var finished = false
-let task = recognizer.recognitionTask(with: req) { res, err in
+let _ = recognizer.recognitionTask(with: req) { res, err in
     if let res = res {
         bestText = res.bestTranscription.formattedString
-        if res.isFinal && !finished {
-            finished = true
-            emitJSON(["text": bestText, "backend": "ane_sfspeech"])
-            doneSem.signal()
+        if res.isFinal {
+            emitAndExit()
+        } else if !bestText.isEmpty && bestText != lastEmittedPartial {
+            lastEmittedPartial = bestText
+            emitJSON(["type": "partial", "text": bestText, "backend": "ane_sfspeech"])
+            fflush(stdout)
         }
-    } else if err != nil && !finished {
-        finished = true
-        emitJSON(["text": bestText, "backend": "ane_sfspeech"])
-        doneSem.signal()
+    } else if err != nil {
+        emitAndExit()
     }
 }
 
@@ -210,9 +258,7 @@ DispatchQueue.global().async {
     }
 }
 
-_ = doneSem.wait(timeout: .now() + cfg.maxSec + 5.0)
-task.cancel()
-exit(0)
+RunLoop.main.run()
 """
 
 
@@ -322,17 +368,109 @@ def _clear_mlx_cache() -> None:
         pass
 
 
+def _build_app_icon_icns(resources_dir: Path) -> bool:
+    """Build `AppIcon.icns` from WBC's bundled PNG avatar using macOS `sips` + `iconutil`."""
+    icns_path = resources_dir / "AppIcon.icns"
+    if icns_path.is_file() and icns_path.stat().st_size > 1024:
+        return True
+    # Locate repo / installed PNG logo
+    repo_root = Path(__file__).resolve().parents[3]
+    candidates = [
+        repo_root / "assets" / "wbc-github-avatar-light.png",
+        repo_root / "assets" / "wbc-github-avatar-dark.png",
+        Path(__file__).resolve().parent.parent / "bundled" / "wbc-icon.png",
+    ]
+    src_png = next((c for c in candidates if c.is_file()), None)
+    if src_png is None:
+        return False
+    iconset = resources_dir / "AppIcon.iconset"
+    try:
+        iconset.mkdir(parents=True, exist_ok=True)
+        for sz in (16, 32, 64, 128, 256, 512):
+            subprocess.run(
+                ["sips", "-z", str(sz), str(sz), str(src_png), "--out", str(iconset / f"icon_{sz}x{sz}.png")],
+                capture_output=True,
+                timeout=10.0,
+            )
+            sz2 = sz * 2
+            subprocess.run(
+                ["sips", "-z", str(sz2), str(sz2), str(src_png), "--out", str(iconset / f"icon_{sz}x{sz}@2x.png")],
+                capture_output=True,
+                timeout=10.0,
+            )
+        proc = subprocess.run(
+            ["iconutil", "-c", "icns", str(iconset), "-o", str(icns_path)],
+            capture_output=True,
+            timeout=10.0,
+        )
+        return proc.returncode == 0 and icns_path.is_file()
+    except Exception as exc:
+        logger.debug("AppIcon.icns build skipped: %s", exc)
+        return False
+    finally:
+        try:
+            import shutil
+
+            shutil.rmtree(iconset, ignore_errors=True)
+        except Exception:
+            pass
+
+
 def _get_ane_helper_binary() -> Optional[Path]:
-    """Compile (once, cached by SHA-256) the native Swift ANE SFSpeechRecognizer helper."""
+    """
+    Compile (once, cached by SHA-256) the native Swift ANE SFSpeechRecognizer helper
+    inside `~/.whole_body_compute/Whole Body Compute.app` so macOS permission dialogs
+    (Microphone, Speech Recognition) display "Whole Body Compute" + the WBC logo.
+    """
     if platform.system() != "Darwin":
         return None
-    cache_dir = Path.home() / ".whole_body_compute" / "bin"
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    import plistlib
+
+    base_dir = Path.home() / ".whole_body_compute"
+    app_dir = base_dir / "Whole Body Compute.app"
+    contents_dir = app_dir / "Contents"
+    macos_dir = contents_dir / "MacOS"
+    resources_dir = contents_dir / "Resources"
+    macos_dir.mkdir(parents=True, exist_ok=True)
+    resources_dir.mkdir(parents=True, exist_ok=True)
+
     digest = hashlib.sha256(_SWIFT_ANE_DICTATE_SOURCE.encode("utf-8")).hexdigest()[:12]
-    bin_path = cache_dir / f"wbc-ane-dictate-{digest}"
-    if bin_path.is_file() and os.access(str(bin_path), os.X_OK):
+    bin_path = macos_dir / "WholeBodyComputeEars"
+    stamp_path = contents_dir / ".ears_sha"
+    info_plist_path = contents_dir / "Info.plist"
+
+    _build_app_icon_icns(resources_dir)
+
+    info_plist = {
+        "CFBundleDevelopmentRegion": "en",
+        "CFBundleDisplayName": "Whole Body Compute",
+        "CFBundleExecutable": "WholeBodyComputeEars",
+        "CFBundleIconFile": "AppIcon",
+        "CFBundleIdentifier": "com.wholebodycompute.ears.app",
+        "CFBundleInfoDictionaryVersion": "6.0",
+        "CFBundleName": "Whole Body Compute",
+        "CFBundlePackageType": "APPL",
+        "CFBundleShortVersionString": "0.1.2",
+        "CFBundleVersion": "1",
+        "LSUIElement": True,
+        "NSMicrophoneUsageDescription": "Whole Body Compute uses the microphone 100% locally in RAM for code-aware dictation (zero audio files, zero cloud egress).",
+        "NSSpeechRecognitionUsageDescription": "Whole Body Compute runs Apple on-device Speech Recognition locally on the Neural Engine with your repo AST vocabulary.",
+    }
+    try:
+        info_plist_path.write_bytes(plistlib.dumps(info_plist, fmt=plistlib.FMT_XML))
+    except Exception:
+        pass
+
+    if (
+        bin_path.is_file()
+        and os.access(str(bin_path), os.X_OK)
+        and stamp_path.is_file()
+        and stamp_path.read_text(encoding="utf-8").strip() == digest
+    ):
         return bin_path
-    src_path = cache_dir / f"wbc-ane-dictate-{digest}.swift"
+
+    src_path = base_dir / "bin" / f"wbc-ane-dictate-{digest}.swift"
+    src_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         src_path.write_text(_SWIFT_ANE_DICTATE_SOURCE, encoding="utf-8")
         proc = subprocess.run(
@@ -342,11 +480,28 @@ def _get_ane_helper_binary() -> Optional[Path]:
             timeout=30.0,
         )
         if proc.returncode == 0 and bin_path.is_file():
+            stamp_path.write_text(digest, encoding="utf-8")
+            # Ad-hoc sign the .app bundle so macOS TCC caches permissions under "Whole Body Compute"
+            subprocess.run(
+                ["codesign", "--force", "--deep", "--sign", "-", str(app_dir)],
+                capture_output=True,
+                timeout=15.0,
+            )
             return bin_path
         logger.debug("swiftc compile failed: %s", proc.stderr)
     except Exception as exc:
         logger.debug("ANE helper build skipped: %s", exc)
     return None
+
+
+def ensure_ears_app_executable() -> Optional[Path]:
+    """
+    Ensure `~/.whole_body_compute/Whole Body Compute.app` (with `AppIcon.icns`, `Info.plist`,
+    and ad-hoc codesign) is built and return the path to its `CFBundleExecutable`
+    (`Contents/MacOS/WholeBodyComputeEars`). Used by `com.wholebodycompute.ears` LaunchAgent
+    so macOS Login Items and TCC permission dialogs display "Whole Body Compute" + `AppIcon.icns`.
+    """
+    return _get_ane_helper_binary()
 
 
 class LocalEarsEngine:
@@ -419,6 +574,13 @@ class LocalEarsEngine:
         pkg = "mlx-whisper" if is_mac_arm else "faster-whisper"
         cmd = [sys.executable, "-m", "pip", "install", "-U", pkg]
         proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0 and "No module named pip" in (proc.stderr or ""):
+            import shutil
+
+            uv_bin = shutil.which("uv")
+            if uv_bin:
+                cmd = [uv_bin, "pip", "install", "--python", sys.executable, "-U", pkg]
+                proc = subprocess.run(cmd, capture_output=True, text=True)
         return {
             "ok": proc.returncode == 0,
             "package": pkg,
@@ -485,10 +647,12 @@ class LocalEarsEngine:
         *,
         active_file: Optional[str] = None,
         max_sec: float = 90.0,
+        on_partial: Optional[Any] = None,
     ) -> Optional["PTTSession"]:
         """
         Start a non-blocking RAM-only ANE mic session that records until `finish()`
         is called (e.g. on `Fn` key release or `Fn+Space` second press).
+        If `on_partial(text: str)` is provided, streams live partial transcripts as you speak.
         """
         helper = _get_ane_helper_binary()
         if helper is None:
@@ -510,8 +674,9 @@ class LocalEarsEngine:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            bufsize=1,
         )
-        return PTTSession(engine=self, proc=proc, bundle=bundle, start_ts=t0)
+        return PTTSession(engine=self, proc=proc, bundle=bundle, start_ts=t0, on_partial=on_partial)
 
     def _decode_mlx(self, audio_input: Any, bundle: VocabBundle) -> Tuple[str, Optional[str]]:
         try:
@@ -650,7 +815,7 @@ class LocalEarsEngine:
 
 
 class PTTSession:
-    """Handle for an in-flight push-to-talk RAM-only ANE recording session."""
+    """Handle for an in-flight push-to-talk RAM-only ANE recording session with live partial streaming."""
 
     def __init__(
         self,
@@ -659,15 +824,51 @@ class PTTSession:
         proc: subprocess.Popen,
         bundle: VocabBundle,
         start_ts: float,
+        on_partial: Optional[Any] = None,
     ):
         self.engine = engine
         self.proc = proc
         self.bundle = bundle
         self.start_ts = start_ts
+        self.on_partial = on_partial
         self._finished = False
+        self._final_text: str = ""
+        self._error: Optional[str] = None
+        self._done_evt = threading.Event()
+        self._reader_thread = threading.Thread(target=self._read_loop, daemon=True, name="PTTSessionReader")
+        self._reader_thread.start()
+
+    def _read_loop(self) -> None:
+        try:
+            if self.proc.stdout:
+                for line in self.proc.stdout:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except Exception:
+                        continue
+                    msg_type = data.get("type", "final")
+                    txt = str(data.get("text", "")).strip()
+                    if data.get("error"):
+                        self._error = str(data.get("error"))
+                    if msg_type == "partial" and txt:
+                        self._final_text = txt
+                        if self.on_partial:
+                            try:
+                                self.on_partial(txt)
+                            except Exception:
+                                pass
+                    elif msg_type == "final":
+                        if txt:
+                            self._final_text = txt
+                        break
+        finally:
+            self._done_evt.set()
 
     def finish(self, timeout: float = 8.0) -> TranscriptionResult:
-        """Send SIGINT to stop mic cleanly, read final ANE transcript, and run Stage-2 AST snap."""
+        """Send SIGINT to stop mic cleanly, wait for final ANE transcript, and run Stage-2 AST snap."""
         import signal
 
         if self._finished:
@@ -676,33 +877,23 @@ class PTTSession:
         try:
             if self.proc.poll() is None:
                 self.proc.send_signal(signal.SIGINT)
-            stdout, stderr = self.proc.communicate(timeout=timeout)
+            if not self._done_evt.wait(timeout=timeout):
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+                if not self._final_text:
+                    self._error = "ptt_timeout"
         except Exception:
             try:
                 self.proc.kill()
             except Exception:
                 pass
-            stdout, stderr = "", "ptt_timeout"
-
-        raw, err = "", None
-        for line in reversed((stdout or "").splitlines()):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-                raw = str(data.get("text", "")).strip()
-                err = data.get("error")
-                break
-            except Exception:
-                continue
-        if not raw and not err and stderr:
-            err = stderr.strip()
 
         return self.engine.apply_vocab_fusion(
-            raw,
+            self._final_text,
             bundle=self.bundle,
             backend="ane_sfspeech",
             latency_ms=(time.perf_counter() - self.start_ts) * 1000.0,
-            error=err,
+            error=self._error,
         )

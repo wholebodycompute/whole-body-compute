@@ -174,6 +174,26 @@ def resolve_foveal_http_program_args() -> List[str]:
     ]
 
 
+def resolve_ears_daemon_program_args() -> List[str]:
+    """
+    Resolve `ProgramArguments` for `com.wholebodycompute.ears`.
+    On macOS, wraps `body ears --daemon` inside `~/.whole_body_compute/Whole Body Compute.app`
+    as the top-level LaunchAgent process so Login Items and TCC permission dialogs
+    display "Whole Body Compute" + `AppIcon.icns` instead of `body`/`python3`.
+    """
+    body_args = resolve_body_program_args(["ears", "--daemon"])
+    if sys.platform == "darwin":
+        try:
+            from whole_body_compute.stt.local_ears import ensure_ears_app_executable
+
+            app_bin = ensure_ears_app_executable()
+            if app_bin is not None:
+                return [str(app_bin), "--launch-daemon", *body_args]
+        except Exception:
+            pass
+    return body_args
+
+
 def _is_pro_daemon_unlocked() -> bool:
     """Return True when the host has Pro/Team/Enterprise REM & HUD daemons available."""
     try:
@@ -246,7 +266,8 @@ def build_launchd_plist_specs(
         },
         "com.wholebodycompute.ears": {
             "Label": "com.wholebodycompute.ears",
-            "ProgramArguments": resolve_body_program_args(["ears", "--daemon"]),
+            "AssociatedBundleIdentifiers": "com.wholebodycompute.ears.app",
+            "ProgramArguments": resolve_ears_daemon_program_args(),
             "EnvironmentVariables": dict(env_vars),
             "RunAtLoad": True,
             "KeepAlive": True,

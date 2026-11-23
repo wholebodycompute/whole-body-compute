@@ -2054,14 +2054,34 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
             "  • [WARN] Ephemeral uvx: Run `uv tool install whole-body-compute && body begin` so hooks persist"
         )
 
+    def _format_vital(label: str, status: str, summary: str, max_width: int = 84) -> List[str]:
+        import re
+
+        prefix = f"  • {label:<16} {status.upper():<5} | "
+        indent = " " * len(prefix)
+        parts = [p.strip() for p in re.split(r"\s+•\s+(?![^()]*\))", str(summary or "")) if p.strip()]
+        if not parts:
+            return [prefix.rstrip()]
+        out: List[str] = []
+        cur = prefix + parts[0]
+        for part in parts[1:]:
+            candidate = f"{cur} • {part}"
+            if len(candidate) <= max_width:
+                cur = candidate
+            else:
+                out.append(cur)
+                cur = f"{indent}{part}"
+        out.append(cur)
+        return out
+
     lines.extend(
         [
             "",
             "CORE PHYSIOLOGICAL VITALS",
             "─" * 84,
-            f"  • The Heart:         {organs.get('heart', {}).get('status', 'pass').upper():<5} | {organs.get('heart', {}).get('summary', '')}",
-            f"  • The Brainstem:     {organs.get('brainstem', {}).get('status', 'pass').upper():<5} | {organs.get('brainstem', {}).get('summary', '')}",
-            f"  • Immune BBB:        {organs.get('immune', {}).get('status', 'pass').upper():<5} | {organs.get('immune', {}).get('summary', '')}",
+            *_format_vital("The Heart:", organs.get("heart", {}).get("status", "pass"), organs.get("heart", {}).get("summary", "")),
+            *_format_vital("The Brainstem:", organs.get("brainstem", {}).get("status", "pass"), organs.get("brainstem", {}).get("summary", "")),
+            *_format_vital("Immune BBB:", organs.get("immune", {}).get("status", "pass"), organs.get("immune", {}).get("summary", "")),
         ]
     )
 
@@ -2069,7 +2089,7 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
         lines.extend(
             [
                 "",
-                "LIVE REFLEX SELF-TEST (MEASURED ON THIS HOST)",
+                "LIVE REFLEX SELF-TEST",
                 "─" * 84,
                 (
                     f"  • AST Monster Slicer:  {reflex.get('ast_source_lines', 1200):,}-line module -> "
@@ -2082,31 +2102,6 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
                 ),
             ]
         )
-
-    tel = result.get("telemetry_policy") or {}
-    eff_tier = tel.get("effective_tier", "TIER_0_LOCAL")
-    storage_mb = float(tel.get("storage_mb", 0.0))
-    budget_mb = float(tel.get("budget_mb", 15.0))
-    cards_count = int(tel.get("outbox_cards_count", 0))
-    dnt_active = tel.get("do_not_track_active", False)
-
-    if eff_tier == "TIER_0_LOCAL":
-        tier_str = "TIER_0_LOCAL (100% On-Device, Zero Network Egress)"
-    else:
-        tier_str = f"{eff_tier} (Anonymous Zero-PII Opt-Out · Never Code, Paths, Prompts, or PII)"
-    if dnt_active:
-        tier_str += " [DO_NOT_TRACK Active]"
-
-    lines.extend(
-        [
-            "",
-            "SOVEREIGN TELEMETRY & PROCEDURAL DNA",
-            "─" * 84,
-            f"  • Active Tier:       {tier_str}",
-            f"  • Storage Footprint: {storage_mb:.2f} MB / {budget_mb:.1f} MB ring-buffer cap ({cards_count} learning cards)",
-            "  • Audit & Control:   body telemetry show · body telemetry inspect · body telemetry disable",
-        ]
-    )
 
     threads = finops.get("conversations_scanned") or finops.get("threads_scanned", 0)
     window_days = finops.get("window_days") or finops.get("days", 30)
@@ -2127,7 +2122,6 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
                 "─" * 84,
                 f"  • Scanned History:   {threads} local agent conversations ({raw_tokens:,} cumulative tokens)",
                 f"  • Preventable Tax:   ${raw_usd:,.2f} spent -> ${saved_usd:,.2f} preventable ({savings_pct:.1f}% Context-Tax reduction)",
-                "  • SWE-bench k=3:     1.48x context (-32.4%, 203.08M->137.23M) · 1.52x net (-34.3%) · 1.34x billed runway (-25.6%) · -18.8% turns @ 100% Pass^3",
                 f"  • Team Projection:   ${annual_team:,.0f}/year saved across {seats} seats with Whole Body Compute active",
             ]
         )
@@ -2138,13 +2132,12 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
                 f"INSTANT {window_days}-DAY RETROACTIVE FINOPS RECEIPT",
                 "─" * 84,
                 "  • Scanned History:   0 prior local agent sessions found in current $HOME (Day-0 clean baseline recorded)",
-                "  • SWE-bench k=3:     1.48x context (-32.4%, 203.08M->137.23M) · 1.52x net (-34.3%) · 1.34x billed runway (-25.6%) · -18.8% turns @ 100% Pass^3",
                 f"  • Benchmark Savings: ~$260.50/seat/mo (~$31,260/yr across {seats} seats) at 50 frontier tasks/wk (run `body audit-spend` anytime)",
             ]
         )
 
     ears_lines = [
-        "  • Local Code Dictation:      Hold [Fn] anywhere (or Fn+Space hands-free) • 100% local AST vocab (`body ears --status`)",
+        "  • Local Code Dictation:  Hold [Fn] anywhere (or Fn+Space hands-free) • `body ears --status`",
     ]
     try:
         from whole_body_compute.stt.local_ears import check_macos_fn_key_conflict
@@ -2158,14 +2151,21 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "READY - NEXT COMMANDS",
+            "WHAT TO DO NEXT",
+            "─" * 84,
+            "  1. Restart your agent:   Close & reopen Claude Code / Cursor / Antigravity",
+            "                           (or `/exit` and re-run `claude` in terminal) so hooks load.",
+            "  2. Code normally:        Nothing else to run - WBC now shields context bloat and",
+            "                           prunes tool output automatically in the background.",
+            "  3. Verify in 10s:        After a few prompts, run `body savings` to see live",
+            "                           tokens & dollars saved ticking up.",
+            "",
+            "Other key tools:",
             "─" * 84,
             *ears_lines,
-            "  • Full 5-Organ Audit:        body doctor --exercise",
-            "  • Retroactive Spend Audit:   body audit-spend",
-            "  • Verified Token Savings:    body savings",
-            "  • Live Immune Attribution:   body immune --window 24h --tools --blocked",
-            "  • Background Daemons:        body daemon status  (or `body daemon uninstall` to stop)",
+            "  • Full 5-Organ Check:    body doctor --exercise",
+            "  • Spend & Shield Logs:   body audit-spend  |  body immune --window 24h --tools",
+            "  • Background Daemons:    body daemon status  (or `body daemon uninstall` to stop)",
             "═" * 84,
             f"Awakened in {result.get('elapsed_ms', 0.0):.1f} ms.",
             "",

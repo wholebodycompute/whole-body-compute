@@ -100,7 +100,30 @@ _VERBOSE_FLAG_RE = re.compile(
     r"(?:^|\s)(?:-[A-Za-z]*v[A-Za-z]*|--verbose|--tb=long|--tb=native|--full-trace|--nocapture)(?:\s|$|=)"
 )
 _AIRLOCK_BLOB_CMD_RE = re.compile(r"--blob(?:=|\s+)([A-Za-z0-9_-]{6,32})")
-_TEST_REPO_KEY_RE = re.compile(r"^(?:test_[A-Za-z0-9_]*\d+|pytest-[A-Za-z0-9_.-]+|tmp[A-Za-z0-9_]{4,})$")
+_TEST_REPO_KEY_RE = re.compile(
+    r"^(?:"
+    r"test_[A-Za-z0-9_]*\d+|"
+    r"pytest-[A-Za-z0-9_.-]+|"
+    r"_pytest|"
+    r"tmp(?:[A-Za-z0-9_]{4,})?|"
+    r"-private-tmp-.*|"
+    r"(?:dja|sym|mpl|pyl|req|sea|xar)\d+_t\d+|"
+    r"swe-\d+_.*|"
+    r"arm_(?:vanilla|local|wbc)|"
+    r"live_probe_.*|"
+    r"gauntlet\d+|"
+    r"wbc_claude_.*|"
+    r"lme\d+|"
+    r"[a-z]+_(?:swe\d+|lme\d+|arch-\d+|lien-\d+|hard-.*|mpl\d+)"
+    r")$"
+)
+_EPHEMERAL_PATH_PREFIXES = ("/tmp/", "/private/tmp/", "/var/folders/")
+
+
+def _is_ephemeral_repo_key(repo_key: str) -> bool:
+    if not repo_key or repo_key == "__global__":
+        return False
+    return bool(_TEST_REPO_KEY_RE.match(repo_key))
 _STRIP_SHELL_FLAGS_TOKENS = {
     "-q",
     "-qq",
@@ -1993,8 +2016,13 @@ def get_reflex_gate_status_summary(db_path: Path | str | None = None) -> dict[st
     }
 
 
-def format_reflex_gate_status_lines(summary: dict | None = None) -> list[str]:
-    """Render a compact SpinalReflexGate status section for `body shield` and `body doctor`."""
+def format_reflex_gate_status_lines(
+    summary: dict | None = None,
+    *,
+    min_display_samples: int = 10,
+    verbose: bool = False,
+) -> list[str]:
+    """Render a compact SpinalReflexGate status section for `body savings`, `body shield`, and `body doctor`."""
     data = summary if summary is not None else get_reflex_gate_status_summary()
     gates = data.get("gates") or []
     if not data.get("initialized") or not gates:
@@ -2002,11 +2030,19 @@ def format_reflex_gate_status_lines(summary: dict | None = None) -> list[str]:
     min_samples = int(data.get("min_samples", 50))
     lines = [f"🧠 SpinalReflexGate Status (min_samples={min_samples}):"]
     present_gate_ids = {str(g.get("gate_id", "")) for g in gates}
+    hidden_low_sample = 0
     for g in gates:
+        repo_key = str(g.get("repo_key", "__global__"))
+        state = str(g.get("state", STATE_SHADOW))
+        sample_count = int(g.get("sample_count", 0))
+        if not verbose and repo_key != "__global__" and state == STATE_SHADOW:
+            if _is_ephemeral_repo_key(repo_key) or sample_count < min_display_samples:
+                hidden_low_sample += 1
+                continue
         cv_pct = float(g.get("cv_accuracy", 0.0)) * 100.0
         lines.append(
-            f"  • {g.get('gate_id', 'unknown')} [{g.get('repo_key', '__global__')}] | "
-            f"{g.get('state', STATE_SHADOW)} | {int(g.get('sample_count', 0))}/{min_samples} | "
+            f"  • {g.get('gate_id', 'unknown')} [{repo_key}] | "
+            f"{state} | {sample_count}/{min_samples} | "
             f"CV={cv_pct:.1f}% | misses={int(g.get('consecutive_misses', 0))}"
         )
     for reg_gate_id, _ in REGISTERED_REFLEX_GATES:
@@ -2014,16 +2050,24 @@ def format_reflex_gate_status_lines(summary: dict | None = None) -> list[str]:
             lines.append(
                 f"  • {reg_gate_id} [__global__] | {STATE_SHADOW} | 0/{min_samples} | CV=0.0% | misses=0"
             )
+    if hidden_low_sample > 0:
+        lines.append(
+            f"  • (+{hidden_low_sample} low-sample/ephemeral shadow repos < {min_display_samples} samples)"
+        )
     return lines
 
 
 @functools.lru_cache(maxsize=256)
 def _resolve_repo_key_for_dir(dir_str: str) -> str:
     p = Path(dir_str).resolve()
+    p_str = str(p)
+    if any(p_str.startswith(prefix) for prefix in _EPHEMERAL_PATH_PREFIXES) or "/.gemini/antigravity/brain/" in p_str:
+        return "__global__"
     for parent in (p, *p.parents):
         if (parent / ".git").exists():
-            return parent.name or "__global__"
-    return p.name or "__global__"
+            name = parent.name or "__global__"
+            return "__global__" if _is_ephemeral_repo_key(name) else name
+    return "__global__"
 
 
 def resolve_repo_key(target_path: str) -> str:

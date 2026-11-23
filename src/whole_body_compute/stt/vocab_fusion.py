@@ -23,7 +23,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from whole_body_compute.stt.biasing import PhoneticNormalizer
 
@@ -93,16 +93,18 @@ class VocabBundle:
     p0_focus_symbols: List[str] = field(default_factory=list)
     p1_git_symbols: List[str] = field(default_factory=list)
     p2_repo_symbols: List[str] = field(default_factory=list)
+    personal_vocab: List[str] = field(default_factory=list)
     file_paths: List[str] = field(default_factory=list)
     hydration_ms: float = 0.0
 
     @property
     def all_symbols(self) -> List[str]:
-        """Deduplicated priority-ordered list of symbols and key filenames."""
+        """Deduplicated priority-ordered list of personal vocab, AST symbols, and key filenames."""
         seen: Set[str] = set()
         ordered: List[str] = []
         for item in (
-            self.p0_focus_symbols
+            self.personal_vocab
+            + self.p0_focus_symbols
             + self.p1_git_symbols
             + self.p2_repo_symbols
             + [Path(p).name for p in self.file_paths]
@@ -197,21 +199,72 @@ def _levenshtein_bounded(a: str, b: str, max_dist: int = 1) -> int:
     return prev[lb]
 
 
+def get_default_vocab_path() -> Path:
+    """Return the default personal vocabulary file path (`~/.whole_body_compute/vocab.txt`)."""
+    return Path.home() / ".whole_body_compute" / "vocab.txt"
+
+
+def load_personal_vocab(vocab_path: Optional[Path] = None) -> List[str]:
+    """Load custom terms from `~/.whole_body_compute/vocab.txt` (ignoring blanks and `#` comments)."""
+    path = Path(vocab_path).expanduser() if vocab_path else get_default_vocab_path()
+    if not path.is_file():
+        return []
+    terms: List[str] = []
+    seen: Set[str] = set()
+    try:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line not in seen:
+                seen.add(line)
+                terms.append(line)
+    except Exception as exc:
+        logger.debug("Personal vocab load skipped (%s): %s", path, exc)
+    return terms
+
+
+def add_personal_vocab_word(term: str, vocab_path: Optional[Path] = None) -> Tuple[Path, bool, List[str]]:
+    """
+    Append a custom term to `~/.whole_body_compute/vocab.txt` if not already present.
+    Returns `(vocab_path, added_bool, all_terms)`.
+    """
+    cleaned = term.strip()
+    if not cleaned:
+        raise ValueError("Vocabulary term cannot be empty")
+    path = Path(vocab_path).expanduser() if vocab_path else get_default_vocab_path()
+    existing = load_personal_vocab(path)
+    if cleaned in existing:
+        return path, False, existing
+    path.parent.mkdir(parents=True, exist_ok=True)
+    prefix = ""
+    if path.is_file():
+        content = path.read_text(encoding="utf-8")
+        if content and not content.endswith("\n"):
+            prefix = "\n"
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(f"{prefix}{cleaned}\n")
+    return path, True, existing + [cleaned]
+
+
 class ASTVocabHydrator:
     """
     Sub-5ms vocabulary hydrator combining:
       P0: Active IDE/terminal window & file (`OrganEyes` AXUIElement)
       P1: Modified/staged git working set & current branch
       P2: Repo-wide public symbols from `LocalSymbolIndex` (`symbols.db`)
+      Personal: Custom terms from `~/.whole_body_compute/vocab.txt`
     """
 
     def __init__(
         self,
         workspace: Optional[Path] = None,
         db_path: Optional[Path] = None,
+        vocab_path: Optional[Path] = None,
     ):
         self.workspace = Path(workspace).resolve() if workspace else Path.cwd().resolve()
         self.db_path = Path(db_path) if db_path else None
+        self.vocab_path = Path(vocab_path) if vocab_path else None
 
     def _detect_focus_context(self) -> Tuple[Optional[str], Optional[str]]:
         """Best-effort <2ms focused app & active file title via OrganEyes (safe on non-macOS)."""
@@ -381,6 +434,7 @@ class ASTVocabHydrator:
 
         branch, changed_files = self._detect_git_context()
         p0, p1, p2, file_paths = self._query_symbols_db(active_file, changed_files)
+        personal_vocab = load_personal_vocab(self.vocab_path)
 
         if active_file and active_file not in file_paths:
             file_paths.insert(0, active_file)
@@ -394,6 +448,7 @@ class ASTVocabHydrator:
             p0_focus_symbols=p0,
             p1_git_symbols=p1,
             p2_repo_symbols=p2,
+            personal_vocab=personal_vocab,
             file_paths=file_paths,
             hydration_ms=elapsed_ms,
         )
@@ -452,7 +507,16 @@ class ASTSymbolSnapper:
                     if parent_words:
                         self._register(parent_words + stem_words + v_words, fp, "file")
 
-        # 2. Priority-ordered AST symbols (P0 > P1 > P2)
+        # 2. Personal vocabulary terms (~/.whole_body_compute/vocab.txt)
+        for term in self.bundle.personal_vocab:
+            words = split_identifier_to_words(term)
+            if words:
+                self._register(words, term, "personal")
+            lower_term = term.lower()
+            if lower_term and lower_term not in COMMON_ENGLISH_BLOCKLIST:
+                self._register([lower_term], term, "personal")
+
+        # 3. Priority-ordered AST symbols (P0 > P1 > P2)
         for sym in self.bundle.p0_focus_symbols + self.bundle.p1_git_symbols + self.bundle.p2_repo_symbols:
             words = split_identifier_to_words(sym)
             if not words:
@@ -507,8 +571,8 @@ class ASTSymbolSnapper:
                 key = tuple(cores[i : i + span])
                 if key in self._exact_map:
                     canonical, match_type = self._exact_map[key]
-                    # For 1-word matches, require code cue if lowercase-only
-                    if span == 1 and canonical.islower():
+                    # For 1-word matches, require code cue if lowercase-only (unless personal vocab)
+                    if span == 1 and canonical.islower() and match_type != "personal":
                         prev_core = cores[i - 1] if i > 0 else ""
                         if prev_core not in CODE_CUE_WORDS:
                             continue
@@ -553,4 +617,8 @@ class ASTSymbolSnapper:
 
         snapped_text = " ".join(out_tokens)
         final_text = PhoneticNormalizer.normalize(snapped_text)
+        # Preserve exact casing of personal vocabulary terms against downstream phonetic normalizers
+        for term in self.bundle.personal_vocab:
+            if term and term.lower() in final_text.lower() and term not in final_text:
+                final_text = re.sub(rf"\b{re.escape(term)}\b", term, final_text, flags=re.IGNORECASE)
         return final_text, receipts

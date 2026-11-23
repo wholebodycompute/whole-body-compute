@@ -49,6 +49,11 @@ from whole_body_compute.organs.eyes import (
     inspect_app,
     drive_app,
 )
+from whole_body_compute.organs.ears import (
+    HotkeyStateMachine,
+    LiveDifferentialTyper,
+    OrganEars,
+)
 
 __all__ = [
     "check_5_organs",
@@ -87,5 +92,8 @@ __all__ = [
     "OrganEyes",
     "inspect_app",
     "drive_app",
+    "OrganEars",
+    "HotkeyStateMachine",
+    "LiveDifferentialTyper",
 ]
 

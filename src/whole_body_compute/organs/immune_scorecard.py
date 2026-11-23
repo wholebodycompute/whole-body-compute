@@ -301,6 +301,193 @@ def compute_bicameral_split_metrics(
     }
 
 
+_SLIM_KEEP_KEYS = (
+    "timestamp",
+    "phase",
+    "conversation_id",
+    "step_idx",
+    "stage",
+    "tool",
+    "target",
+    "decision",
+    "event",
+    "gate_stage",
+    "latency_ms",
+    "fast_path",
+    "auto_healed",
+    "em_dash_healed",
+    "machine_marks_scrubbed",
+    "assert_delta",
+    "secret_in_output",
+    "context_gate_triggered",
+    "bounded_slice_read",
+    "read_auto_sliced",
+    "post_output_sliced",
+    "direct_tokens_saved",
+    "quadratic_tokens_saved",
+)
+_MEM_SLIM_CACHE: Dict[str, Any] = {}
+
+
+def _to_slim_event(d: Dict[str, Any]) -> Dict[str, Any]:
+    slim = {
+        k: d[k]
+        for k in _SLIM_KEEP_KEYS
+        if k in d and d[k] not in (False, 0, 0.0, None, "")
+    }
+    if "timestamp" in d:
+        slim["timestamp"] = float(d.get("timestamp") or 0.0)
+    if d.get("decision") not in ("allow", None) and d.get("reason"):
+        slim["reason"] = d["reason"]
+    return slim
+
+
+def _load_windowed_audit_events(
+    log_path: Path, cutoff: Optional[float]
+) -> List[Dict[str, Any]]:
+    if not log_path.is_file():
+        return []
+    try:
+        file_size = log_path.stat().st_size
+    except Exception:
+        return []
+
+    if cutoff is None or file_size < 1_000_000:
+        out: List[Dict[str, Any]] = []
+        try:
+            for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    ev = json.loads(line)
+                    if cutoff is not None and float(ev.get("timestamp", 0.0)) < cutoff:
+                        continue
+                    out.append(ev)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return out
+
+    import pickle
+
+    path_key = str(log_path.resolve())
+    cache_file = log_path.with_suffix(".slim_cache.pkl")
+    now_ts = time.time()
+    target_min_cutoff = min(cutoff, now_ts - 8 * 86400.0)
+
+    try:
+        with open(log_path, "rb") as f:
+            head_sig = f.read(256)
+
+            mem = _MEM_SLIM_CACHE.get(path_key)
+            if (
+                mem
+                and mem.get("head_sig") == head_sig
+                and file_size >= int(mem.get("size", 0))
+                and cutoff >= float(mem.get("min_cutoff", now_ts)) - 60.0
+            ):
+                cached_size = int(mem["size"])
+                events: List[Dict[str, Any]] = mem["events"]
+                if file_size > cached_size:
+                    f.seek(cached_size)
+                    for raw_ln in f.read().splitlines():
+                        if not raw_ln.strip():
+                            continue
+                        try:
+                            events.append(_to_slim_event(json.loads(raw_ln)))
+                        except Exception:
+                            continue
+                    mem["size"] = file_size
+                return [e for e in events if float(e.get("timestamp", 0.0)) >= cutoff]
+
+            if cache_file.is_file():
+                try:
+                    disk = pickle.loads(cache_file.read_bytes())
+                    if (
+                        isinstance(disk, dict)
+                        and disk.get("head_sig") == head_sig
+                        and file_size >= int(disk.get("size", 0))
+                        and cutoff >= float(disk.get("min_cutoff", now_ts)) - 60.0
+                    ):
+                        cached_size = int(disk["size"])
+                        events = disk["events"]
+                        delta_bytes = file_size - cached_size
+                        if delta_bytes > 0:
+                            f.seek(cached_size)
+                            for raw_ln in f.read().splitlines():
+                                if not raw_ln.strip():
+                                    continue
+                                try:
+                                    events.append(_to_slim_event(json.loads(raw_ln)))
+                                except Exception:
+                                    continue
+                            disk["size"] = file_size
+                            if delta_bytes > 65536:
+                                prune_ts = now_ts - 8 * 86400.0
+                                events = [
+                                    e for e in events if float(e.get("timestamp", 0.0)) >= prune_ts
+                                ]
+                                disk["events"] = events
+                                disk["min_cutoff"] = prune_ts
+                                try:
+                                    cache_file.write_bytes(
+                                        pickle.dumps(disk, protocol=pickle.HIGHEST_PROTOCOL)
+                                    )
+                                except Exception:
+                                    pass
+                        _MEM_SLIM_CACHE[path_key] = disk
+                        return [e for e in events if float(e.get("timestamp", 0.0)) >= cutoff]
+                except Exception:
+                    pass
+
+            # Cold cache: binary-seek to target_min_cutoff
+            lo, hi = 0, file_size
+            while hi - lo > 65536:
+                mid = (lo + hi) // 2
+                f.seek(mid)
+                f.readline()
+                probe = f.readline()
+                if not probe:
+                    hi = mid
+                    continue
+                m = re.search(rb'"timestamp":\s*([0-9.]+)', probe)
+                if m and float(m.group(1)) < target_min_cutoff:
+                    lo = mid
+                else:
+                    hi = mid
+            f.seek(lo)
+            if lo > 0:
+                f.readline()
+            tail_bytes = f.read()
+
+        events = []
+        for raw_ln in tail_bytes.splitlines():
+            if not raw_ln.strip():
+                continue
+            try:
+                ev = json.loads(raw_ln)
+                if float(ev.get("timestamp", 0.0)) >= target_min_cutoff:
+                    events.append(_to_slim_event(ev))
+            except Exception:
+                continue
+
+        payload = {
+            "head_sig": head_sig,
+            "size": file_size,
+            "min_cutoff": target_min_cutoff,
+            "events": events,
+        }
+        _MEM_SLIM_CACHE[path_key] = payload
+        try:
+            cache_file.write_bytes(pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL))
+        except Exception:
+            pass
+        return [e for e in events if float(e.get("timestamp", 0.0)) >= cutoff]
+    except Exception:
+        return []
+
+
 def get_immune_pre_post_scorecard(
     limit: int = 50,
     window: str = "all",
@@ -322,30 +509,17 @@ def get_immune_pre_post_scorecard(
     window_sec = parse_window_to_seconds(window)
     cutoff = (time.time() - window_sec) if window_sec is not None else None
 
-    if log_path.is_file():
-        try:
-            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-            for line in lines:
-                if not line.strip():
-                    continue
-                try:
-                    ev = json.loads(line)
-                    ev_ts = float(ev.get("timestamp", 0.0))
-                    if cutoff is not None and ev_ts < cutoff:
-                        continue
-                    recent_events.append(ev)
-                    if ev.get("phase") == "pre":
-                        pre_events.append(ev)
-                        if cid_prefix and str(ev.get("conversation_id") or "").startswith(cid_prefix):
-                            session_pre_events.append(ev)
-                    elif ev.get("phase") == "post":
-                        post_events.append(ev)
-                    elif ev.get("phase") == "pre_invocation":
-                        pre_inv_events.append(ev)
-                except Exception:
-                    continue
-        except Exception:
-            pass
+    for ev in _load_windowed_audit_events(log_path, cutoff):
+        recent_events.append(ev)
+        ph = ev.get("phase")
+        if ph == "pre":
+            pre_events.append(ev)
+            if cid_prefix and str(ev.get("conversation_id") or "").startswith(cid_prefix):
+                session_pre_events.append(ev)
+        elif ph == "post":
+            post_events.append(ev)
+        elif ph == "pre_invocation":
+            pre_inv_events.append(ev)
 
     avg_pre_ms = (
         round(sum(float(e.get("latency_ms", 0.0)) for e in pre_events) / len(pre_events), 2)
@@ -383,6 +557,30 @@ def get_immune_pre_post_scorecard(
     quadratic_tokens_saved = sum(
         int(e.get("quadratic_tokens_saved", 0)) for e in pre_events
     ) + sum(int(e.get("quadratic_tokens_saved", 0)) for e in post_events)
+
+    # Deduplicated direct token savings: cap read_file/view_file savings at 8,000 tokens
+    # (IDE native 800-line ceiling) and credit each (conversation_id, target) once per session.
+    _read_file_max_by_session: Dict[Tuple[str, str], int] = {}
+    _other_direct_saved = 0
+    for e in pre_events:
+        d_sav = int(e.get("direct_tokens_saved", 0) or 0)
+        if d_sav <= 0:
+            continue
+        t_low = str(e.get("tool") or "").strip().lower()
+        if t_low in ("read_file", "view_file"):
+            cid_k = str(e.get("conversation_id") or "")[:8]
+            tgt_k = str(e.get("target") or "").strip()
+            capped = min(8000, d_sav)
+            prev = _read_file_max_by_session.get((cid_k, tgt_k), 0)
+            if capped > prev:
+                _read_file_max_by_session[(cid_k, tgt_k)] = capped
+        else:
+            _other_direct_saved += d_sav
+    for e in post_events:
+        _other_direct_saved += int(e.get("direct_tokens_saved", 0) or 0)
+    dedup_direct_tokens_saved = sum(_read_file_max_by_session.values()) + _other_direct_saved
+    dedup_direct_usd_saved = round((dedup_direct_tokens_saved / 1_000_000.0) * 3.00, 2)
+
     direct_usd_saved = round((direct_tokens_saved / 1_000_000.0) * 3.00, 2)
     reingestion_tokens = max(0, quadratic_tokens_saved - direct_tokens_saved)
     cached_reingestion_usd = round((reingestion_tokens / 1_000_000.0) * 0.30, 2)
@@ -548,6 +746,8 @@ def get_immune_pre_post_scorecard(
         "post_sliced_count": post_sliced_count,
         "direct_tokens_saved": direct_tokens_saved,
         "quadratic_tokens_saved": quadratic_tokens_saved,
+        "dedup_direct_tokens_saved": dedup_direct_tokens_saved,
+        "dedup_direct_usd_saved": dedup_direct_usd_saved,
         "direct_usd_saved": direct_usd_saved,
         "cached_reingestion_usd": cached_reingestion_usd,
         "estimated_usd_saved": estimated_usd_saved,

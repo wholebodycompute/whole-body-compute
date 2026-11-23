@@ -227,6 +227,13 @@ final class UtteranceSegmenter {
             let req = SFSpeechAudioBufferRecognitionRequest()
             req.requiresOnDeviceRecognition = true
             req.shouldReportPartialResults = false
+            if let ctxIdx = CommandLine.arguments.firstIndex(of: "--context-json"),
+               ctxIdx + 1 < CommandLine.arguments.count,
+               let ctxData = CommandLine.arguments[ctxIdx + 1].data(using: .utf8),
+               let ctxArr = try? JSONSerialization.jsonObject(with: ctxData) as? [String],
+               !ctxArr.isEmpty {
+                req.contextualStrings = Array(ctxArr.prefix(100))
+            }
             req.append(buf)
             req.endAudio()
             let spk = self.speaker
@@ -1103,8 +1110,24 @@ def _get_cached_whisper_model() -> Optional[Any]:
         return _CACHED_WHISPER_MODEL
 
 
+def _get_meeting_vocab_bundle() -> Optional[Any]:
+    """Hydrate sub-5ms AST vocabulary bundle from symbols.db for meeting transcription."""
+    try:
+        from whole_body_compute.stt.vocab_fusion import ASTVocabHydrator
+
+        return ASTVocabHydrator().hydrate(skip_eyes=True)
+    except Exception:
+        return None
+
+
 def _get_stt_initial_prompt() -> Optional[str]:
-    """Build technical vocabulary bias prompt from repo symbols (cached)."""
+    """Build technical vocabulary bias prompt from symbols.db ASTVocabHydrator (with ProjectContextExtractor fallback)."""
+    bundle = _get_meeting_vocab_bundle()
+    if bundle is not None and bundle.all_symbols:
+        try:
+            return bundle.to_whisper_prompt(max_terms=64)[:400]
+        except Exception:
+            pass
     try:
         from whole_body_compute.stt.biasing import ProjectContextExtractor
 
@@ -1114,6 +1137,23 @@ def _get_stt_initial_prompt() -> Optional[str]:
         return prompt[:400] if prompt else None
     except Exception:
         return None
+
+
+def _snap_meeting_utterance(raw_text: str, bundle: Optional[Any] = None) -> str:
+    """Apply Stage-2 deterministic AST symbol snapping + PhoneticNormalizer to meeting utterances."""
+    clean = (raw_text or "").strip()
+    if not clean:
+        return ""
+    try:
+        from whole_body_compute.stt.vocab_fusion import ASTSymbolSnapper
+
+        b = bundle if bundle is not None else _get_meeting_vocab_bundle()
+        if b is not None:
+            snapped, _ = ASTSymbolSnapper(b).snap(clean)
+            return snapped.strip()
+    except Exception:
+        pass
+    return clean
 
 
 def _transcribe_pcm_s16le_base64(pcm16_b64: str) -> str:
@@ -1140,7 +1180,8 @@ def _transcribe_pcm_s16le_base64(pcm16_b64: str) -> str:
                 vad_filter=True,
                 initial_prompt=bias_prompt,
             )
-            return " ".join(s.text.strip() for s in segments if s.text.strip()).strip()
+            raw_txt = " ".join(s.text.strip() for s in segments if s.text.strip()).strip()
+            return _snap_meeting_utterance(raw_txt)
     except Exception:
         return ""
 
@@ -1172,6 +1213,12 @@ class _EphemeralAudioTextTap:
                 cmd.append("--mic-only")
             if os.environ.get("WBC_ANE_STT", "1") == "1":
                 cmd.append("--ane-stt")
+                bundle = _get_meeting_vocab_bundle()
+                if bundle is not None and bundle.all_symbols:
+                    try:
+                        cmd.extend(["--context-json", json.dumps(bundle.to_ane_contextual_strings(limit=100))])
+                    except Exception:
+                        pass
             try:
                 self._proc = subprocess.Popen(
                     cmd,
@@ -1208,6 +1255,7 @@ class _EphemeralAudioTextTap:
         except Exception:
             pass
         whisper_model = _get_cached_whisper_model()
+        vocab_bundle = _get_meeting_vocab_bundle()
 
         # Drain stdout completely through EOF so flushed SIGTERM utterances are never dropped
         for raw_line in proc.stdout:
@@ -1232,6 +1280,7 @@ class _EphemeralAudioTextTap:
                         )
                         text = " ".join(s.text.strip() for s in segments if s.text.strip()).strip()
                 if text:
+                    text = _snap_meeting_utterance(text, bundle=vocab_bundle)
                     self._on_utterance(speaker, text, ts)
             except Exception:
                 continue

@@ -526,8 +526,20 @@ class CanonicalMetricsEngine:
     def _get_organ_sla(self) -> Dict[str, Any]:
         global _CACHED_ORGAN_SLA, _CACHED_ORGAN_SLA_TS
         now = time.time()
-        if _CACHED_ORGAN_SLA and (now - _CACHED_ORGAN_SLA_TS) < 30.0:
+        if _CACHED_ORGAN_SLA and (now - _CACHED_ORGAN_SLA_TS) < 60.0:
             return _CACHED_ORGAN_SLA
+
+        sla_cache_file = Path.home() / ".whole_body_compute" / ".organ_sla_cache.json"
+        if sla_cache_file.is_file():
+            try:
+                if (now - sla_cache_file.stat().st_mtime) < 300.0:
+                    cached = json.loads(sla_cache_file.read_text(encoding="utf-8"))
+                    if isinstance(cached, dict) and "healthy_organs_count" in cached:
+                        _CACHED_ORGAN_SLA = cached
+                        _CACHED_ORGAN_SLA_TS = now
+                        return _CACHED_ORGAN_SLA
+            except Exception:
+                pass
 
         try:
             from whole_body_compute.doctor import (
@@ -556,6 +568,11 @@ class CanonicalMetricsEngine:
                 "status": "OPTIMAL" if healthy_5 == total_5 else "DEGRADED",
             }
             _CACHED_ORGAN_SLA_TS = now
+            try:
+                sla_cache_file.parent.mkdir(parents=True, exist_ok=True)
+                sla_cache_file.write_text(json.dumps(_CACHED_ORGAN_SLA), encoding="utf-8")
+            except Exception:
+                pass
         except Exception as exc:
             logger.debug("Organ SLA check fallback: %s", exc)
             _CACHED_ORGAN_SLA = {
@@ -657,8 +674,20 @@ class CanonicalMetricsEngine:
             1 for e in session_events if e.get("decision") in ("ask", "force_ask", "deny")
         )
         bbb_healed_session = sum(1 for e in session_events if e.get("auto_healed"))
-        session_direct_saved = sum(int(e.get("direct_tokens_saved", 0)) for e in session_events)
-        session_quad_saved = sum(int(e.get("quadratic_tokens_saved", 0)) for e in session_events)
+        _sess_read_max: Dict[str, int] = {}
+        _sess_other_direct = 0
+        for e in session_events:
+            d_sav = int(e.get("direct_tokens_saved", 0) or 0)
+            if d_sav <= 0:
+                continue
+            if str(e.get("tool") or "").strip().lower() in ("read_file", "view_file"):
+                tgt_k = str(e.get("target") or "").strip()
+                capped = min(8000, d_sav)
+                if capped > _sess_read_max.get(tgt_k, 0):
+                    _sess_read_max[tgt_k] = capped
+            else:
+                _sess_other_direct += d_sav
+        session_direct_saved = sum(_sess_read_max.values()) + _sess_other_direct
 
         bbb_calls_24h = int(sc_24h.get("total_pre_checks", 0))
         bbb_intercepted_24h = int(sc_24h.get("intercepted_count", 0))
@@ -675,37 +704,28 @@ class CanonicalMetricsEngine:
         bbb_intercepted_7d = int(sc_7d.get("intercepted_count", 0))
         bbb_healed_7d = int(sc_7d.get("auto_healed_count", 0))
 
-        tokens_digested_24h = int(hybrid_24h.get("total_input_tokens", 0)) + int(
-            sc_24h.get("direct_tokens_saved", 0)
-        )
-        tokens_digested_7d = int(hybrid_7d.get("total_input_tokens", 0)) + int(
-            sc_7d.get("direct_tokens_saved", 0)
-        )
+        sc24_dedup_tok = int(sc_24h.get("dedup_direct_tokens_saved", sc_24h.get("direct_tokens_saved", 0)))
+        sc7_dedup_tok = int(sc_7d.get("dedup_direct_tokens_saved", sc_7d.get("direct_tokens_saved", 0)))
+        sc24_dedup_usd = float(sc_24h.get("dedup_direct_usd_saved", sc_24h.get("direct_usd_saved", 0.0)))
+        sc7_dedup_usd = float(sc_7d.get("dedup_direct_usd_saved", sc_7d.get("direct_usd_saved", 0.0)))
+
+        tokens_digested_24h = int(hybrid_24h.get("total_input_tokens", 0)) + sc24_dedup_tok
+        tokens_digested_7d = int(hybrid_7d.get("total_input_tokens", 0)) + sc7_dedup_tok
         tokens_digested_session = session_direct_saved
 
-        cloud_saved_24h = int(sc_24h.get("quadratic_tokens_saved", 0)) + int(
-            hybrid_24h.get("total_tokens_saved", 0)
-        )
-        cloud_saved_7d = int(sc_7d.get("quadratic_tokens_saved", 0)) + int(
-            hybrid_7d.get("total_tokens_saved", 0)
-        )
-        cloud_saved_session = session_quad_saved or session_direct_saved
+        cloud_saved_24h = sc24_dedup_tok + int(hybrid_24h.get("total_tokens_saved", 0))
+        cloud_saved_7d = sc7_dedup_tok + int(hybrid_7d.get("total_tokens_saved", 0))
+        cloud_saved_session = session_direct_saved
 
         usd_saved_24h = round(
-            float(sc_24h.get("estimated_usd_saved", 0.0))
-            + float(hybrid_24h.get("estimated_usd_saved", 0.0)),
+            sc24_dedup_usd + float(hybrid_24h.get("estimated_usd_saved", 0.0)),
             2,
         )
         usd_saved_7d = round(
-            float(sc_7d.get("estimated_usd_saved", 0.0))
-            + float(hybrid_7d.get("estimated_usd_saved", 0.0)),
+            sc7_dedup_usd + float(hybrid_7d.get("estimated_usd_saved", 0.0)),
             2,
         )
-        usd_saved_session = round(
-            (session_direct_saved / 1_000_000.0) * 3.00
-            + (max(0, session_quad_saved - session_direct_saved) / 1_000_000.0) * 0.30,
-            2,
-        )
+        usd_saved_session = round((session_direct_saved / 1_000_000.0) * 3.00, 2)
 
         # Quality & Rework Debits (Gross vs. Net Truth)
         debits = _compute_quality_and_rework_debits(
@@ -824,7 +844,7 @@ class CanonicalMetricsEngine:
         cur_home = str(Path.home()) + "|" + str(os.environ.get("AGY_BRAIN_DIR", ""))
         if not _CACHED_CONVS_7D or _CACHED_CONVS_7D_HOME != cur_home or (now_ts - _CACHED_CONVS_7D_TS) > 30.0:
             if sentry is not None:
-                _CACHED_CONVS_7D = sentry.list_active_conversations(limit=5, max_age_hours=trend_hours)
+                _CACHED_CONVS_7D = sentry.list_active_conversations(limit=50, max_age_hours=trend_hours)
             else:
                 _CACHED_CONVS_7D = []
             if not _CACHED_CONVS_7D:
@@ -845,7 +865,7 @@ class CanonicalMetricsEngine:
                                 continue
                         cc_files.sort(key=lambda x: x[0], reverse=True)
                         cc_convs = []
-                        for mt, jf in cc_files[:5]:
+                        for mt, jf in cc_files[:50]:
                             try:
                                 raw_lines = [
                                     ln for ln in jf.read_text(encoding="utf-8", errors="ignore").splitlines() if ln.strip()
@@ -1240,7 +1260,10 @@ class CanonicalMetricsEngine:
         rework_hrs_session = debits["rework_hours_debit_session"]
         net_hrs_session = max(0.0, round(gross_hrs_session - rework_hrs_session, 2))
 
+        resc_sess = int(debits.get("rescues_session", 0))
         quality_scorecard = {
+            "first_time_right_pct_session": 0.0 if resc_sess > 0 else 100.0,
+            "human_rescue_count_session": resc_sess,
             "first_time_right_pct": debits["first_time_right_pct_24h"],
             "first_time_right_pct_7d": debits["first_time_right_pct_7d"],
             "human_rescue_count": debits["rescues_24h"],
@@ -1622,7 +1645,7 @@ class CanonicalMetricsEngine:
     ) -> Dict[str, Any]:
         """Build the complete 5-Pillar Canonical Metrics Report dictionary."""
         t0 = time.perf_counter()
-        global _CACHED_CONVS_7D, _CACHED_CONVS_7D_TS
+        global _CACHED_CONVS_7D, _CACHED_CONVS_7D_TS, _CACHED_CONVS_7D_HOME
 
         sentry: Any = None
         dot_store: Any = None
@@ -1641,12 +1664,14 @@ class CanonicalMetricsEngine:
             dot_store = None
 
         now_ts = time.time()
+        cur_home = str(Path.home()) + "|" + str(os.environ.get("AGY_BRAIN_DIR", ""))
         trend_hours = max(24.0, _window_to_seconds(trend_window, 7 * 86400.0) / 3600.0)
         active_metrics: Any = None
         if sentry is not None:
-            if not _CACHED_CONVS_7D or (now_ts - _CACHED_CONVS_7D_TS) > 30.0:
-                _CACHED_CONVS_7D = sentry.list_active_conversations(limit=5, max_age_hours=trend_hours)
+            if not _CACHED_CONVS_7D or _CACHED_CONVS_7D_HOME != cur_home or (now_ts - _CACHED_CONVS_7D_TS) > 30.0:
+                _CACHED_CONVS_7D = sentry.list_active_conversations(limit=50, max_age_hours=trend_hours)
                 _CACHED_CONVS_7D_TS = now_ts
+                _CACHED_CONVS_7D_HOME = cur_home
             if conv_id:
                 active_metrics = sentry.inspect_conversation(conv_id=conv_id)
             else:
@@ -1941,7 +1966,7 @@ def format_metrics_terminal_table(report: Dict[str, Any]) -> str:
     det_sess = (q.get("deterministic_gate_ftr") or {}).get("session") or {}
     det_24h = (q.get("deterministic_gate_ftr") or {}).get("window_24h") or {}
     det_7d = (q.get("deterministic_gate_ftr") or {}).get("trend_7d") or {}
-    infl_cell = f"{p2.get('early_step_sec', 0.0):.1f}->{p2.get('recent_step_sec', 0.0):.1f}s ({p2.get('latency_inflation_ratio', 1.0):.2f}x)"
+    infl_cell = f"{p2.get('early_step_sec', 0.0):.1f}->{p2.get('recent_step_sec', 0.0):.1f}s {p2.get('latency_inflation_ratio', 1.0):.2f}x"
     det_sess_cell = (
         f"{det_sess.get('attempt_1_ftr_pct', 100.0):.1f}% ({det_sess.get('attempt_1_passed', 0)}/{det_sess.get('attempt_1_total', 0)})"
         if int(det_sess.get("attempt_1_total", 0)) > 0
@@ -1953,9 +1978,9 @@ def format_metrics_terminal_table(report: Dict[str, Any]) -> str:
         else "N/A (0/0)"
     )
     det_7d_cell = (
-        f"{q.get('deterministic_gate_attempt_1_pct_7d', 100.0):.1f}% (7d gate FTR)"
+        f"{q.get('deterministic_gate_attempt_1_pct_7d', 100.0):.1f}% ({det_7d.get('attempt_1_passed', 0)}/{det_7d.get('attempt_1_total', 0)} 7D)"
         if int(det_7d.get("attempt_1_total", 0)) > 0
-        else "N/A (0/0 gates)"
+        else "N/A (0/0 7D)"
     )
     t_f24 = int(p2.get("test_flushes_24h", 0) or 0)
     t_caps = int(p2.get("test_state_capsules", 0) or 0)
@@ -2008,10 +2033,9 @@ def format_metrics_terminal_table(report: Dict[str, Any]) -> str:
         "  💰 1. BICAMERAL FINOPS & TOKEN SHIELD",
         f"    • Local Execution ($0 CLI + Shield)  │ {p1.get('local_execution_pct_session', 0.0):>14.1f}% │ {p1.get('local_execution_pct_24h', 0.0):>16.1f}% │ {p1.get('local_execution_pct_7d', 0.0):>6.1f}% (>=85% tgt)",
         f"    • Local Model & AST Offload Only     │ {p1.get('local_model_shield_pct_session', 0.0):>14.1f}% │ {p1.get('local_model_shield_pct_24h', 0.0):>16.1f}% │ {p1.get('local_model_shield_pct_7d', 0.0):>6.1f}% (scout/AST)",
-        f"    • Cloud Tokens (Gross -> Net)        │ {p1.get('cloud_tokens_saved_session', 0):>15,} │ {p1.get('gross_cloud_tokens_saved_24h', p1.get('cloud_tokens_saved_24h', 0)):>8,} -> {p1.get('net_cloud_tokens_saved_24h', p1.get('cloud_tokens_saved_24h', 0)):<7,} │ {p1.get('net_savings_ratio_pct', 100.0):>5.1f}% retention",
-        f"    • Estimated USD (Gross -> Net)       │ ${p1.get('estimated_usd_saved_session', 0.0):>14.2f} │ ${p1.get('gross_usd_saved_24h', p1.get('estimated_usd_saved_24h', 0.0)):>7.2f} -> ${p1.get('net_usd_saved_24h', p1.get('estimated_usd_saved_24h', 0.0)):<6.2f} │ -${p1.get('rework_usd_debit_24h', 0.0):.2f} debit",
+        f"    • {'Cloud Tokens (Gross -> Net)' if p1.get('gross_cloud_tokens_saved_24h', p1.get('cloud_tokens_saved_24h', 0)) != p1.get('net_cloud_tokens_saved_24h', p1.get('cloud_tokens_saved_24h', 0)) else 'Cloud Tokens Saved':<34} │ {p1.get('cloud_tokens_saved_session', 0):>15,} │ {(str(format(p1.get('gross_cloud_tokens_saved_24h', p1.get('cloud_tokens_saved_24h', 0)), '>8,')) + ' -> ' + str(format(p1.get('net_cloud_tokens_saved_24h', p1.get('cloud_tokens_saved_24h', 0)), '<7,'))) if p1.get('gross_cloud_tokens_saved_24h', p1.get('cloud_tokens_saved_24h', 0)) != p1.get('net_cloud_tokens_saved_24h', p1.get('cloud_tokens_saved_24h', 0)) else format(p1.get('net_cloud_tokens_saved_24h', p1.get('cloud_tokens_saved_24h', 0)), '>17,')} │ {(format(p1.get('net_savings_ratio_pct', 100.0), '>5.1f') + '% retention') if p1.get('gross_cloud_tokens_saved_24h', p1.get('cloud_tokens_saved_24h', 0)) != p1.get('net_cloud_tokens_saved_24h', p1.get('cloud_tokens_saved_24h', 0)) else (format(p1.get('cloud_tokens_saved_7d', 0), '>11,') + ' (7D)')}",
+        f"    • {'Estimated USD (Gross -> Net)' if p1.get('rework_usd_debit_24h', 0.0) > 0.0 else 'Estimated USD Saved':<34} │ ${p1.get('estimated_usd_saved_session', 0.0):>14.2f} │ {('$' + format(p1.get('gross_usd_saved_24h', p1.get('estimated_usd_saved_24h', 0.0)), '>7.2f') + ' -> $' + format(p1.get('net_usd_saved_24h', p1.get('estimated_usd_saved_24h', 0.0)), '<6.2f')) if p1.get('rework_usd_debit_24h', 0.0) > 0.0 else ('$' + format(p1.get('net_usd_saved_24h', p1.get('estimated_usd_saved_24h', 0.0)), '>16.2f'))} │ {('-$' + format(p1.get('rework_usd_debit_24h', 0.0), '.2f') + ' debit') if p1.get('rework_usd_debit_24h', 0.0) > 0.0 else ('$' + format(p1.get('estimated_usd_saved_7d', 0.0), '>10.2f') + ' (7D)')}",
         f"    • BBB Calls / Intercepts / Heals     │ {str(p1.get('bbb_total_calls_session', 0)) + '/' + str(p1.get('bbb_intercepted_session', 0)) + '/' + str(p1.get('bbb_auto_healed_session', 0)):>15} │ {str(p1.get('bbb_total_calls_24h', 0)) + '/' + str(p1.get('bbb_intercepted_24h', 0)) + '/' + str(p1.get('bbb_auto_healed_24h', 0)):>17} │ {p1.get('bbb_pass_rate_pct', 100.0):>10.1f}% pass",
-        "    • SWE-bench Ref (k=3, 60 Trials)     │ 1.48x (-32.4%)  │ 1.52x net (-34.3%)│ 1.34x runway • -18.8% turns",
         "─" * 98,
         "  🧠 2. COGNITIVE HEALTH & THREAD HYGIENE",
         f"    • Context Saturation Index (CSI)     │ {str(p2.get('csi_score', 0.0)) + ' (' + str(p2.get('csi_status', 'GREEN')) + ')':>15} │ {p2.get('avg_csi_24h', 0.0):>13.2f} avg │ {p2.get('avg_csi_7d', 0.0):>13.2f} avg",
@@ -2020,21 +2044,17 @@ def format_metrics_terminal_table(report: Dict[str, Any]) -> str:
         f"    • Ultradian Glymphatic Flushes       │ {p2.get('glymphatic_flushes_session', 0):>15} │ {flush_24_cell:>17} │ {flush_7d_cell}",
         "─" * 98,
         "  ⚡ 3. VELOCITY & AUTONOMOUS QUALITY",
-        f"    • Quality Tier / First-Time-Right    │ {'100.0% session':>15} │ {q.get('first_time_right_pct', 100.0):>10.1f}% FTR ({q.get('quality_tier', 'SOLID')[:5]}) │ {q.get('human_rescue_count', 0)} rescues ({q.get('human_rescue_rate_pct', 0.0):.1f}%)",
+        f"    • Quality Tier / First-Time-Right    │ {(format(q.get('first_time_right_pct_session', 100.0), '.1f') + '% (' + str(q.get('human_rescue_count_session', 0)) + ' resc)'):>15} │ {q.get('first_time_right_pct', 100.0):>8.1f}% ({q.get('quality_tier', 'SOLID')[:5]}) │ {q.get('human_rescue_count', 0)} rescues ({q.get('human_rescue_rate_pct', 0.0):.1f}%)",
         f"    • Deterministic Gate Attempt-#1 FTR  │ {det_sess_cell:>15} │ {det_24h_cell:>17} │ {det_7d_cell:>17}",
-        f"    • Time Reclaimed (Gross -> Net)      │ {p3.get('hours_reclaimed_session', 0.0):>14.2f}h │ {p3.get('gross_hours_reclaimed_24h', p3.get('hours_reclaimed_24h', 0.0)):>7.2f}h -> {p3.get('net_hours_reclaimed_24h', p3.get('hours_reclaimed_24h', 0.0)):<6.2f}h │ -{p3.get('rework_hours_debit_24h', 0.0):.2f}h debit",
-        "    • Published Benchmark Ref (SWE-bench)│ -18.8% turns    │ -32.4% context    │ 100.0% Pass^3 (30/30)",
-        f"    • Edge Latency / Unified RAM Ingress │ {edge_cell:>15} │ {ingress_cell:>17} │ <0.200ms RAM SLA",
-        f"    • AST SecGate / LocalBench SMB Gate  │ {p3.get('ast_secgate_pass_rate_pct', 100.0):>10.1f}% AST │ {p3.get('local_qa_pass_rate_pct', 100.0):>13.1f}% QA │ {rem.get('localbench_passed_cases', 29)}/{rem.get('localbench_total_cases', 30)} ({rem.get('localbench_pass_rate_pct', 96.7):.1f}%{'' if rem.get('localbench_empirical') else ' ref'})",
+        f"    • {'Time Reclaimed (Gross -> Net)' if p3.get('rework_hours_debit_24h', 0.0) > 0.0 else 'Time Reclaimed':<34} │ {(format(p3.get('seconds_saved_session', 0.0), '>14.1f') + 's') if (float(p3.get('hours_reclaimed_session', 0.0)) < 0.05 and float(p3.get('seconds_saved_session', 0.0)) > 0.0) else (format(p3.get('hours_reclaimed_session', 0.0), '>14.2f') + 'h')} │ {(format(p3.get('gross_hours_reclaimed_24h', p3.get('hours_reclaimed_24h', 0.0)), '>7.2f') + 'h -> ' + format(p3.get('net_hours_reclaimed_24h', p3.get('hours_reclaimed_24h', 0.0)), '<6.2f') + 'h') if p3.get('rework_hours_debit_24h', 0.0) > 0.0 else (format(p3.get('net_hours_reclaimed_24h', p3.get('hours_reclaimed_24h', 0.0)), '>16.2f') + 'h')} │ {('-' + format(p3.get('rework_hours_debit_24h', 0.0), '.2f') + 'h debit') if p3.get('rework_hours_debit_24h', 0.0) > 0.0 else (format(p3.get('hours_reclaimed_7d', 0.0), '>10.2f') + 'h (7D)')}",
         "─" * 98,
         "  🫀 4. HARDWARE & ORGAN VITALS",
         f"    • Thermal / Free Unified RAM / Swap  │ {p4.get('thermal_state', 'NORMAL'):>15} │ {str(p4.get('ram_free_gb', 0.0)) + 'G/' + str(p4.get('ram_total_gb', 64.0)) + 'G free':>17} │ {p4.get('swap_used_gb', 0.0):>8.2f}GB swap",
         f"    • Radix KV-Cache / 5-Organ SLA       │ {str(warm_prefixes) + ' prefixes':>15} │ {radix_ttfb_cell:>17} │ {sla.get('healthy_organs_count', 5)}/{sla.get('total_organs_count', 5)} ({sla.get('sla_pct', 100.0):.0f}% SLA)",
         "─" * 98,
         "  🚀 5. WORKSPACE & HARNESS PROTECTION",
-        f"    • Awakened Workspaces (`body begin`) │ {'WIRED' if awaken.get('current_workspace_wired') else 'UNWIRED':>15} │ {str(awaken.get('local_protected_repos_count', awaken.get('total_workspaces_awakened', 1))) + ' local repos':>17} │ {str(awaken.get('external_installs_count', 0)) + ' external':>17} ({', '.join(awaken.get('awakened_workspace_names', ['Whole Body Compute'])[:3]) + (' +' + str(len(awaken.get('awakened_workspace_names', [])) - 3) + ' more' if len(awaken.get('awakened_workspace_names', [])) > 3 else '')})",
-        f"    • MCP & BBB Tool Invocations         │ {p5.get('mcp_tool_invocations_session', 0):>15,} │ {p5.get('mcp_tool_invocations_24h', 0):>17,} │ {p5.get('mcp_tool_invocations_7d', 0):>17,}",
-        p5_last_row,
+        f"    • Awakened Workspaces (`body begin`) │ {'WIRED' if awaken.get('current_workspace_wired') else 'UNWIRED':>15} │ {str(awaken.get('local_protected_repos_count', awaken.get('total_workspaces_awakened', 1))) + ' local repos':>17} │ {', '.join(awaken.get('awakened_workspace_names', ['Whole Body Compute'])[:3]) + (' +' + str(len(awaken.get('awakened_workspace_names', [])) - 3) + ' more' if len(awaken.get('awakened_workspace_names', [])) > 3 else '')}",
+        f"    • Wired IDE Harnesses                │ {str(len(harnesses_list)) + ' wired':>15} │ {', '.join(harnesses_list)[:17]:>17} │ Pre-commit SecGate",
         "═" * 98,
         "",
     ]

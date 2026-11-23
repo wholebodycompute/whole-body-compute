@@ -254,8 +254,18 @@ class AntibodyRegistry:
             }
 
         norm = self.normalize_payload(payload)
+        _style_vectors = {
+            "typography_em_dash",
+            "typography_dash",
+            "smart_quote",
+            "lexical_slop",
+            "invisible_mark",
+            "cjk_token_leak",
+        }
         for rec in self._antibodies.values():
             if vector_filter and rec.vector != vector_filter:
+                continue
+            if not vector_filter and rec.vector in _style_vectors:
                 continue
             if rec.signature and len(rec.signature) >= 6 and rec.signature in norm:
                 rec.hit_count += 1

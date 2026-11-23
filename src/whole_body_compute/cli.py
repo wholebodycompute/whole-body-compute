@@ -281,11 +281,37 @@ def _dispatch_main(
         )
         as_json = bool(getattr(args, "json", False))
 
+        if getattr(args, "add_word", None) is not None:
+            from whole_body_compute.stt.vocab_fusion import add_personal_vocab_word
+
+            term = str(args.add_word).strip()
+            if not term:
+                if as_json:
+                    print(json.dumps({"ok": False, "error": "Empty term"}, indent=2))
+                else:
+                    print("❌ Cannot add an empty word to vocab.txt", file=sys.stderr)
+                return 1
+            vocab_path, added, terms = add_personal_vocab_word(term)
+            payload = {
+                "ok": True,
+                "term": term,
+                "added": added,
+                "vocab_path": str(vocab_path),
+                "total_terms": len(terms),
+            }
+            if as_json:
+                print(json.dumps(payload, indent=2))
+            elif added:
+                print(f"✅ Added '{term}' to {vocab_path} ({len(terms)} custom terms)")
+            else:
+                print(f"ℹ️  '{term}' is already in {vocab_path} ({len(terms)} custom terms)")
+            return 0
+
         if getattr(args, "install", False) or getattr(args, "uninstall", False):
-            from whole_body_compute.daemon import manage_daemons
+            from whole_body_compute.daemon import manage_launchd_daemon
 
             action = "install" if getattr(args, "install", False) else "uninstall"
-            res = manage_daemons(action=action)
+            res = manage_launchd_daemon(action=action)
             if as_json:
                 print(json.dumps(res, indent=2))
             else:
@@ -653,7 +679,43 @@ def _dispatch_main(
             print(format_savings_leaderboard(summary, top_n=top_n))
         else:
             print(format_savings_receipt(summary))
+            try:
+                from whole_body_compute.updater import format_update_notice
+
+                notice = format_update_notice()
+                if notice:
+                    print(f"\n{notice}")
+            except Exception:
+                pass
         return 0
+
+    if cmd == "update":
+        from whole_body_compute.updater import run_self_update
+
+        res = run_self_update(
+            dry_run=bool(getattr(args, "dry_run", False)),
+            check_only=bool(getattr(args, "check", False)),
+        )
+        if getattr(args, "json", False):
+            print(json.dumps(res, indent=2))
+            return 0 if res.get("status") != "error" else 1
+        if not res.get("update_available"):
+            print(f"whole-body-compute {res.get('current_version')} is up to date.")
+            return 0
+        if getattr(args, "check", False) or getattr(args, "dry_run", False):
+            print(
+                f"Update available: {res.get('current_version')} -> {res.get('latest_version')} "
+                f"({res.get('install_method')}: `{res.get('upgrade_command')}`)"
+            )
+            return 0
+        if res.get("status") == "updated":
+            print(f"Updated whole-body-compute to {res.get('latest_version')}. Run `body begin` to refresh hooks.")
+            return 0
+        if res.get("status") == "editable_checkout":
+            print(res.get("message"))
+            return 0
+        print(f"Update failed ({res.get('returncode')}): {res.get('stderr') or res.get('stdout')}", file=sys.stderr)
+        return 1
 
     if cmd in ("doctor", "status", "organs"):
         try:
@@ -666,6 +728,14 @@ def _dispatch_main(
         is_json = bool(getattr(args, "json", False))
         if not is_json:
             print(format_organ_doctor_table(report))
+            try:
+                from whole_body_compute.updater import format_update_notice
+
+                notice = format_update_notice()
+                if notice:
+                    print(f"\n{notice}")
+            except Exception:
+                pass
 
         if getattr(args, "exercise", False):
             reflex = exercise_10_organ_reflex_loop()

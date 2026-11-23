@@ -3931,6 +3931,7 @@ def run_multi_harness_finops_audit(
     workspace_dir: Optional[Path] = None,
     home_dir: Optional[Path] = None,
     explicit_price_override: bool = False,
+    unshielded_only: bool = False,
 ) -> Dict[str, Any]:
     now = time.time()
     window_seconds = max(1, int(days)) * 86400.0 if days > 0 else 0.0
@@ -4102,6 +4103,8 @@ def run_multi_harness_finops_audit(
         + continue_recs
         + zed_recs
     )
+    if unshielded_only:
+        all_records = [r for r in all_records if not r.get("wbc_shielded")]
     all_records.sort(
         key=lambda r: (r.get("exact_api_spend_usd", 0.0), r.get("hal_saved_usd", 0.0), r["estimated_spend_usd"]),
         reverse=True,
@@ -4492,6 +4495,8 @@ def run_multi_harness_finops_audit(
         ),
         2,
     )
+    if unshielded_only:
+        wbc_shield_telemetry["wbc_active_on_machine"] = False
     if wbc_shield_telemetry.get("wbc_active_on_machine") and wbc_shield_telemetry.get("shielded_sessions", 0) > 0:
         eff_saved_total = unshielded_projected_saved
         eff_wbc_spend = round(max(0.0, exact_api_spend_total - eff_saved_total), 2)
@@ -4769,6 +4774,7 @@ def format_standalone_receipt(
             lines.append(
                 f"  {BOLD}Measured Hook Shield{RESET}      {GREEN}{meas_slices:,} bounded slices{RESET} • {_fmt_tok(meas_dtok)} direct tok blocked"
             )
+        lines.append(f"  {BOLD}Estimated Limit Multiplier{RESET} {quota_str}")
         if unwired_save > 0 and unwired_harnesses:
             uw_lbl = ", ".join(h.replace("_", "-") for h in unwired_harnesses[:2])
             lines.append(
@@ -5121,6 +5127,7 @@ def format_standalone_receipt(
             divider,
             f"{BOLD}{GREEN}Start Saving Now - Copy & Paste to Install (100% Free Open-Core):{RESET}",
             f"  • {BOLD}Install:{RESET}   {CYAN}curl -fsSL https://wholebodycompute.com/begin/audit | sh{RESET}",
+            f"               {DIM}Wires automatic hooks into your active agents - just restart them & code normally.{RESET}",
             f"  • {BOLD}Alt:{RESET}       {DIM}uv tool install whole-body-compute && body begin{RESET}",
             f"  • {BOLD}Share:{RESET}     {DIM}curl -sSL https://wholebodycompute.com/audit.py | python3{RESET}",
             f"  • {BOLD}Privacy:{RESET}   {DIM}Read-only scan; 1 anon ping (--offline or DO_NOT_TRACK=1){RESET}",
@@ -5375,6 +5382,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--home-dir", dest="home_dir", default=None, help="Custom user home directory for Turn-0 global MCP/instruction scan")
     parser.add_argument("--export-receipt", dest="export_receipt", default=None, help="Optional path to export receipt")
     parser.add_argument("--json", action="store_true", help="Output structured JSON")
+    parser.add_argument("--unshielded-only", action="store_true", help="Analyze only unshielded sessions as if WBC were not yet installed")
     args = parser.parse_args(argv)
 
     audit = run_multi_harness_finops_audit(
@@ -5396,6 +5404,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         workspace_dir=Path(args.workspace_dir) if args.workspace_dir else None,
         home_dir=Path(args.home_dir) if args.home_dir else None,
         explicit_price_override=explicit_price,
+        unshielded_only=bool(args.unshielded_only),
     )
     show_team = bool(explicit_seats or args.seats > 1)
     if args.export_receipt:

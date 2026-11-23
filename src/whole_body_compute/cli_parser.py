@@ -368,6 +368,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ears.add_argument("--active-file", default=None, help="Explicit active file path to prioritize in P0 AST vocab")
     p_ears.add_argument("--paste", action="store_true", help="Paste AST-grounded transcript into the focused macOS app without stealing focus")
     p_ears.add_argument("--upgrade-model", action="store_true", help="Opt-in 1-command install of mlx-whisper (Apple Silicon) or faster-whisper")
+    p_ears.add_argument("--add-word", dest="add_word", default=None, help="Add a custom term to ~/.whole_body_compute/vocab.txt for AST vocab fusion")
     p_ears.add_argument("--daemon", action="store_true", help="Run silently in background as a LaunchAgent (used by com.wholebodycompute.ears)")
     p_ears.add_argument("--install", action="store_true", help="Install & start com.wholebodycompute.ears background LaunchAgent (no terminal needed)")
     p_ears.add_argument("--uninstall", action="store_true", help="Stop & remove com.wholebodycompute.ears background LaunchAgent")
@@ -491,6 +492,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sync.add_argument("--path", default=".agents/team_exemplars.jsonl", help="Path to shared team exemplars JSONL ledger")
     p_sync.add_argument("--json", action="store_true", help="Output structured JSON")
+
+    # body update
+    p_upd = subparsers.add_parser(
+        "update",
+        help="[Core] Check PyPI for a newer version of whole-body-compute and upgrade in-place",
+    )
+    p_upd.add_argument("--check", action="store_true", help="Only check if an update is available")
+    p_upd.add_argument("--dry-run", action="store_true", help="Print the upgrade command without running it")
+    p_upd.add_argument("--json", action="store_true", help="Emit JSON output")
 
     # body license (aliases: tier, pricing, upgrade, plan, activate)
     p_lic = subparsers.add_parser(

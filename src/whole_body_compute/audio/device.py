@@ -657,6 +657,7 @@ _IGNORED_EXTERNAL_MIC_DAEMONS = (
     "historicalaudiod",
     "audioclocksyncd",
     "heard",
+    "replayd",
     "backgroundmusic",
     "loopback",
     "loopbackd",
@@ -666,7 +667,11 @@ _IGNORED_EXTERNAL_MIC_DAEMONS = (
     "krisp",
     "sound.appex",
     "systemsettings",
+    "granola",
     "wbc-meeting-tap",
+    "wholebodycomputeears",
+    "whole body compute.app",
+    "whole_body_compute",
     "whole-body-compute",
     "screenpipe",
     "limitless",
@@ -801,6 +806,10 @@ def _resolve_external_mic_pid(pid: int) -> Tuple[str, bool]:
                 "voicefi" in args_lower
                 or "/vifi" in args_lower
                 or args_lower.startswith("vifi ")
+                or "whole_body_compute" in args_lower
+                or "whole-body-compute" in args_lower
+                or "body ears" in args_lower
+                or "body transcribe" in args_lower
                 or "pytest" in args_lower
             ):
                 with _EXT_MIC_LOCK:

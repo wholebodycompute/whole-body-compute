@@ -58,5 +58,6 @@ legal/*.md
 # Cloudflare Wrangler local caches
 .wrangler/
 workers/**/.wrangler/
+recipes/candidates/
 
 

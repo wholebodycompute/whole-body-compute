@@ -147,8 +147,8 @@ class TTSConfig(BaseModel):
 
 
 class STTConfig(BaseModel):
-    provider: Literal["auto", "whisper_local", "mlx_whisper", "groq", "apple_speech"] = (
-        "whisper_local"
+    provider: Literal["auto", "ane_sfspeech", "whisper_local", "mlx_whisper", "groq", "apple_speech"] = (
+        "auto"
     )
     model_size: str = "base.en"
     mlx_model: str = "mlx-community/whisper-large-v3-turbo"

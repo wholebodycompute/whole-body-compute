@@ -528,22 +528,32 @@ def check_organ_status() -> List[OrganHealth]:
     organs: List[OrganHealth] = []
 
     # 1. Ears
-    from whole_body_compute.audio.vad import find_silero_vad_model
     from whole_body_compute.audio.turn_detector import find_smart_turn_model
-    from whole_body_compute.stt.apple_speech import resolve_apple_speech_binary
+    from whole_body_compute.stt.local_ears import LocalEarsEngine, _get_ane_helper_binary
 
-    vad_path = find_silero_vad_model()
+    vad_path = None
+    try:
+        from whole_body_compute.audio.vad import find_silero_vad_model
+
+        vad_path = find_silero_vad_model()
+    except Exception:
+        pass
     turn_path = find_smart_turn_model()
-    stt_bin = resolve_apple_speech_binary()
+    ears_st = LocalEarsEngine().status()
+    stt_backend = ears_st.get("backend", "unavailable")
+    stt_bin = _get_ane_helper_binary()
 
-    if vad_path and turn_path and stt_bin:
+    if stt_backend != "unavailable":
         organs.append(
             OrganHealth(
                 organ="1. Ears",
-                name="Acoustic VAD, Smart-Turn & Apple Speech",
+                name="Sovereign Local STT & AST Vocab-Fusion",
                 status="healthy",
-                details=f"Silero VAD ({vad_path.name}) + Smart-Turn ({turn_path.name}) + AppleSpeech",
-                file_path=str(vad_path),
+                details=(
+                    f"Backend={stt_backend} • {ears_st.get('symbols_indexed', 0)} AST symbols "
+                    f"({ears_st.get('hydration_ms', 0.0)}ms)"
+                ),
+                file_path=str(stt_bin) if stt_bin else None,
             )
         )
     else:
@@ -553,7 +563,7 @@ def check_organ_status() -> List[OrganHealth]:
         if not turn_path:
             missing.append("smart-turn-v3.2-cpu.onnx")
         if not stt_bin:
-            missing.append("apple_speech_stream")
+            missing.append("WholeBodyComputeEars")
         organs.append(
             OrganHealth(
                 organ="1. Ears",

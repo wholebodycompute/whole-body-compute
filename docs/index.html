@@ -1160,6 +1160,7 @@
             <button type="button" class="term-tab" id="tab-audit" onclick="setTab('audit')">audit spend</button>
             <button type="button" class="term-tab" id="tab-uv" onclick="setTab('uv')">uv / pipx</button>
             <button type="button" class="term-tab" id="tab-commit" onclick="setTab('commit')">$0 commit</button>
+            <button type="button" class="term-tab" id="tab-ears" onclick="setTab('ears')">local dictate</button>
             <button type="button" class="term-tab" id="tab-handoff" onclick="setTab('handoff')">fresh chat</button>
             <button type="button" class="term-tab" id="tab-candidates" onclick="setTab('candidates')">muscle memory</button>
           </div>
@@ -1331,9 +1332,9 @@
         </div>
 
         <div class="anatomy-card">
-          <span class="anatomy-tag">Eyes &amp; Hands</span>
-          <h3>Click native UIs in 4ms.</h3>
-          <p>Reads live macOS Accessibility DOM elements in <code>38 tokens</code> instead of uploading 3,500-token Retina screenshots on every click.</p>
+          <span class="anatomy-tag">Eyes, Hands &amp; Ears</span>
+          <h3>Click UIs &amp; dictate code locally.</h3>
+          <p>Reads live Mac app elements in <code>38 tokens</code> instead of heavy screenshots, and lets you dictate code 100% locally (<code>body ears</code>, Hold <code>Fn</code>) with automatic spelling for your repo&rsquo;s real function and file names.</p>
         </div>
 
         <div class="anatomy-card">
@@ -1426,7 +1427,8 @@
             <div class="tier-price">$0 <span>/ forever</span></div>
             <p class="tier-desc">Local reflexes and muscle memory.</p>
             <ul class="tier-list">
-              <li><span class="check">✓</span><span>Unlimited <code>body eyes</code>, <code>hands</code> &amp; <code>commit</code></span></li>
+              <li><span class="check">✓</span><span>Unlimited <code>body eyes</code>, <code>hands</code>, <code>ears</code> &amp; <code>commit</code></span></li>
+              <li><span class="check">✓</span><span>100% local AST code dictation (Hold <code>Fn</code>)</span></li>
               <li><span class="check">✓</span><span>Default-on Muscle Memory (<code>body candidates</code>)</span></li>
               <li><span class="check">✓</span><span>Unlimited <code>body audit-spend</code> &amp; <code>doctor</code></span></li>
               <li><span class="check">✓</span><span>50 / day AST slices &amp; 25 Metal offloads</span></li>
@@ -1518,6 +1520,10 @@
       commit: {
         raw: "body commit",
         html: '<span class="cmd-hl">body commit</span> <span style="color:var(--term-muted)"># &lt;20ms AST-guided $0 git commit + secret guard</span>'
+      },
+      ears: {
+        raw: "body ears",
+        html: '<span class="cmd-hl">body ears</span> <span style="color:var(--term-muted)"># Hold Fn / Fn+Space 100% local AST code dictation ($0 forever)</span>'
       },
       handoff: {
         raw: "body flush --auto",

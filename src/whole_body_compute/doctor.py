@@ -1409,8 +1409,6 @@ def check_organ_brainstem() -> Dict[str, Any]:
         status = "warn"
         details = "Local models cold on disk (:9379 & Ollama offline)"
 
-    details += f" • Radix KV: {radix_hash}"
-
     hw_accel_info: Dict[str, Any] = {}
     try:
         from whole_body_compute.local.metal_accel import get_hardware_accel_status
@@ -1418,7 +1416,7 @@ def check_organ_brainstem() -> Dict[str, Any]:
         hw_st = get_hardware_accel_status()
         hw_accel_info = hw_st.to_dict()
         if hw_st.metal_fused_kernels_ready:
-            details += f" • 3-Organ Accel: {hw_st.gpu_name} (Metal Tile + AMX + ANE, {hw_st.page_size_bytes // 1024}KB Zero-Copy)"
+            details += f" • 3-Organ Accel: {hw_st.gpu_name}"
     except Exception:
         pass
 
@@ -1580,6 +1578,22 @@ def check_organ_mouth_and_ears() -> Dict[str, Any]:
     except Exception:
         pass
 
+    ears_backend = "unavailable"
+    ears_symbols = 0
+    fn_conflict = False
+    fn_label = "Default"
+    try:
+        from whole_body_compute.stt.local_ears import LocalEarsEngine
+
+        ears_st = LocalEarsEngine().status()
+        ears_backend = str(ears_st.get("backend") or "unavailable")
+        ears_symbols = int(ears_st.get("symbols_indexed") or 0)
+        fn_chk = ears_st.get("fn_key_check") or {}
+        fn_conflict = bool(fn_chk.get("conflict", False))
+        fn_label = str(fn_chk.get("label") or "Default")
+    except Exception:
+        pass
+
     ci_mode = bool(
         os.environ.get("WBC_CI") == "1"
         or os.environ.get("CI") == "1"
@@ -1594,6 +1608,7 @@ def check_organ_mouth_and_ears() -> Dict[str, Any]:
         else "TTS daemon standby (cold)"
     )
     tts_note = "TTS daemon online (:9377)" if tts_online else tts_standby_note
+    stt_note = f"STT:{ears_backend} ({ears_symbols} AST symbols)"
 
     if is_bt:
         status = "warn"
@@ -1603,7 +1618,7 @@ def check_organ_mouth_and_ears() -> Dict[str, Any]:
         status = "pass"
 
     codec_note = "Bluetooth HFP downgrade risk" if is_bt else "Wideband CoreAudio clean"
-    details = f"{mic_name} ({codec_note}) • {tts_note} • <25w budget enforced"
+    details = f"{mic_name} ({codec_note}) • {stt_note} • {tts_note} • <25w budget enforced"
 
     return {
         "organ_num": "03",
@@ -1619,6 +1634,10 @@ def check_organ_mouth_and_ears() -> Dict[str, Any]:
             "tts_online": tts_online,
             "voicefi_installed": has_voicefi,
             "mlx_audio_installed": has_mlx_audio,
+            "stt_backend": ears_backend,
+            "ast_symbols_indexed": ears_symbols,
+            "fn_key_conflict": fn_conflict,
+            "fn_key_label": fn_label,
         },
     }
 

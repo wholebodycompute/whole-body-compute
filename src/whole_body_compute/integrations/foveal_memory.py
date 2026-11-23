@@ -1598,6 +1598,43 @@ class FovealVisionMCPServer:
                     "required": ["app_name", "role", "action"],
                 },
             },
+            {
+                "name": "transcribe_audio_local",
+                "description": "100% local on-device Speech-to-Text (`body ears` / `body transcribe`) grounded in live `symbols.db` AST vocabulary (Apple Neural Engine `SFSpeechRecognizer` or Metal `mlx-whisper`). Zero audio files written to disk on mic capture, zero cloud egress.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "audio_path": {
+                            "type": "string",
+                            "description": "Optional path to an audio file (.wav/.m4a). Omit to capture a one-shot RAM-only microphone utterance.",
+                        },
+                        "raw_text": {
+                            "type": "string",
+                            "description": "Optional pre-decoded raw acoustic text to snap against `symbols.db` AST vocabulary without running audio decode.",
+                        },
+                        "active_file": {
+                            "type": "string",
+                            "description": "Optional active file path to prioritize in P0 AST symbol hydration.",
+                        },
+                        "backend": {
+                            "type": "string",
+                            "enum": ["auto", "ane", "mlx", "faster_whisper"],
+                            "default": "auto",
+                            "description": "Local STT backend (default: auto).",
+                        },
+                        "silence_sec": {
+                            "type": "number",
+                            "default": 1.4,
+                            "description": "Silence timeout in seconds for one-shot mic capture.",
+                        },
+                        "max_sec": {
+                            "type": "number",
+                            "default": 30.0,
+                            "description": "Maximum duration in seconds for one-shot mic capture.",
+                        },
+                    },
+                },
+            },
         ]
 
     def _query_local_screen_summary(self, question: str, context_block: str) -> str:
@@ -1959,6 +1996,43 @@ class FovealVisionMCPServer:
             return {
                 "isError": is_err,
                 "content": [{"type": "text", "text": msg_text}],
+            }
+
+        if name == "transcribe_audio_local":
+            from whole_body_compute.stt.local_ears import LocalEarsEngine
+
+            backend = str(args.get("backend") or "auto")
+            active_file = args.get("active_file")
+            raw_text = args.get("raw_text")
+            audio_path = args.get("audio_path")
+            engine = LocalEarsEngine(backend=backend)
+            if raw_text is not None:
+                bundle = engine.hydrator.hydrate(
+                    active_file_override=str(active_file) if active_file else None,
+                    skip_eyes=True,
+                )
+                res_stt = engine.apply_vocab_fusion(str(raw_text), bundle=bundle, backend="vocab_fusion")
+            elif audio_path:
+                res_stt = engine.transcribe_file(
+                    str(audio_path),
+                    active_file=str(active_file) if active_file else None,
+                )
+            else:
+                res_stt = engine.transcribe_mic(
+                    silence_sec=float(args.get("silence_sec") or 1.4),
+                    max_sec=float(args.get("max_sec") or 30.0),
+                    active_file=str(active_file) if active_file else None,
+                )
+            if res_stt.text:
+                record_foveal_audio_transcription(
+                    transcription=res_stt.text,
+                    device="body_ears_mcp",
+                    db_path=self.db_path,
+                    transcription_engine=res_stt.backend or "ane_sfspeech",
+                )
+            return {
+                "isError": bool(res_stt.error and not res_stt.text),
+                "content": [{"type": "text", "text": json.dumps(res_stt.to_dict(), indent=2)}],
             }
 
         return {

@@ -45,8 +45,8 @@ Cloud coding agents burn massive context windows re-ingesting full files, noisy 
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
 │                            WHOLE BODY COMPUTE (5 CORE ORGANS)                          │
 ├──────────────────────────┬──────────────────────────┬──────────────────────────────────┤
-│ 01. THE HEART            │ 02. THE BRAINSTEM        │ 03. THE EYES & HANDS             │
-│ Thermal, Perfusion & CSI │ Local Metal, Router & KV │ Foveal AX DOM, Tactile & Vagus   │
+│ 01. THE HEART            │ 02. THE BRAINSTEM        │ 03. THE EYES, HANDS & EARS       │
+│ Thermal, Perfusion & CSI │ Local Metal, Router & KV │ Foveal DOM, Tactile & Local STT  │
 ├──────────────────────────┼──────────────────────────┴──────────────────────────────────┤
 │ 04. THE HIPPOCAMPUS      │ 05. THE BLOOD-BRAIN BARRIER                                 │
 │ Memory WAL, Flush & REM  │ Pre/Post Hooks, <3ms AST Slicer, CLI Digests & SecGate      │
@@ -58,6 +58,7 @@ Cloud coding agents burn massive context windows re-ingesting full files, noisy 
 | **Harness Wiring** | Manual per-editor rules & scattered scripts | `body begin` auto-wires `PreToolUse` / `PostToolUse` hooks across Claude Code, Cursor, Antigravity, Windsurf, Cline & Goose | **60-second setup + 30-day FinOps receipt** |
 | **File & Log Reads** | Unbounded `read_file` (`2,000+` lines) & raw `pytest`/`cat` dumps | **Blood-Brain Barrier (`<3ms` AST Symbol Slicer)** + local Metal `ReconScout` | **Up to 98.7% token reduction** on large reads |
 | **Desktop Vision** | Full-screen PNG loops (`7,650+` tokens/step) or heavy 24/7 video recorders | **Foveal Vision (`AXUIElement` DOM)** + `<50ms` Tactile git/file delta sensor (`<50MB` RAM) | **96.9%–99.5% sensory token reduction** |
+| **Code Dictation & STT** | Cloud-metered voice apps (`$15/mo`) that mangle `CamelCase` & repo paths | **100% Local `body ears` / `body transcribe`** (Hold `Fn` / `Fn+Space` • automatically spells your repo's real function, class & file names) | **`$0` forever · zero cloud audio** |
 | **Session Hygiene** | $O(N^2)$ turn accumulation until context degrades | **Cognitive Sentry (`body context`)** + **StateCapsule Flush (`body flush`)** `[Pro]` | **Zero-loss handoff** in `<30` steps |
 | **Pre-Egress Security** | Cloud classifiers run *after* data leaves your machine | `<1ms` 23-vendor secret redaction, `1Password`/Keychain blindfold, `<2ms` APFS CoW airlock & AST SecGate | **`0` secret leaks · `0.0%` ASR** on `AgentDojo` |
 | **Apple Silicon 3-Organ & 3-Tier Memory Turbo** | Single-queue GPU contention, Python vector loops & JSON IPC | Auto-splits compute across **ANE (`CoreML`) + CPU AMX (`Accelerate`) + Metal 3 `threadgroup` Tile Shaders** over `16KB` Zero-Copy Unified Memory (with automatic Linux/Windows fallback) | **`4,661x` faster** memory dedup · **`4,596x` faster** IPC · **`7.84x` less** Q4 RAM |

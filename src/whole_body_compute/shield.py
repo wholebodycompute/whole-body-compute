@@ -1536,6 +1536,23 @@ def format_savings_receipt(summary: Dict[str, Any]) -> str:
         return f"│  {text:<{width - 4}}│"
 
     hdr_suffix = f" [{win_label}]" if win_label != "ALL" else ""
+    if total_events == 0:
+        return "\n".join(
+            [
+                f"╭{'─' * (width - 2)}╮",
+                _box_line(f"🛡️  WHOLE BODY COMPUTE - LOCAL METAL SHIELD RECEIPT{hdr_suffix}"),
+                f"├{'─' * (width - 2)}┤",
+                _box_line("Status:                 ARMED & WAITING FOR FIRST SHIELDED SESSION"),
+                _box_line("Shield Interceptions:   0 events (0 turns)"),
+                _box_line(""),
+                _box_line("How to activate your first session:"),
+                _box_line("  1. Close & reopen Claude Code / Cursor / Antigravity"),
+                _box_line("     (or `/exit` and re-run `claude` in terminal) so hooks load."),
+                _box_line("  2. Work normally for a few prompts (reads, tests, git diffs)."),
+                _box_line("  3. Re-run `body savings` to see live tokens & dollars saved."),
+                f"╰{'─' * (width - 2)}╯",
+            ]
+        )
     cum_label = f"Cumulative Saved ({actual_turns} turns):"
     lines = [
         f"╭{'─' * (width - 2)}╮",
