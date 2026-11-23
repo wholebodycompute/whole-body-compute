@@ -746,6 +746,7 @@ def test_learning_telemetry_memory_skills_and_workflows_dir(
     3. Custom user workflows saved in `~/.whole_body_compute/workflows/` harvested by ProceduralDNAHarvester.
     """
     from whole_body_compute.local.dot_memory import MemoryStore
+    from whole_body_compute.pro_loader import ProUpgradeRequiredError
     from whole_body_compute.skills_telemetry import prune_skills, record_skill_activation
 
     stats_file = tmp_path / "usage_stats.json"
@@ -761,12 +762,16 @@ def test_learning_telemetry_memory_skills_and_workflows_dir(
     monkeypatch.setenv("WBC_DOT_MEMORY_PATH", str(dot_db))
     monkeypatch.setenv("WBC_SKILL_TELEMETRY_PATH", str(skill_tel_file))
 
-    store = MemoryStore(db_path=dot_db, auto_seed=False)
-    store.remember("Always use uv run pytest for test verification", category="preference", tags="pytest,uv")
-    store.remember("Draft email reply to client", category="shipped_action", tags="send_email_reply")
-    store.remember("Second email reply to vendor", category="shipped_action", tags="send_email_reply")
-    consol = store.consolidate_habits(min_occurrences=2)
-    assert consol["consolidated_habits_count"] >= 1
+    has_dot_memory = True
+    try:
+        store = MemoryStore(db_path=dot_db, auto_seed=False)
+        store.remember("Always use uv run pytest for test verification", category="preference", tags="pytest,uv")
+        store.remember("Draft email reply to client", category="shipped_action", tags="send_email_reply")
+        store.remember("Second email reply to vendor", category="shipped_action", tags="send_email_reply")
+        consol = store.consolidate_habits(min_occurrences=2)
+        assert consol["consolidated_habits_count"] >= 1
+    except ProUpgradeRequiredError:
+        has_dot_memory = False
 
     # Record skill activation milestone (read #1)
     activated = record_skill_activation(
@@ -795,8 +800,9 @@ def test_learning_telemetry_memory_skills_and_workflows_dir(
     usage = load_usage_stats(stats_file)
     usage_str = json.dumps(usage)
     assert "Always use uv run pytest" not in usage_str
-    assert usage["events"]["wbc_memory_fact_learned"]["count"] >= 3
-    assert usage["events"]["wbc_habits_consolidated"]["count"] == 1
+    if has_dot_memory:
+        assert usage["events"]["wbc_memory_fact_learned"]["count"] >= 3
+        assert usage["events"]["wbc_habits_consolidated"]["count"] == 1
     assert usage["events"]["wbc_skill_activated"]["count"] == 1
     assert usage["events"]["wbc_skills_pruned"]["count"] == 1
 
@@ -819,8 +825,9 @@ def test_learning_telemetry_memory_skills_and_workflows_dir(
     assert "taught_custom_flow" in ir_ids
 
     eff_card = harvest_rep["hybrid_efficiency_cards"][0]
-    assert eff_card["learning_summary"]["total_memories"] >= 4
-    assert eff_card["learning_summary"]["by_category"]["preference"] == 1
+    if has_dot_memory:
+        assert eff_card["learning_summary"]["total_memories"] >= 4
+        assert eff_card["learning_summary"]["by_category"]["preference"] == 1
     assert eff_card["learning_summary"]["tracked_skills_count"] == 1
     assert eff_card["learning_summary"]["total_skill_reads"] == 1
 
