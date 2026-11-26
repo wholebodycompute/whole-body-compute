@@ -13,7 +13,20 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
+
+from whole_body_compute.redaction import redact_secrets
+
+STYLE_HYGIENE_VECTORS: FrozenSet[str] = frozenset(
+    {
+        "typography_em_dash",
+        "typography_dash",
+        "smart_quote",
+        "lexical_slop",
+        "invisible_mark",
+        "cjk_token_leak",
+    }
+)
 
 
 def _get_default_antibody_path() -> Path:
@@ -106,17 +119,32 @@ class AntibodyRegistry:
     def extract_threat_signature(cls, vector: str, payload: str) -> str:
         """
         Extract the salient dangerous expression or command span from an attack payload
-        so the resulting antibody blocks variations of the same attack.
+        so the resulting antibody blocks variations of the same attack without capturing
+        secrets or benign module docstrings.
         """
-        norm = cls.normalize_payload(payload)
+        if not payload:
+            return ""
+        safe_payload = redact_secrets(payload)
+        if vector == "ast_secgate":
+            # Strip leading comments and module docstring so fallback never poisons file headers
+            stripped_ast = re.sub(r"^(?:\s*#[^\n]*\n)*\s*(?:'''[\s\S]*?'''|\"\"\"[\s\S]*?\"\"\")\s*", "", safe_payload)
+            if stripped_ast.strip():
+                safe_payload = stripped_ast
+
+        norm = cls.normalize_payload(safe_payload)
         if not norm:
             return ""
 
         # Check for specific high-signal dangerous expressions first
         patterns = [
-            r"(getattr\s*\([^)]+\)\s*\([^)]*\))",
-            r"(__import__\s*\([^)]+\)\.[a-z0-9_]+\s*\([^)]*\))",
+            r"((?<![a-zA-Z0-9_])(?:curl|wget)\b[^\n;&]*\|\s*(?:ba|z|da|k|fi|c)?sh\b)",
+            r"(getattr\s*\([^)]+\)(?:\s*\([^)]*\))?)",
+            r"(__import__\s*\([^)]+\)(?:\.[a-z0-9_]+\s*\([^)]*\))?)",
+            r"((?:__builtins__|builtins)\s*\[[^\]]+\](?:\s*\([^)]*\))?)",
+            r"((?:globals|locals|vars)\s*\(\s*\)\s*\[[^\]]+\](?:\s*\([^)]*\))?)",
+            r"(shutil\.rmtree\s*\([^)]+\))",
             r"((?:os\.system|os\.popen|pty\.spawn|eval|exec)\s*\([^)]+\))",
+            r"([a-z0-9_.]+\.(?:system|popen|spawn|posix_spawn|execl|execle|execlp|execv|execve|execvp)\s*\([^)]*\))",
             r"(subprocess\.[a-z_]+\s*\([^)]*shell\s*=\s*true[^)]*\))",
             r"((?<![a-zA-Z0-9_])(?:curl|wget|nc|ncat|scp|sftp)\b\s+[^\n;|&]+)",
             r"(ignore\s+(?:all\s+)?(?:previous|prior)\s+(?:instructions|commands|prompts)[^\n.]*)",
@@ -185,6 +213,11 @@ class AntibodyRegistry:
         except Exception:
             pass
 
+    @staticmethod
+    def _resolve_memories_text_col(conn: Any) -> str:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(memories)").fetchall()}
+        return "fact" if "fact" in cols else "content"
+
     def record_antigen(
         self,
         vector: str,
@@ -195,10 +228,13 @@ class AntibodyRegistry:
     ) -> AntibodyRecord:
         """
         Capture a blocked attack payload as an antigen and synthesize an adaptive antibody.
+        Always scrubs secrets before normalizing or persisting to disk/Hippocampus.
         """
-        sig = self.extract_threat_signature(vector, payload)
+        safe_payload = redact_secrets(payload or "")
+        safe_reason = redact_secrets(reason or "")
+        sig = self.extract_threat_signature(vector, safe_payload)
         if not sig:
-            sig = self.normalize_payload(payload)[:120] or "empty_antigen"
+            sig = self.normalize_payload(safe_payload)[:120] or "empty_antigen"
 
         digest = hashlib.sha256(f"{vector}:{sig}".encode("utf-8")).hexdigest()
         now = time.time()
@@ -216,7 +252,7 @@ class AntibodyRegistry:
             vector=vector,
             signature=sig,
             antigen_sha256=digest,
-            reason=reason,
+            reason=safe_reason,
             stage=stage,
             hit_count=1,
             created_at=now,
@@ -225,13 +261,17 @@ class AntibodyRegistry:
         self._antibodies[digest] = rec
         self._save()
 
-        if persist_to_hippocampus and not os.environ.get("VOICEFI_DISABLE_DOT_MEMORY"):
+        if (
+            persist_to_hippocampus
+            and vector not in STYLE_HYGIENE_VECTORS
+            and not os.environ.get("VOICEFI_DISABLE_DOT_MEMORY")
+        ):
             try:
                 from whole_body_compute.local.dot_memory import get_dot_store
 
                 store = get_dot_store()
                 store.add_memory(
-                    fact=f"[ANTIGEN:{ab_id}] vector={vector} sig={sig[:80]} reason={reason}",
+                    fact=f"[ANTIGEN:{ab_id}] vector={vector} sig={sig[:80]} reason={safe_reason}",
                     category="antigen",
                     source="organ_10_immune",
                 )
@@ -253,21 +293,16 @@ class AntibodyRegistry:
                 "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3),
             }
 
-        norm = self.normalize_payload(payload)
-        _style_vectors = {
-            "typography_em_dash",
-            "typography_dash",
-            "smart_quote",
-            "lexical_slop",
-            "invisible_mark",
-            "cjk_token_leak",
-        }
+        norm = self.normalize_payload(redact_secrets(payload))
+        raw_norm = self.normalize_payload(payload)
         for rec in self._antibodies.values():
             if vector_filter and rec.vector != vector_filter:
                 continue
-            if not vector_filter and rec.vector in _style_vectors:
+            if not vector_filter and rec.vector in STYLE_HYGIENE_VECTORS:
                 continue
-            if rec.signature and len(rec.signature) >= 6 and rec.signature in norm:
+            if rec.signature and len(rec.signature) >= 6 and (
+                rec.signature in norm or rec.signature in raw_norm
+            ):
                 rec.hit_count += 1
                 rec.last_seen_at = time.time()
                 self._save()
@@ -299,14 +334,30 @@ class AntibodyRegistry:
 
             store = MemoryStore(db_path=db_path) if db_path else get_dot_store()
             with store._connect() as conn:
+                text_col = self._resolve_memories_text_col(conn)
                 rows = conn.execute(
-                    "SELECT content FROM memories WHERE category = 'antigen' ORDER BY id DESC LIMIT 200"
+                    f"SELECT {text_col} FROM memories WHERE category = 'antigen' ORDER BY id DESC LIMIT 200"
                 ).fetchall()
             for (content,) in rows:
-                m = re.search(r"vector=([a-z0-9_]+)\s+sig=(.+?)\s+reason=(.+)$", content)
+                m = re.search(r"vector=([a-z0-9_]+)\s+sig=(.+?)\s+reason=(.+)$", content or "")
                 if m:
-                    vec, sig, rsn = m.group(1), m.group(2).strip(), m.group(3).strip()
+                    vec, raw_sig, raw_rsn = m.group(1), m.group(2).strip(), m.group(3).strip()
+                    if vec in STYLE_HYGIENE_VECTORS:
+                        continue
+                    sig = self.normalize_payload(redact_secrets(raw_sig))
+                    rsn = redact_secrets(raw_rsn)
+                    if not sig or len(sig) < 8:
+                        continue
                     if vec == "shell_egress" and VascularTrafficMonitor.is_trusted_self_or_civic_http(sig):
+                        continue
+                    if vec == "prompt_injection" and (
+                        _is_official_self_installer_span(sig)
+                        or sig in ("curl -fssl", "curl -f ssl", "wget -qo-")
+                    ):
+                        continue
+                    if vec == "ast_secgate" and (
+                        sig.startswith(("'''", '"""')) or "['platform.system'" in rsn
+                    ):
                         continue
                     digest = hashlib.sha256(f"{vec}:{sig}".encode("utf-8")).hexdigest()
                     if digest not in self._antibodies:
@@ -331,46 +382,129 @@ class AntibodyRegistry:
 
     def purge_trusted_false_positives(self, db_path: Optional[Path] = None) -> Dict[str, Any]:
         """
-        Central Immune Tolerance cleanup: remove any legacy `shell_egress` antibodies
-        whose signature is a trusted Self/Civic HTTP command, both in `antibodies.json`
-        and in the Hippocampus `dot_memory.db` antigen table.
+        Central Immune Tolerance & Registry Hygiene cleanup:
+          1. Remove legacy style/typography bloat (`STYLE_HYGIENE_VECTORS`).
+          2. Scrub any unredacted secrets in stored signatures/reasons and re-key hashes.
+          3. Remove poisoned `ast_secgate` module-docstring / `platform.system` false positives.
+          4. Remove official self-domain installer OCR loops (`wholebodycompute.com/begin`) & `<12`-char `curl -fssl` stubs.
+          5. Remove `shell_egress` entries that are trusted Self/Civic HTTP or no longer violate `VASCULAR_SHELL_RULES`.
+        Synchronizes removals and secret redaction across both `antibodies.json` and Hippocampus `dot_memory.db`.
         """
         to_remove: List[str] = []
         removed_ids: List[str] = []
+        redacted_ids: List[str] = []
+        rekeyed_records: Dict[str, AntibodyRecord] = {}
+        mutated = False
+
         for digest, rec in list(self._antibodies.items()):
-            if rec.vector == "shell_egress":
+            drop = False
+            if rec.vector in STYLE_HYGIENE_VECTORS:
+                drop = True
+            elif rec.vector == "shell_egress":
                 still_violates_innate = any(
                     pat.search(rec.signature) for _, _, pat in VASCULAR_SHELL_RULES
                 )
                 if VascularTrafficMonitor.is_trusted_self_or_civic_http(rec.signature) or not still_violates_innate:
-                    to_remove.append(digest)
-                    removed_ids.append(rec.antibody_id)
-        for digest in to_remove:
-            self._antibodies.pop(digest, None)
-        if to_remove:
+                    drop = True
+            elif rec.vector == "ast_secgate":
+                if rec.signature.startswith(("'''", '"""')) or "['platform.system'" in rec.reason:
+                    drop = True
+            elif rec.vector == "prompt_injection":
+                if (
+                    _is_official_self_installer_span(rec.signature)
+                    or rec.signature.strip() in ("curl -fssl", "curl -f ssl", "wget -qo-")
+                    or len(rec.signature.strip()) < 10
+                ):
+                    drop = True
+
+            if drop:
+                to_remove.append(digest)
+                removed_ids.append(rec.antibody_id)
+                mutated = True
+                continue
+
+            clean_sig = self.normalize_payload(redact_secrets(rec.signature))
+            clean_rsn = redact_secrets(rec.reason)
+            new_digest = hashlib.sha256(f"{rec.vector}:{clean_sig}".encode("utf-8")).hexdigest()
+            if clean_sig != rec.signature or clean_rsn != rec.reason or new_digest != digest:
+                redacted_ids.append(rec.antibody_id)
+                mutated = True
+                new_id = f"ab_{new_digest[:10]}"
+                if new_digest in rekeyed_records:
+                    rekeyed_records[new_digest].hit_count += rec.hit_count
+                    rekeyed_records[new_digest].last_seen_at = max(
+                        rekeyed_records[new_digest].last_seen_at, rec.last_seen_at
+                    )
+                else:
+                    rekeyed_records[new_digest] = AntibodyRecord(
+                        antibody_id=new_id,
+                        vector=rec.vector,
+                        signature=clean_sig,
+                        antigen_sha256=new_digest,
+                        reason=clean_rsn,
+                        stage=rec.stage,
+                        hit_count=rec.hit_count,
+                        created_at=rec.created_at,
+                        last_seen_at=rec.last_seen_at,
+                    )
+            else:
+                if digest in rekeyed_records:
+                    rekeyed_records[digest].hit_count += rec.hit_count
+                    mutated = True
+                else:
+                    rekeyed_records[digest] = rec
+
+        if mutated:
+            self._antibodies = rekeyed_records
             self._save()
 
         hippocampus_deleted = 0
-        if removed_ids:
-            try:
-                from whole_body_compute.local.dot_memory import MemoryStore, get_dot_store
+        hippocampus_redacted = 0
+        try:
+            from whole_body_compute.local.dot_memory import MemoryStore, get_dot_store
 
-                store = MemoryStore(db_path=db_path) if db_path else get_dot_store()
-                with store._connect() as conn:
-                    for ab_id in removed_ids:
-                        cur = conn.execute(
-                            "DELETE FROM memories WHERE category = 'antigen' AND content LIKE ?",
-                            (f"%[ANTIGEN:{ab_id}]%",),
+            store = MemoryStore(db_path=db_path) if db_path else get_dot_store()
+            with store._connect() as conn:
+                text_col = self._resolve_memories_text_col(conn)
+                for ab_id in removed_ids:
+                    cur = conn.execute(
+                        f"DELETE FROM memories WHERE category = 'antigen' AND {text_col} LIKE ?",
+                        (f"%[ANTIGEN:{ab_id}]%",),
+                    )
+                    hippocampus_deleted += max(cur.rowcount, 0)
+
+                rows = conn.execute(
+                    f"SELECT id, {text_col} FROM memories WHERE category = 'antigen'"
+                ).fetchall()
+                for row_id, raw_text in rows:
+                    txt = raw_text or ""
+                    if (
+                        any(f"vector={sv}" in txt for sv in STYLE_HYGIENE_VECTORS)
+                        or "['platform.system'" in txt
+                        or ("vector=ast_secgate" in txt and ("sig='''" in txt or 'sig="""' in txt))
+                        or ("vector=prompt_injection" in txt and (_is_official_self_installer_span(txt) or "sig=curl -fssl " in txt))
+                    ):
+                        conn.execute("DELETE FROM memories WHERE id = ?", (row_id,))
+                        hippocampus_deleted += 1
+                        continue
+                    scrubbed_txt = redact_secrets(txt)
+                    if scrubbed_txt != txt:
+                        conn.execute(
+                            f"UPDATE memories SET {text_col} = ? WHERE id = ?",
+                            (scrubbed_txt, row_id),
                         )
-                        hippocampus_deleted += cur.rowcount
-                    conn.commit()
-            except Exception:
-                pass
+                        hippocampus_redacted += 1
+                conn.commit()
+        except Exception:
+            pass
 
         return {
             "purged_antibodies": len(removed_ids),
             "purged_ids": removed_ids,
+            "redacted_antibodies": len(redacted_ids),
+            "redacted_ids": redacted_ids,
             "hippocampus_deleted": hippocampus_deleted,
+            "hippocampus_redacted": hippocampus_redacted,
             "remaining_antibodies": len(self._antibodies),
         }
 
@@ -418,6 +552,32 @@ PROMPT_INJECTION_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
 )
 
 
+_OFFICIAL_SELF_INSTALLER_COLLAPSED_RE = re.compile(
+    r"(?i)https?://(?:www\.)?wholebodycompute\.(?:com|org)/(?:begin(?:/[a-z0-9_.-]*)?|install)\b"
+)
+
+
+def _is_official_self_installer_span(span: str) -> bool:
+    """
+    Return True if an OCR/audio span strictly references Whole Body Compute's own
+    official `wholebodycompute.(com|org)/(begin|install)` endpoint (even with OCR
+    spaces injected around punctuation), with no chained shell subcommands.
+    """
+    if not span:
+        return False
+    if re.search(r"[;&`\n]|\$\(", span):
+        return False
+    collapsed_punct = re.sub(r"\s*(:|//|\.|/)\s*", r"\1", span)
+    if not _OFFICIAL_SELF_INSTALLER_COLLAPSED_RE.search(collapsed_punct):
+        return False
+    # Ensure no other external URL/domain is smuggled in the same span
+    other_urls = re.findall(r"(?i)https?://([a-z0-9.-]+)", collapsed_punct)
+    return bool(other_urls) and all(
+        h in ("wholebodycompute.com", "www.wholebodycompute.com", "wholebodycompute.org", "www.wholebodycompute.org")
+        for h in other_urls
+    )
+
+
 class EpithelialScreenFilter:
     """
     Filters untrusted OCR, Audio, and AXUIElement DOM text from The Eyes (Organ 07)
@@ -437,10 +597,17 @@ class EpithelialScreenFilter:
 
         sanitized = text
         detections: List[Dict[str, Any]] = []
+        is_passive_sensory = source in ("foveal_ocr", "screenpipe_ocr", "screenpipe_audio")
 
         for label, pattern in PROMPT_INJECTION_PATTERNS:
             for match in pattern.finditer(sanitized):
                 matched_span = match.group(0)
+                if (
+                    label == "remote_pipe_execution"
+                    and is_passive_sensory
+                    and _is_official_self_installer_span(matched_span)
+                ):
+                    continue
                 detections.append(
                     {
                         "type": label,
@@ -455,7 +622,15 @@ class EpithelialScreenFilter:
                         reason=f"Indirect prompt injection ({label}) in {source}",
                         stage=1,
                     )
-            sanitized = pattern.sub(f"[NEUTRALIZED_PROMPT_INJECTION:{label}]", sanitized)
+            if label == "remote_pipe_execution" and is_passive_sensory:
+                sanitized = pattern.sub(
+                    lambda m: m.group(0)
+                    if _is_official_self_installer_span(m.group(0))
+                    else f"[NEUTRALIZED_PROMPT_INJECTION:{label}]",
+                    sanitized,
+                )
+            else:
+                sanitized = pattern.sub(f"[NEUTRALIZED_PROMPT_INJECTION:{label}]", sanitized)
 
         if wrap_untrusted_tags and sanitized.strip():
             inner_clean = re.sub(
@@ -643,15 +818,15 @@ _HTTP_EXFIL_OR_PIPE_RE = re.compile(
     r"(?:^|\s)(?:-F|--form(?:-string)?)\s*(?:=|\s)\s*\S|(?:^|\s)-T\s+|--upload-file\b|"
     r"(?:^|\s)(?:-X|--request)\s*(?:=|\s)\s*['\"]?(?:POST|PUT|PATCH|DELETE)\b|"
     r"--(?:post|body)-(?:data|file)\b|"
-    r"(?:^|\s)(?:-H|--header)\s*(?:=|\s)\s*['\"]?[^\n;|&]*\$(?:\(|[A-Za-z_{])|"
-    r"https?://[^\s'\"`]*\?[^\s'\"`]*(?:\$\(|`|\$\{?[A-Za-z_])|"
+    r"(?:^|\s)(?:-H|--header|-A|--user-agent|-b|--cookie|-e|--referer|-u|--user)\s*(?:=|\s)\s*['\"]?[^\n;|&]*(?:\$\(|`|\$\{?[A-Za-z_])|"
+    r"https?://[^\s'\"`;|&]*(?:\$\(|`|\$\{?[A-Za-z_])|"
     r"slack\.com/services/|"
     r"\b(?:nc(?!\s*=)|ncat|netcat|socat|scp|sftp|rsync|ssh|ftp|telnet)\s+(?!=))"
 )
 
 _URL_TOKEN_RE = re.compile(r"(?i)\b(?:https?|ftp)://[^\s'\"`;|&<>()]+")
 _URL_HOST_RE = re.compile(r"(?i)\bhttps?://(?![^/\s'\"`]*@)([a-z0-9._-]+)(?::\d+)?(?:/|(?![a-z0-9._@-])\b|$)")
-_SHELL_SUBCMD_SPLIT_RE = re.compile(r"(?:&&|\|\||[;\n]|\$\(|\)|`)")
+_SHELL_SUBCMD_SPLIT_RE = re.compile(r"(?:&&|\|\||(?<![<>0-9])&(?![>&0-9])|[;\n]|\$\(|\)|`)")
 _NET_CLIENT_BIN_RE = re.compile(
     r"(?i)(?<![a-zA-Z0-9_./-])(?:/usr/bin/|/bin/|/opt/homebrew/bin/|/usr/local/bin/)?"
     r"(?:curl|wget|nc(?!\s*=)|ncat|netcat|socat|scp|sftp|rsync|ssh|ftp|telnet|openssl\s+s_client)\b\s*(?!=)"
@@ -665,16 +840,22 @@ _NON_HTTP_NET_CLIENT_RE = re.compile(
 )
 _SCRIPT_NET_EGRESS_RE = re.compile(
     r"(?i)\b(?:python[23]?|node|perl|ruby|php)\s+-(?:c|e|r)\s+[^\n;|&]*"
-    r"(?:urllib\.request|requests\.(?:get|post|put|request)|http\.client|socket\.connect|fetch\s*\()\s*[^\n;|&]*"
-    r"https?://[^\s'\"`)>]+",
+    r"(?:urllib\.request|requests\.(?:get|post|put|delete|head|patch|request)|httpx\.(?:get|post|put|request|Client)|aiohttp|http\.client|socket\.connect|fetch\s*\()",
 )
 
 
 def _normalize_shell_evasions(command: str) -> str:
-    """Collapse trivial quote-splitting and backslash escapes in command tokens (e.g. cu\\rl, \"cur\"\"l\")."""
+    """Collapse quote-splitting (`c\"u\"rl`, `c'u'rl`, `$'curl'`) and backslash escapes in command tokens."""
     if not command:
         return ""
     norm = re.sub(r'""|\'\'', "", command)
+    norm = re.sub(r"\$'([A-Za-z0-9_./-]+)'", r"\1", norm)
+    # Collapse intra-token quote splitting (e.g. c"u"rl -> curl, c'u'r'l' -> curl)
+    norm = re.sub(
+        r"(?<![A-Za-z0-9_./=-])([A-Za-z0-9_./]+(?:[\"'][A-Za-z0-9_./]+)+[\"']?)",
+        lambda m: m.group(1).replace('"', "").replace("'", ""),
+        norm,
+    )
     norm = re.sub(r"\\([A-Za-z0-9_./-])", r"\1", norm)
     return norm
 
@@ -715,10 +896,10 @@ def _segment_has_external_egress(segment: str) -> bool:
     if not seg:
         return False
 
-    # 1. Inline scripting runtimes making HTTP calls to non-loopback URLs
+    # 1. Inline scripting runtimes making HTTP calls to non-loopback or dynamically constructed URLs # [direct-edit]
     if _SCRIPT_NET_EGRESS_RE.search(seg):
         bad_url, url_hosts = _extract_parsed_urls(seg)
-        if bad_url or any(not _is_loopback_target(h) for h in url_hosts):
+        if bad_url or not url_hosts or any(not _is_loopback_target(h) for h in url_hosts):
             return True
 
     if not _NET_CLIENT_BIN_RE.search(seg):
@@ -735,6 +916,11 @@ def _segment_has_external_egress(segment: str) -> bool:
     # Check any URLs extracted
     if any(not _is_loopback_target(h) for h in url_hosts):
         return True
+
+    # Block env-var / subshell target indirection on network clients when no explicit loopback URL/host is present
+    if not url_hosts and re.search(r"\$(?:\(|[A-Za-z_{])|`", seg_no_urls):
+        if not re.search(r"\b(?:127\.0\.0\.1|localhost|::1)\b", seg_no_urls):
+            return True
 
     # Check bare hostnames, IPv4, or IPv6 operands on network clients (ssh user@host, nc 1.2.3.4 4444, curl evil.ai)
     for m_ip in re.finditer(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", seg_no_urls):
@@ -790,14 +976,16 @@ VASCULAR_SHELL_RULES: Tuple[Tuple[str, str, re.Pattern[str]], ...] = (
     (
         "credential_file_exfiltration",
         (
-            "Access to sensitive host credential files (~/.ssh/id_*, ~/.aws, ~/.config/gh, /etc/shadow,"
-            " .env, macOS keychain, secret env dumping)"
+            "Access to sensitive host credential files (~/.ssh/*, ~/.aws, ~/.config/gh, /etc/shadow,"
+            " .env, macOS keychain, secret env dumping, or guardrail env override)"
         ),
         re.compile(
-            r"(?i)(?:~|\$\{?HOME\}?|/Users/[^/\s]+|/root|/home/[^/\s]+)/\.(?:ssh/id_[a-zA-Z0-9_-]+|aws/(?:credentials|config)|config/gh/hosts\.yml|netrc|npmrc|pypirc|kube/config|docker/config\.json|gnupg/)|"
+            r"(?i)(?:~|\$\{?HOME\}?|/Users/[^/\s]+|/root|/home/[^/\s]+)/\.(?:ssh/(?:id_[a-zA-Z0-9_-]+|config(?![a-zA-Z0-9_.-])|[^\s'\";|&]*\.(?:pem|key))|aws/(?:credentials|config|sso/)|config/gh/|netrc|npmrc|pypirc|kube/config|docker/config\.json|gnupg/)|"
+            r"(?:~|\$\{?HOME\}?|/Users/[^/\s]+)?/Library/Keychains/|"
             r"/etc/(?:shadow|master\.passwd)|"
-            r"\b(?:cat|head|tail|less|more|sed|awk|grep|rg|cp|tee|xxd|od|strings|curl|scp|base64|python[23]?|node|ruby|perl)\s+[^\n;|&'\"]*\.env(?:\.(?:local|prod|production|staging|development|secret))?(?![a-zA-Z0-9_.-])|"
-            r"\bsecurity\s+find-(?:generic|internet)-password\b|"
+            r"\b(?:cat|head|tail|less|more|nl|tac|sort|jq|sed|awk|grep|rg|cp|mv|tee|xxd|od|strings|curl|scp|base64|shasum|openssl|dd|tar|python[23]?|node|ruby|perl)\b[^\n;|&]*(?<![A-Za-z0-9_-])\.env(?:\.(?:local|prod|production|staging|development|secret))?(?![a-zA-Z0-9_.-])|"
+            r"\bsecurity\s+(?:find-(?:generic|internet)-password|dump-keychain|export|find-key)\b|"
+            r"\b(?:WBC_ALLOW_SENSITIVE_ACTUATION|VOICEFI_CONTEXT_GATE_DISABLED|WBC_BENCHMARK_VANILLA_PASSTHROUGH)\s*=\s*['\"]?(?:1|true|yes)\b|"
             r"\b(?:export\s+[A-Za-z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD|AUTH)\s*=\s*\$\(\s*(?:env|printenv)\b)|"
             r"(?:^|[;&|]\s*)(?:env|printenv)\s*\|\s*grep\s+-[a-zA-Z0-9]*\s*['\"]?(?:HF_TOKEN|GITHUB_TOKEN|OPENAI_API_KEY|AWS_SECRET_ACCESS_KEY|SLACK_BOT_TOKEN)"
         ),
@@ -859,9 +1047,9 @@ VASCULAR_SHELL_RULES: Tuple[Tuple[str, str, re.Pattern[str]], ...] = (
     ),
     (
         "reverse_shell",
-        "Reverse shell / socket redirect execution (/dev/tcp, bash -i, python pty)",
+        "Reverse shell / socket redirect execution (/dev/tcp, /dev/udp, bash -i, python pty)",
         re.compile(
-            r"(?i)(?:/dev/tcp/|bash\s+-i\s+>&|nc\s+-e\s+/bin/(?:ba)?sh|pty\.spawn)"
+            r"(?i)(?:/dev/(?:tcp|udp)/|bash\s+-i\s+>&|nc\s+-e\s+/bin/(?:ba)?sh|pty\.spawn)"
         ),
     ),
     (

@@ -832,6 +832,194 @@ def test_learning_telemetry_memory_skills_and_workflows_dir(
     assert eff_card["learning_summary"]["total_skill_reads"] == 1
 
 
+def test_fetch_posthog_cloud_funnel_summary_excludes_pypi_scanners() -> None:
+    """Verify HogQL cloud summary predicate excludes pp-fuzz and <=2GB Linux post-PyPI scanner bots."""
+    from whole_body_compute.procedural_telemetry import (
+        fetch_posthog_cloud_funnel_summary,
+    )
+
+    captured_sql: list[str] = []
+
+    def _fake_urlopen(req: MagicMock, timeout: float = 10.0) -> MagicMock:
+        body = json.loads(req.data.decode("utf-8"))
+        captured_sql.append(body["query"]["query"])
+        row = [1396, 939, 11, 37, 1, 1, 1, 39, 4, 0, 0, 9, 19, 1, 4, 1, 3, 3, 1, 0, 0, 56]
+        resp = MagicMock()
+        resp.__enter__.return_value = io.BytesIO(json.dumps({"results": [row]}).encode("utf-8"))
+        return resp
+
+    with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+        summary = fetch_posthog_cloud_funnel_summary(personal_api_key="phx_test_readonly")
+
+    assert summary["status"] == "ok"
+    assert summary["ext_product_cohorts"] == 1
+    assert summary["ext_cohorts_hitting_limits"] == 1
+    assert summary["ext_scanner_cohorts_filtered"] == 56
+    assert len(captured_sql) == 1
+    sql = captured_sql[0]
+    assert "event LIKE '/tmp/%'" in sql
+    assert "IntelR CoreTM i7-10700 CPU @ 2.90GHz" in sql
+    assert "ram_gb_bucket" in sql
+    assert "actual_cumulative_input_tokens" in sql
+
+    table_str = format_usage_stats_table(
+        {
+            "consent": {"cohort_id": "abc12345", "effective_tier": "TIER_2_PROCEDURAL_DNA"},
+            "usage_ledger": {"commands": {}, "events": {}},
+            "shield_savings": {},
+            "workflow_automations": {},
+            "ambient_and_dreaming": {},
+            "skills_telemetry": {},
+            "memory_learning": {},
+            "posthog_cloud": summary,
+        }
+    )
+    assert "(+56 PyPI/sandbox scanners filtered)" in table_str
+
+
+def test_pro_conversion_friction_fixes_doctor_paywall_and_free_csi(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """
+    Verify all 4 PLG conversion-friction fixes:
+      1. `check_organ_hippocampus()` reports `pro_locked=True` on Community instead of `WAL active`.
+      2. `render_pro_upgrade_card(cmd='memory')` logs `feature='hippocampus_memory'`, shows
+         `body upgrade --open` + cohort-attributed checkout URL, and injects local Shield ROI.
+      3. Read-only `body context` runs free on Community with a Pro flush teaser, while
+         `body context --auto` remains Pro-gated (exit code 2).
+    """
+    from whole_body_compute.cli_handlers import render_pro_upgrade_card
+    from whole_body_compute.doctor import check_organ_hippocampus
+    from whole_body_compute.pro_loader import ProUpgradeRequiredError
+
+    wbc_dir = tmp_path / "wbc_comm"
+    wbc_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("WBC_DATA_DIR", str(wbc_dir))
+    monkeypatch.setenv("WBC_TELEMETRY_CONFIG_PATH", str(wbc_dir / "telemetry_consent.json"))
+    monkeypatch.setenv("VOICEFI_LICENSE_PATH", str(wbc_dir / "license.json"))
+    monkeypatch.setenv("WBC_FORCE_COMMUNITY", "1")
+    monkeypatch.setenv("BODY_TELEMETRY", "0")
+
+    # 1. Honest Hippocampus status in `body doctor` on Community tier
+    hippo = check_organ_hippocampus()
+    assert hippo["status"] == "pass"
+    assert hippo["vital_signs"]["pro_locked"] is True
+    assert hippo["vital_signs"]["wal_enabled"] is False
+    assert "Pro Tier ($29/mo)" in hippo["details"]
+
+    # 2. Feature-specific, cohort-attributed & personalized `render_pro_upgrade_card`
+    consent_mgr = TelemetryConsentManager(config_path=wbc_dir / "telemetry_consent.json")
+    cohort_id = consent_mgr.get_cohort_id()
+
+    rc_json = render_pro_upgrade_card("memory", ProUpgradeRequiredError("Pro required"), is_json=True)
+    assert rc_json == 2
+    card_json = json.loads(capsys.readouterr().out)
+    assert card_json["feature"] == "hippocampus_memory"
+    assert card_json["open_checkout_command"] == "body upgrade --open"
+    assert f"cohort_id={cohort_id}" in card_json["checkout_url"]
+    assert "cli_paywall_memory" in card_json["checkout_url"]
+
+    fake_savings = {
+        "total_events": 11,
+        "cumulative_tokens_saved": 85_300,
+        "estimated_usd_saved": 1.42,
+    }
+    with patch("whole_body_compute.shield.get_savings_summary", return_value=fake_savings):
+        rc_txt = render_pro_upgrade_card("memory", ProUpgradeRequiredError("Pro required"), is_json=False)
+    assert rc_txt == 2
+    card_txt = capsys.readouterr().out
+    assert "Your Local Shield Ledger: 11 BBB gates" in card_txt
+    assert "Unlock Hippocampus Memory Graph" in card_txt
+    assert "body upgrade --open" in card_txt
+    assert f"cohort_id={cohort_id}" in card_txt
+
+    # 3. Read-only `body context` runs free on Community with synthetic transcript
+    brain_dir = tmp_path / "brain"
+    conv_logs = brain_dir / "conv-free-csi-001" / ".system_generated" / "logs"
+    conv_logs.mkdir(parents=True, exist_ok=True)
+    (conv_logs / "transcript.jsonl").write_text(
+        "\n".join(
+            json.dumps({"type": "MODEL_TURN", "created_at": f"2026-11-26T12:00:{i:02d}Z"})
+            for i in range(10)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AGY_BRAIN_DIR", str(brain_dir))
+
+    rc_ctx = cli_main(["context", "--json"])
+    assert rc_ctx == 0
+    ctx_data = json.loads(capsys.readouterr().out)
+    assert ctx_data["conv_id"] == "conv-free-csi-001"
+    assert ctx_data["pro_flush_locked"] is True
+    assert "csi" in ctx_data
+
+    rc_ctx_txt = cli_main(["context"])
+    assert rc_ctx_txt == 0
+    ctx_banner = capsys.readouterr().out
+    assert "Cognitive Thermal Sentry" in ctx_banner
+    assert "body flush --auto" in ctx_banner
+
+    # Action mode (`--auto`) remains Pro-gated (exit code 2)
+    rc_auto = cli_main(["context", "--auto", "--json"])
+    assert rc_auto == 2
+    auto_err = json.loads(capsys.readouterr().out)
+    assert auto_err["status"] == "upgrade_required"
+    assert auto_err["feature"] == "glymphatic_flush"
+
+    # 4. Pure Claude Code workspace (`CLAUDE_CODE_DIR` with no Antigravity transcripts) works in `body context`
+    empty_agy = tmp_path / "empty_agy_brain"
+    claude_projects = tmp_path / "claude_projects" / "-Users-alice-myrepo"
+    claude_projects.mkdir(parents=True, exist_ok=True)
+    (claude_projects / "claude-sess-777.jsonl").write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "type": "assistant" if i % 2 else "user",
+                    "timestamp": f"2026-11-26T12:10:{i:02d}Z",
+                    "message": {
+                        "role": "assistant" if i % 2 else "user",
+                        "content": [{"type": "tool_use", "name": "Read"}] if i % 2 else "check files",
+                    },
+                }
+            )
+            for i in range(12)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AGY_BRAIN_DIR", str(empty_agy))
+    monkeypatch.setenv("CLAUDE_CODE_DIR", str(tmp_path / "claude_projects"))
+
+    rc_claude = cli_main(["context", "--json"])
+    assert rc_claude == 0
+    claude_ctx = json.loads(capsys.readouterr().out)
+    assert claude_ctx["conv_id"] == "claude-sess-777"
+    assert claude_ctx["harness"] == "claude_code"
+    assert claude_ctx["steps"] == 12
+    assert claude_ctx["pro_flush_locked"] is True
+
+    # 5. Outbound telemetry defaults to zero-IP Cloudflare edge relay (`/v1/telemetry`) when POSTHOG_HOST unset
+    monkeypatch.delenv("BODY_TELEMETRY", raising=False)
+    monkeypatch.delenv("WBC_TELEMETRY_INGEST_URL", raising=False)
+    monkeypatch.delenv("POSTHOG_HOST", raising=False)
+    sent_urls: list[str] = []
+
+    def _capture_req(req: MagicMock, timeout: float = 2.0) -> MagicMock:
+        sent_urls.append(req.full_url)
+        resp = MagicMock()
+        resp.status = 200
+        resp.__enter__.return_value = resp
+        return resp
+
+    with patch("urllib.request.urlopen", side_effect=_capture_req):
+        send_vitals_rollup({"local_steps": 5}, consent_manager=consent_mgr)
+    assert sent_urls == ["https://wholebodycompute.com/v1/telemetry"]
+
+
+
+
+
 
 
 

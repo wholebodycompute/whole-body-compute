@@ -153,9 +153,31 @@ def is_voicefi_dictation_active() -> bool:
     return False
 
 
+def _broker_ears_type_diff(backspaces: int, text: str) -> Optional[bool]:
+    """Try brokering differential dictation typing through `Whole Body Compute.app` (`foveal.sock`)."""
+    try:
+        from whole_body_compute.integrations.foveal_vision import send_foveal_socket_request
+
+        resp = send_foveal_socket_request(
+            {"op": "ears_type_diff", "backspaces": int(backspaces), "text": str(text)},
+            timeout_sec=1.5,
+        )
+        if isinstance(resp, dict):
+            if resp.get("status") == "ok":
+                return True
+            if resp.get("security_blocked") or resp.get("kill_switch") or resp.get("ears_paused"):
+                return False
+    except Exception:
+        pass
+    return None
+
+
 def _send_backspaces(count: int) -> None:
     """Send `count` Delete/Backspace keystrokes with flags=0 (ignores held Fn key)."""
     if count <= 0 or platform.system() != "Darwin":
+        return
+    brokered = _broker_ears_type_diff(count, "")
+    if brokered is not None:
         return
     try:
         import Quartz
@@ -180,6 +202,9 @@ def type_unicode_direct(text: str) -> bool:
     """
     if not text or platform.system() != "Darwin":
         return False
+    brokered = _broker_ears_type_diff(0, text)
+    if brokered is not None:
+        return brokered
     try:
         import Quartz
 
@@ -434,7 +459,7 @@ class OrganEars:
             None,
         )
         if tap is None:
-            return False
+            return self._run_brokered_hotkey_stream(sm)
 
         run_loop_source = Quartz.CFMachPortCreateRunLoopSource(None, tap, 0)
         run_loop = Quartz.CFRunLoopGetCurrent()
@@ -456,6 +481,67 @@ class OrganEars:
                 Quartz.CGEventTapEnable(tap, False)
             except Exception:
                 pass
+        return True
+
+    def _run_brokered_hotkey_stream(self, sm: HotkeyStateMachine) -> bool:
+        """Stream modifier/Space events from notarized `Whole Body Compute.app --ears-hotkey-stream`."""
+        try:
+            import json
+            from whole_body_compute.daemon import resolve_wbc_eyes_app_executable
+
+            app_bin = resolve_wbc_eyes_app_executable(auto_build=False)
+            if app_bin is None:
+                return False
+            proc = subprocess.Popen(
+                [str(app_bin), "--ears-hotkey-stream"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        except Exception:
+            return False
+
+        try:
+            assert proc.stdout is not None
+            first = proc.stdout.readline().strip()
+            if not first:
+                proc.terminate()
+                return False
+            first_obj = json.loads(first)
+            if first_obj.get("event") != "ready":
+                proc.terminate()
+                return False
+
+            if self.hotkey == "fn":
+                print("   Hold [Fn] to dictate • Tap [Fn+Space] for hands-free • Ctrl+C to stop", flush=True)
+            else:
+                print(f"   Press [{self.hotkey.upper()}] to toggle dictation • Ctrl+C to stop", flush=True)
+
+            for raw_line in proc.stdout:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except Exception:
+                    continue
+                kind = ev.get("event")
+                flags = int(ev.get("flags", 0))
+                if kind == "flags":
+                    sm.handle_flags_changed(flags)
+                elif kind == "keydown":
+                    action = sm.handle_key_down(int(ev.get("keycode", 0)), flags)
+                    if action == "lock_hands_free":
+                        print("🔒 Hands-Free locked (tap Fn or Fn+Space to stop)...", flush=True)
+        except KeyboardInterrupt:
+            print("\n🛑 body ears stopped.")
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except Exception:
+                proc.kill()
         return True
 
     def run_push_to_talk_loop(self) -> int:

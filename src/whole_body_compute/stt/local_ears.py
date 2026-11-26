@@ -418,59 +418,31 @@ def _build_app_icon_icns(resources_dir: Path) -> bool:
 
 def _get_ane_helper_binary() -> Optional[Path]:
     """
-    Compile (once, cached by SHA-256) the native Swift ANE SFSpeechRecognizer helper
-    inside `~/.whole_body_compute/Whole Body Compute.app` so macOS permission dialogs
-    (Microphone, Speech Recognition) display "Whole Body Compute" + the WBC logo.
+    Resolve the notarized `Whole Body Compute.app` binary (preferred - zero duplicate `.app`
+    bundles or ad-hoc wrappers), falling back to a standalone cached Swift ANE helper in
+    `~/.whole_body_compute/bin/` only when `Whole Body Compute.app` is not installed.
     """
     if platform.system() != "Darwin":
         return None
-    import plistlib
 
-    base_dir = Path.home() / ".whole_body_compute"
-    app_dir = base_dir / "Whole Body Compute.app"
-    contents_dir = app_dir / "Contents"
-    macos_dir = contents_dir / "MacOS"
-    resources_dir = contents_dir / "Resources"
-    macos_dir.mkdir(parents=True, exist_ok=True)
-    resources_dir.mkdir(parents=True, exist_ok=True)
-
-    digest = hashlib.sha256(_SWIFT_ANE_DICTATE_SOURCE.encode("utf-8")).hexdigest()[:12]
-    bin_path = macos_dir / "WholeBodyComputeEars"
-    stamp_path = contents_dir / ".ears_sha"
-    info_plist_path = contents_dir / "Info.plist"
-
-    _build_app_icon_icns(resources_dir)
-
-    info_plist = {
-        "CFBundleDevelopmentRegion": "en",
-        "CFBundleDisplayName": "Whole Body Compute",
-        "CFBundleExecutable": "WholeBodyComputeEars",
-        "CFBundleIconFile": "AppIcon",
-        "CFBundleIdentifier": "com.wholebodycompute.ears.app",
-        "CFBundleInfoDictionaryVersion": "6.0",
-        "CFBundleName": "Whole Body Compute",
-        "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": "0.1.2",
-        "CFBundleVersion": "1",
-        "LSUIElement": True,
-        "NSMicrophoneUsageDescription": "Whole Body Compute uses the microphone 100% locally in RAM for code-aware dictation (zero audio files, zero cloud egress).",
-        "NSSpeechRecognitionUsageDescription": "Whole Body Compute runs Apple on-device Speech Recognition locally on the Neural Engine with your repo AST vocabulary.",
-    }
     try:
-        info_plist_path.write_bytes(plistlib.dumps(info_plist, fmt=plistlib.FMT_XML))
+        from whole_body_compute.daemon import resolve_wbc_eyes_app_executable
+
+        unified_bin = resolve_wbc_eyes_app_executable(auto_build=False)
+        if unified_bin is not None:
+            return unified_bin
     except Exception:
         pass
 
-    if (
-        bin_path.is_file()
-        and os.access(str(bin_path), os.X_OK)
-        and stamp_path.is_file()
-        and stamp_path.read_text(encoding="utf-8").strip() == digest
-    ):
+    base_dir = Path.home() / ".whole_body_compute"
+    bin_dir = base_dir / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(_SWIFT_ANE_DICTATE_SOURCE.encode("utf-8")).hexdigest()[:12]
+    bin_path = bin_dir / f"wbc-ane-dictate-{digest}"
+    if bin_path.is_file() and os.access(str(bin_path), os.X_OK):
         return bin_path
 
-    src_path = base_dir / "bin" / f"wbc-ane-dictate-{digest}.swift"
-    src_path.parent.mkdir(parents=True, exist_ok=True)
+    src_path = bin_dir / f"wbc-ane-dictate-{digest}.swift"
     try:
         src_path.write_text(_SWIFT_ANE_DICTATE_SOURCE, encoding="utf-8")
         proc = subprocess.run(
@@ -480,13 +452,6 @@ def _get_ane_helper_binary() -> Optional[Path]:
             timeout=30.0,
         )
         if proc.returncode == 0 and bin_path.is_file():
-            stamp_path.write_text(digest, encoding="utf-8")
-            # Ad-hoc sign the .app bundle so macOS TCC caches permissions under "Whole Body Compute"
-            subprocess.run(
-                ["codesign", "--force", "--deep", "--sign", "-", str(app_dir)],
-                capture_output=True,
-                timeout=15.0,
-            )
             return bin_path
         logger.debug("swiftc compile failed: %s", proc.stderr)
     except Exception as exc:

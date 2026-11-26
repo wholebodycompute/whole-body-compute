@@ -410,7 +410,11 @@ def collect_linear_standup_state(
     3. Optional Linear GraphQL API (if LINEAR_API_KEY is present)
     """
     active_issues: List[Dict[str, Any]] = []
-    in_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("VOICEFI_TESTING") == "1")
+    in_pytest = bool(
+        os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("WBC_TESTING") == "1"
+        or os.environ.get("VOICEFI_TESTING") == "1"
+    )
 
     def _add_issue(issue_id: str, title: str, source: str, status: str = "in_progress") -> None:
         issue_id_clean = issue_id.strip().upper()
@@ -601,7 +605,11 @@ class SovereignDuetBriefingEngine:
         )
 
         terms = _channel_terms(channel)
-        in_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("VOICEFI_TESTING") == "1")
+        in_pytest = bool(
+        os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("WBC_TESTING") == "1"
+        or os.environ.get("VOICEFI_TESTING") == "1"
+    )
 
         # 1. Foveal AXUIElement Focus
         foveal_app = "Terminal"
@@ -1658,7 +1666,11 @@ def speak_briefing(
     """
     clean_script = _clean_for_speech(spoken_script, max_words=MAX_SPOKEN_WORDS)
     word_count = len(clean_script.split())
-    in_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("VOICEFI_TESTING") == "1")
+    in_pytest = bool(
+        os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("WBC_TESTING") == "1"
+        or os.environ.get("VOICEFI_TESTING") == "1"
+    )
 
     if runner is not None:
         try:

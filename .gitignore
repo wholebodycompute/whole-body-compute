@@ -60,4 +60,8 @@ legal/*.md
 workers/**/.wrangler/
 recipes/candidates/
 
+# Internal/raw benchmark runs (already-tracked public HAL provenance files remain tracked)
+benchmarks/
+
+
 

@@ -11,13 +11,39 @@ Works out-of-the-box in both Open-Core Community (`brew install whole-body-compu
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import urllib.parse
+import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+
+WBC_EYES_TEAM_ID = "Y25SHBA3P5"
+WBC_APP_NAME = "Whole Body Compute.app"
+WBC_APP_EXECUTABLE_NAME = "WholeBodyCompute"
+WBC_EYES_BUNDLE_ID = "com.wholebodycompute.app"
+WBC_EYES_APP_VERSION = "0.1.6"
+WBC_EYES_RELEASE_ZIP_URL = (
+    f"https://github.com/wholebodycompute/whole-body-compute/releases/download/"
+    f"v{WBC_EYES_APP_VERSION}/Whole-Body-Compute-{WBC_EYES_APP_VERSION}.zip"
+)
+# Populate with the 64-char SHA-256 printed by:
+#   ./scripts/build_wbc_eyes_app.sh --notarize --install
+WBC_EYES_PINNED_SHA256 = "5c31885c522908fc8bbeb00c6968e42c2214aee247409529f530aa311e31cd12"
+_FORBIDDEN_EYES_ENTITLEMENTS: Tuple[str, ...] = (
+    "com.apple.security.cs.disable-library-validation",
+    "com.apple.security.cs.allow-dyld-environment-variables",
+    "com.apple.security.cs.allow-unsigned-executable-memory",
+)
 
 
 DAEMON_LABELS: Tuple[str, ...] = (
@@ -174,24 +200,498 @@ def resolve_foveal_http_program_args() -> List[str]:
     ]
 
 
+def _compute_file_sha256(file_path: Path) -> str:
+    """Compute lowercase SHA-256 hex digest of a file."""
+    digest = hashlib.sha256()
+    with file_path.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest().lower()
+
+
+def _is_valid_pinned_sha256(sha_hex: str) -> bool:
+    """Return True when `sha_hex` is a non-zero 64-character SHA-256 hex digest."""
+    norm = str(sha_hex or "").strip().lower()
+    return bool(re.fullmatch(r"[0-9a-f]{64}", norm)) and norm != ("0" * 64)
+
+
+def verify_wbc_eyes_app_signature(
+    app_bundle: Path,
+    expected_team_id: str = WBC_EYES_TEAM_ID,
+    expected_bundle_id: str = WBC_EYES_BUNDLE_ID,
+    require_team_id: bool = True,
+    require_notarized: bool = False,
+) -> Dict[str, Any]:
+    """
+    Verify macOS code signature, Hardened Runtime, Library Validation ON,
+    bundle identifier, Team ID (`Y25SHBA3P5`), and optional notarization/Gatekeeper
+    status for `Whole Body Compute.app`.
+    """
+    bundle = Path(app_bundle).expanduser().resolve()
+    exe = bundle / "Contents" / "MacOS" / WBC_APP_EXECUTABLE_NAME
+    if not bundle.is_dir() or not exe.is_file():
+        return {"ok": False, "error": f"Invalid app bundle layout at {bundle}"}
+
+    if sys.platform != "darwin":
+        return {"ok": False, "error": "Code signature verification requires macOS (Darwin)."}
+
+    verify_proc = subprocess.run(
+        ["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(bundle)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if verify_proc.returncode != 0:
+        return {
+            "ok": False,
+            "error": f"codesign --verify failed: {(verify_proc.stderr or verify_proc.stdout).strip()}",
+        }
+
+    dv_proc = subprocess.run(
+        ["codesign", "-dv", "--verbose=4", str(bundle)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    dv_out = f"{dv_proc.stdout}\n{dv_proc.stderr}"
+    if dv_proc.returncode != 0:
+        return {"ok": False, "error": f"codesign -dv failed: {dv_out.strip()}"}
+
+    ident_match = re.search(r"^Identifier=(.+)$", dv_out, flags=re.MULTILINE)
+    ident = ident_match.group(1).strip() if ident_match else ""
+    if ident != expected_bundle_id:
+        return {
+            "ok": False,
+            "error": f"Bundle identifier mismatch: expected {expected_bundle_id}, got {ident or '<none>'}",
+        }
+
+    if not re.search(r"^CodeDirectory\b.*\bflags=0x[0-9a-fA-F]+\([^)]*runtime[^)]*\)", dv_out, flags=re.MULTILINE):
+        return {"ok": False, "error": "Hardened Runtime flag ('runtime') missing from WBC Eyes.app signature."}
+
+    team_match = re.search(r"^TeamIdentifier=(.+)$", dv_out, flags=re.MULTILINE)
+    team_id = team_match.group(1).strip() if team_match else ""
+    if require_team_id and team_id != expected_team_id:
+        return {
+            "ok": False,
+            "error": f"Developer ID TeamIdentifier mismatch: expected {expected_team_id}, got {team_id or '<none>'}",
+        }
+
+    ent_proc = subprocess.run(
+        ["codesign", "-d", "--entitlements", ":-", str(bundle)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    ent_out = f"{ent_proc.stdout}\n{ent_proc.stderr}"
+    for forbidden in _FORBIDDEN_EYES_ENTITLEMENTS:
+        if forbidden in ent_out:
+            return {
+                "ok": False,
+                "error": f"Forbidden entitlement detected ({forbidden}): Library Validation must remain ON.",
+            }
+
+    notarized = False
+    if require_notarized:
+        staple_proc = subprocess.run(
+            ["xcrun", "stapler", "validate", str(bundle)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if staple_proc.returncode != 0:
+            return {
+                "ok": False,
+                "error": f"Notarization staple validation failed: {(staple_proc.stderr or staple_proc.stdout).strip()}",
+            }
+        spctl_proc = subprocess.run(
+            ["spctl", "--assess", "--type", "execute", "--verbose=4", str(bundle)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if spctl_proc.returncode != 0:
+            return {
+                "ok": False,
+                "error": f"Gatekeeper spctl assessment failed: {(spctl_proc.stderr or spctl_proc.stdout).strip()}",
+            }
+        notarized = True
+
+    return {
+        "ok": True,
+        "bundle_path": str(bundle),
+        "executable_path": str(exe),
+        "identifier": ident,
+        "team_id": team_id,
+        "hardened_runtime": True,
+        "library_validation": True,
+        "notarized": notarized,
+    }
+
+
+def _safe_extract_wbc_eyes_zip(zip_path: Path, extract_dir: Path) -> Path:
+    """Safely validate archive members against zip-slip and extract `WBC Eyes.app`."""
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for info in zf.infolist():
+            name = info.filename
+            if not name:
+                continue
+            if name.startswith("/") or name.startswith("\\"):
+                raise ValueError(f"Refusing unsafe absolute zip entry: {name!r}")
+            parts = Path(name).parts
+            if ".." in parts:
+                raise ValueError(f"Refusing path-traversal zip entry: {name!r}")
+
+    if sys.platform == "darwin" and shutil.which("ditto"):
+        proc = subprocess.run(
+            ["ditto", "-x", "-k", str(zip_path), str(extract_dir)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"ditto extraction failed: {(proc.stderr or proc.stdout).strip()}")
+    else:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extract_dir)
+
+    candidates = [extract_dir / WBC_APP_NAME, *list(extract_dir.glob(f"*/{WBC_APP_NAME}"))]
+    bundle = next((c for c in candidates if c.is_dir()), None)
+    if bundle is None:
+        raise FileNotFoundError(f"{WBC_APP_NAME} not found inside downloaded release archive")
+
+    # Verify no symlink inside the extracted bundle points outside the bundle root
+    bundle_real = bundle.resolve()
+    for root, dirs, files in os.walk(bundle, followlinks=False):
+        for entry in (*dirs, *files):
+            p = Path(root) / entry
+            if p.is_symlink():
+                target_real = p.resolve()
+                try:
+                    target_real.relative_to(bundle_real)
+                except ValueError as exc:
+                    raise ValueError(f"Refusing escaping symlink inside app bundle: {p} -> {target_real}") from exc
+    return bundle
+
+
+def download_and_install_wbc_eyes_app(
+    url: Optional[str] = None,
+    expected_sha256: Optional[str] = None,
+    expected_team_id: str = WBC_EYES_TEAM_ID,
+    install_dir: Optional[Path | str] = None,
+    require_notarized: bool = True,
+    timeout_sec: float = 60.0,
+) -> Dict[str, Any]:
+    """
+    Download the notarized `WBC-Eyes.zip` release archive, enforce pinned SHA-256
+    integrity, verify Apple Developer ID Team (`Y25SHBA3P5`) + Hardened Runtime +
+    Library Validation ON + notarization, and atomically install `WBC Eyes.app`.
+    """
+    resolved_url = (url or os.environ.get("WBC_EYES_APP_URL", "").strip() or WBC_EYES_RELEASE_ZIP_URL).strip()
+    resolved_sha = (
+        expected_sha256
+        or os.environ.get("WBC_EYES_APP_SHA256", "").strip()
+        or WBC_EYES_PINNED_SHA256
+    ).strip().lower()
+
+    if not _is_valid_pinned_sha256(resolved_sha):
+        return {
+            "status": "error",
+            "error": (
+                "WBC Eyes notarized release SHA-256 is not pinned yet. "
+                "Provide --app-sha256 / WBC_EYES_APP_SHA256 or pass --from-source to build & sign locally."
+            ),
+            "url": resolved_url,
+            "team_id": expected_team_id,
+        }
+
+    parsed = urllib.parse.urlparse(resolved_url)
+    is_local_http = parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost", "::1")
+    if parsed.scheme not in ("https", "file") and not is_local_http:
+        return {
+            "status": "error",
+            "error": f"Refusing insecure download URL scheme ({parsed.scheme!r}); HTTPS is required.",
+            "url": resolved_url,
+        }
+
+    target_dir = Path(install_dir).expanduser().resolve() if install_dir is not None else (Path.home() / "Applications").resolve()
+
+    with tempfile.TemporaryDirectory(prefix="wbc_eyes_dl_") as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        zip_path = tmp_dir / "WBC-Eyes.zip"
+        try:
+            if parsed.scheme == "file":
+                local_zip = Path(urllib.request.url2pathname(parsed.path))
+                shutil.copyfile(local_zip, zip_path)
+            else:
+                req = urllib.request.Request(
+                    resolved_url,
+                    headers={"User-Agent": f"WholeBodyCompute/{WBC_EYES_APP_VERSION}"},
+                )
+                with urllib.request.urlopen(req, timeout=timeout_sec) as resp, zip_path.open("wb") as out_f:
+                    shutil.copyfileobj(resp, out_f)
+        except Exception as exc:
+            return {
+                "status": "error",
+                "error": f"Failed to download WBC Eyes.app archive: {exc}",
+                "url": resolved_url,
+            }
+
+        actual_sha = _compute_file_sha256(zip_path)
+        if not hmac.compare_digest(actual_sha, resolved_sha):
+            return {
+                "status": "error",
+                "error": f"SHA-256 mismatch for WBC-Eyes archive (expected {resolved_sha}, got {actual_sha}).",
+                "expected_sha256": resolved_sha,
+                "actual_sha256": actual_sha,
+                "url": resolved_url,
+            }
+
+        extract_dir = tmp_dir / "extracted"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            extracted_bundle = _safe_extract_wbc_eyes_zip(zip_path, extract_dir)
+        except Exception as exc:
+            return {"status": "error", "error": f"Archive extraction failed: {exc}", "url": resolved_url}
+
+        sig_res = verify_wbc_eyes_app_signature(
+            extracted_bundle,
+            expected_team_id=expected_team_id,
+            expected_bundle_id=WBC_EYES_BUNDLE_ID,
+            require_team_id=True,
+            require_notarized=require_notarized,
+        )
+        if not sig_res.get("ok"):
+            return {
+                "status": "error",
+                "error": sig_res.get("error", "Code signature verification failed"),
+                "sha256": actual_sha,
+                "team_id": expected_team_id,
+            }
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        dest_app = target_dir / WBC_APP_NAME
+        staged_app = target_dir / f".{WBC_APP_NAME}.staging.{os.getpid()}"
+        if staged_app.exists():
+            shutil.rmtree(staged_app, ignore_errors=True)
+
+        if sys.platform == "darwin" and shutil.which("ditto"):
+            copy_proc = subprocess.run(
+                ["ditto", str(extracted_bundle), str(staged_app)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if copy_proc.returncode != 0:
+                return {"status": "error", "error": f"Failed staging app bundle: {copy_proc.stderr.strip()}"}
+        else:
+            shutil.copytree(extracted_bundle, staged_app, symlinks=True)
+
+        if dest_app.exists():
+            shutil.rmtree(dest_app)
+        staged_app.rename(dest_app)
+        # Clean up legacy split `WBC Eyes.app` if present in same folder
+        legacy_eyes = target_dir / "WBC Eyes.app"
+        if legacy_eyes.exists():
+            shutil.rmtree(legacy_eyes, ignore_errors=True)
+
+    exe_path = dest_app / "Contents" / "MacOS" / WBC_APP_EXECUTABLE_NAME
+    return {
+        "status": "ok",
+        "method": "notarized_download",
+        "bundle_path": str(dest_app),
+        "executable_path": str(exe_path),
+        "sha256": actual_sha,
+        "team_id": sig_res.get("team_id", expected_team_id),
+        "identifier": sig_res.get("identifier", WBC_EYES_BUNDLE_ID),
+        "notarized": bool(sig_res.get("notarized", False)),
+        "message": (
+            f"✅ Installed verified {WBC_APP_NAME} (Team {sig_res.get('team_id')}, "
+            f"SHA-256 {actual_sha[:12]}…) -> {dest_app}"
+        ),
+    }
+
+
+def install_wbc_eyes_app(
+    url: Optional[str] = None,
+    expected_sha256: Optional[str] = None,
+    system: bool = False,
+    from_source: bool = False,
+    require_notarized: bool = True,
+) -> Dict[str, Any]:
+    """
+    Install `WBC Eyes.app` via pinned notarized download (`Y25SHBA3P5` + SHA-256)
+    or local Swift source build (`--from-source` / developer checkout fallback).
+    """
+    if sys.platform != "darwin":
+        return {
+            "status": "error",
+            "error": "`WBC Eyes.app` is macOS-only (Linux/Windows use zero-TCC Blood-Brain Barrier mode).",
+        }
+
+    install_dir = Path("/Applications") if system else (Path.home() / "Applications")
+    resolved_sha = (
+        expected_sha256
+        or os.environ.get("WBC_EYES_APP_SHA256", "").strip()
+        or WBC_EYES_PINNED_SHA256
+    ).strip().lower()
+
+    if not from_source and _is_valid_pinned_sha256(resolved_sha):
+        return download_and_install_wbc_eyes_app(
+            url=url,
+            expected_sha256=resolved_sha,
+            expected_team_id=WBC_EYES_TEAM_ID,
+            install_dir=install_dir,
+            require_notarized=require_notarized,
+        )
+
+    repo_root = Path(__file__).resolve().parents[2]
+    build_script = repo_root / "scripts" / "build_wbc_eyes_app.sh"
+    if not from_source and not _is_valid_pinned_sha256(resolved_sha):
+        if not build_script.is_file():
+            return download_and_install_wbc_eyes_app(
+                url=url,
+                expected_sha256=resolved_sha,
+                expected_team_id=WBC_EYES_TEAM_ID,
+                install_dir=install_dir,
+                require_notarized=require_notarized,
+            )
+
+    if not build_script.is_file() or not shutil.which("swift"):
+        return {
+            "status": "error",
+            "error": "Local Swift build requested/required, but scripts/build_wbc_eyes_app.sh or `swift` was not found.",
+        }
+
+    cmd = [str(build_script), "--native-only"]
+    ident = os.environ.get("CODESIGN_IDENTITY", "").strip()
+    if ident:
+        cmd.extend(["--identity", ident])
+    else:
+        cmd.append("--adhoc")
+    cmd.append("--system" if system else "--install")
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180, check=False)
+    if proc.returncode != 0:
+        return {
+            "status": "error",
+            "error": f"Local WBC Eyes.app build failed: {(proc.stderr or proc.stdout).strip()}",
+        }
+
+    dest_app = install_dir / WBC_APP_NAME
+    sig_res = verify_wbc_eyes_app_signature(
+        dest_app,
+        expected_team_id=WBC_EYES_TEAM_ID,
+        expected_bundle_id=WBC_EYES_BUNDLE_ID,
+        require_team_id=bool(ident),
+        require_notarized=False,
+    )
+    if not sig_res.get("ok"):
+        return {"status": "error", "error": sig_res.get("error", "Local bundle verification failed")}
+
+    return {
+        "status": "ok",
+        "method": "local_source_build",
+        "bundle_path": str(dest_app),
+        "executable_path": sig_res["executable_path"],
+        "team_id": sig_res.get("team_id") or "adhoc",
+        "identifier": sig_res["identifier"],
+        "notarized": False,
+        "message": f"✅ Built & installed {WBC_APP_NAME} ({sig_res.get('team_id') or 'adhoc'}) -> {dest_app}",
+    }
+
+
+def resolve_wbc_eyes_app_executable(auto_build: bool = False) -> Optional[Path]:
+    """
+    Resolve signed `Whole Body Compute.app/Contents/MacOS/WholeBodyCompute` binary on macOS
+    so `com.wholebodycompute.foveal` and `body ears` use the unified zero-Python Swift
+    menu-bar TCC broker instead of requiring Accessibility or Microphone on Terminal/IDE/Python.
+    """
+    explicit_eyes = (
+        os.environ.get("WBC_EYES_APP_BIN", "").strip()
+        or os.environ.get("WBC_EYES_APP_PATH", "").strip()
+    )
+    if explicit_eyes:
+        cand = Path(explicit_eyes).expanduser()
+        if cand.suffix == ".app":
+            primary = cand / "Contents" / "MacOS" / WBC_APP_EXECUTABLE_NAME
+            legacy = cand / "Contents" / "MacOS" / "WBCEyes"
+            cand = primary if primary.exists() or not legacy.exists() else legacy
+        if _is_safe_explicit_bin(str(cand)) or (
+            "PYTEST_CURRENT_TEST" in os.environ and cand.is_file() and os.access(cand, os.X_OK)
+        ):
+            return cand.resolve()
+        return None
+
+    if sys.platform != "darwin" and os.environ.get("WBC_FORCE_DARWIN_DAEMON_TEST") != "1":
+        return None
+
+    # Keep synthetic `WBC_DAEMON_BODY_BIN` unit tests deterministic unless `WBC_EYES_APP_PATH` is set
+    if "PYTEST_CURRENT_TEST" in os.environ and os.environ.get("WBC_DAEMON_BODY_BIN", "").strip():
+        return None
+
+    from whole_body_compute.procedural_telemetry import get_wbc_data_dir
+
+    repo_root = Path(__file__).resolve().parents[2]
+    app_candidates = [
+        Path(f"/Applications/{WBC_APP_NAME}/Contents/MacOS/{WBC_APP_EXECUTABLE_NAME}"),
+        Path.home() / "Applications" / WBC_APP_NAME / "Contents" / "MacOS" / WBC_APP_EXECUTABLE_NAME,
+        get_wbc_data_dir() / WBC_APP_NAME / "Contents" / "MacOS" / WBC_APP_EXECUTABLE_NAME,
+    ]
+    if not _is_temp_path(str(repo_root)):
+        app_candidates.append(repo_root / "dist" / WBC_APP_NAME / "Contents" / "MacOS" / WBC_APP_EXECUTABLE_NAME)
+
+    for cand in app_candidates:
+        if _is_safe_explicit_bin(str(cand)):
+            return cand.resolve()
+
+    if auto_build and sys.platform == "darwin" and "PYTEST_CURRENT_TEST" not in os.environ:
+        pinned_sha = (
+            os.environ.get("WBC_EYES_APP_SHA256", "").strip() or WBC_EYES_PINNED_SHA256
+        ).strip().lower()
+        if _is_valid_pinned_sha256(pinned_sha):
+            dl_res = download_and_install_wbc_eyes_app(
+                expected_sha256=pinned_sha,
+                expected_team_id=WBC_EYES_TEAM_ID,
+                install_dir=Path.home() / "Applications",
+                require_notarized=True,
+            )
+            if dl_res.get("status") == "ok" and _is_safe_explicit_bin(dl_res.get("executable_path", "")):
+                return Path(dl_res["executable_path"]).resolve()
+
+        build_script = repo_root / "scripts" / "build_wbc_eyes_app.sh"
+        if build_script.is_file() and shutil.which("swift"):
+            try:
+                subprocess.run(
+                    [str(build_script), "--adhoc", "--native-only", "--install-data-dir"],
+                    capture_output=True,
+                    text=True,
+                    timeout=90,
+                    check=False,
+                )
+                built_cand = get_wbc_data_dir() / WBC_APP_NAME / "Contents" / "MacOS" / WBC_APP_EXECUTABLE_NAME
+                if _is_safe_explicit_bin(str(built_cand)):
+                    return built_cand.resolve()
+            except Exception:
+                pass
+    return None
+
+
+def resolve_foveal_daemon_program_args(auto_build: bool = False) -> Tuple[List[str], bool]:
+    """Return `(program_args, is_wbc_app)` for `com.wholebodycompute.foveal`."""
+    eyes_bin = resolve_wbc_eyes_app_executable(auto_build=auto_build)
+    if eyes_bin is not None:
+        return [str(eyes_bin)], True
+    return resolve_body_program_args(["eyes", "--daemon"]), False
+
+
 def resolve_ears_daemon_program_args() -> List[str]:
     """
     Resolve `ProgramArguments` for `com.wholebodycompute.ears`.
-    On macOS, wraps `body ears --daemon` inside `~/.whole_body_compute/Whole Body Compute.app`
-    as the top-level LaunchAgent process so Login Items and TCC permission dialogs
-    display "Whole Body Compute" + `AppIcon.icns` instead of `body`/`python3`.
+    Runs unprivileged `body ears --daemon` directly; Microphone, Speech, hotkey listening,
+    and differential typing are brokered natively through notarized `Whole Body Compute.app`
+    so Python never runs inside a TCC-trusted `.app` bundle.
     """
-    body_args = resolve_body_program_args(["ears", "--daemon"])
-    if sys.platform == "darwin":
-        try:
-            from whole_body_compute.stt.local_ears import ensure_ears_app_executable
-
-            app_bin = ensure_ears_app_executable()
-            if app_bin is not None:
-                return [str(app_bin), "--launch-daemon", *body_args]
-        except Exception:
-            pass
-    return body_args
+    return resolve_body_program_args(["ears", "--daemon"])
 
 
 def _is_pro_daemon_unlocked() -> bool:
@@ -233,6 +733,7 @@ def _default_daemon_path_env() -> str:
 def build_launchd_plist_specs(
     logs_dir: Optional[Path] = None,
     include_pro: Optional[bool] = None,
+    auto_build_eyes_app: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """Construct clean, portable macOS `launchd` plist dictionaries."""
     resolved_logs = resolve_daemon_logs_dir(logs_dir)
@@ -243,17 +744,27 @@ def build_launchd_plist_specs(
         "WBC_AMBIENT_DISCOVERY": os.environ.get("WBC_AMBIENT_DISCOVERY", "1").strip() or "1",
     }
 
-    specs: Dict[str, Dict[str, Any]] = {
-        "com.wholebodycompute.foveal": {
-            "Label": "com.wholebodycompute.foveal",
-            "ProgramArguments": resolve_body_program_args(["eyes", "--daemon"]),
+    foveal_args, using_wbc_eyes_app = resolve_foveal_daemon_program_args(auto_build=auto_build_eyes_app)
+    foveal_spec: Dict[str, Any] = {
+        "Label": "com.wholebodycompute.foveal",
+    }
+    if using_wbc_eyes_app:
+        foveal_spec["AssociatedBundleIdentifiers"] = WBC_EYES_BUNDLE_ID
+        foveal_spec["LimitLoadToSessionType"] = "Aqua"
+    foveal_spec.update(
+        {
+            "ProgramArguments": foveal_args,
             "EnvironmentVariables": dict(env_vars),
             "RunAtLoad": True,
             "KeepAlive": True,
             "ProcessType": "Interactive",
             "StandardOutPath": str(resolved_logs / "foveal_daemon.log"),
             "StandardErrorPath": str(resolved_logs / "foveal_daemon.log"),
-        },
+        }
+    )
+
+    specs: Dict[str, Dict[str, Any]] = {
+        "com.wholebodycompute.foveal": foveal_spec,
         "com.wholebodycompute.foveal-memory": {
             "Label": "com.wholebodycompute.foveal-memory",
             "ProgramArguments": resolve_foveal_http_program_args(),
@@ -266,7 +777,7 @@ def build_launchd_plist_specs(
         },
         "com.wholebodycompute.ears": {
             "Label": "com.wholebodycompute.ears",
-            "AssociatedBundleIdentifiers": "com.wholebodycompute.ears.app",
+            "AssociatedBundleIdentifiers": WBC_EYES_BUNDLE_ID,
             "ProgramArguments": resolve_ears_daemon_program_args(),
             "EnvironmentVariables": dict(env_vars),
             "RunAtLoad": True,
@@ -387,7 +898,11 @@ def manage_launchd_daemon(
     )
 
     if action == "install":
-        specs = build_launchd_plist_specs(logs_dir=resolved_logs, include_pro=include_pro)
+        specs = build_launchd_plist_specs(
+            logs_dir=resolved_logs,
+            include_pro=include_pro,
+            auto_build_eyes_app=(not dry_run and not skip_launchctl),
+        )
         active_map = _query_launchctl_state() if not skip_launchctl else {}
         written_plists: List[str] = []
         loaded_labels: List[str] = []
@@ -444,6 +959,21 @@ def manage_launchd_daemon(
                     loaded_labels.append(label)
                 msgs.append(f"✅ Installed & loaded {plist_path.name} (exit={res.returncode})")
 
+        try:
+            from whole_body_compute.procedural_telemetry import track_wbc_event
+
+            track_wbc_event(
+                "wbc_daemon_action",
+                {
+                    "action": "install",
+                    "dry_run": bool(dry_run),
+                    "pro_daemons_included": "com.wholebodycompute.remsleep" in specs,
+                    "loaded_count": len(loaded_labels),
+                    "written_count": len(written_plists),
+                },
+            )
+        except Exception:
+            pass
         return {
             "status": "ok",
             "action": "install",

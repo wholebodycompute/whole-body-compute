@@ -518,6 +518,24 @@ def get_seconds_since_last_user_input() -> float:
         return 0.0
 
 
+def is_mouse_button_down() -> bool:
+    """Return True if any mouse/trackpad button is currently pressed (e.g. active drag-and-drop or gaming)."""
+    try:
+        import Quartz
+
+        state = Quartz.kCGEventSourceStateCombinedSessionState
+        for btn in (
+            Quartz.kCGMouseButtonLeft,
+            Quartz.kCGMouseButtonRight,
+            Quartz.kCGMouseButtonCenter,
+        ):
+            if Quartz.CGEventSourceButtonState(state, btn):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def capture_apple_vision_ocr(fast_level: int = 1) -> Optional[Tuple[str, str, str]]:
     """
     Capture the main macOS display silently (`screencapture -x -m`) without stealing focus
@@ -577,65 +595,81 @@ def capture_headless_window_text(include_vision_ocr: bool = True) -> List[Tuple[
         return []
 
     snapshots: List[Tuple[str, str, str]] = []
-    # 1. Inspect Terminal.app contents if running (zero focus change)
-    script_terminal = """
-    if application "Terminal" is running then
-        tell application "Terminal"
-            if (count of windows) > 0 then
-                set winName to name of front window
-                set tabText to contents of selected tab of front window
-                return winName & "|||" & tabText
-            end if
-        end tell
-    end if
-    return ""
-    """
+    running_app_names: Optional[Set[str]] = None
     try:
-        res = subprocess.run(
-            ["osascript", "-e", script_terminal],
-            capture_output=True,
-            text=True,
-            timeout=1.5,
-        )
-        out = (res.stdout or "").strip()
-        if "|||" in out:
-            win_name, tab_text = out.split("|||", 1)
-            trimmed = "\n".join(tab_text.strip().splitlines()[-40:]).strip()
-            if trimmed:
-                snapshots.append(("Terminal", win_name.strip(), trimmed))
+        from AppKit import NSWorkspace
+
+        ws = NSWorkspace.sharedWorkspace()
+        if ws:
+            running_app_names = {
+                str(a.localizedName() or "").strip()
+                for a in (ws.runningApplications() or [])
+                if a.localizedName()
+            }
     except Exception:
-        pass
+        running_app_names = None
+
+    # 1. Inspect Terminal.app contents if running (zero focus change)
+    if running_app_names is None or "Terminal" in running_app_names:
+        script_terminal = """
+        if application "Terminal" is running then
+            tell application "Terminal"
+                if (count of windows) > 0 then
+                    set winName to name of front window
+                    set tabText to contents of selected tab of front window
+                    return winName & "|||" & tabText
+                end if
+            end tell
+        end if
+        return ""
+        """
+        try:
+            res = subprocess.run(
+                ["osascript", "-e", script_terminal],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+            )
+            out = (res.stdout or "").strip()
+            if "|||" in out:
+                win_name, tab_text = out.split("|||", 1)
+                trimmed = "\n".join(tab_text.strip().splitlines()[-40:]).strip()
+                if trimmed:
+                    snapshots.append(("Terminal", win_name.strip(), trimmed))
+        except Exception:
+            pass
 
     # 2. Inspect iTerm2 session text if running (zero focus change)
-    script_iterm = """
-    if application "iTerm2" is running then
-        tell application "iTerm2"
-            if (count of windows) > 0 then
-                tell current session of current window
-                    set sessName to name
-                    set sessText to text
-                    return sessName & "|||" & sessText
-                end tell
-            end if
-        end tell
-    end if
-    return ""
-    """
-    try:
-        res = subprocess.run(
-            ["osascript", "-e", script_iterm],
-            capture_output=True,
-            text=True,
-            timeout=1.5,
-        )
-        out = (res.stdout or "").strip()
-        if "|||" in out:
-            win_name, tab_text = out.split("|||", 1)
-            trimmed = "\n".join(tab_text.strip().splitlines()[-40:]).strip()
-            if trimmed:
-                snapshots.append(("iTerm2", win_name.strip(), trimmed))
-    except Exception:
-        pass
+    if running_app_names is None or "iTerm2" in running_app_names or "iTerm" in running_app_names:
+        script_iterm = """
+        if application "iTerm2" is running then
+            tell application "iTerm2"
+                if (count of windows) > 0 then
+                    tell current session of current window
+                        set sessName to name
+                        set sessText to text
+                        return sessName & "|||" & sessText
+                    end tell
+                end if
+            end tell
+        end if
+        return ""
+        """
+        try:
+            res = subprocess.run(
+                ["osascript", "-e", script_iterm],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+            )
+            out = (res.stdout or "").strip()
+            if "|||" in out:
+                win_name, tab_text = out.split("|||", 1)
+                trimmed = "\n".join(tab_text.strip().splitlines()[-40:]).strip()
+                if trimmed:
+                    snapshots.append(("iTerm2", win_name.strip(), trimmed))
+        except Exception:
+            pass
 
     # 3. Capture full-screen Apple Vision Neural Engine OCR for Chrome, Godot, PDFs, Slack, etc.
     if include_vision_ocr:
@@ -1179,6 +1213,10 @@ def serve_local_foveal_http(
                 try:
                     cur_sig = get_frontmost_window_metadata()
                     idle_sec = get_seconds_since_last_user_input()
+                    # Defer screencapture + Vision OCR while user is actively dragging, moving mouse, or gaming
+                    if is_mouse_button_down() or idle_sec < 2.0:
+                        time.sleep(2.0)
+                        continue
                     # Skip expensive screencapture + Vision OCR when user is idle and window hasn't changed
                     if idle_sec >= 45.0 and cur_sig == last_window_sig and last_seen:
                         time.sleep(30.0)
@@ -1276,7 +1314,11 @@ def _perform_ax_action_impl(
         }
 
     # Headless / mock testing bypass
-    if os.environ.get("VOICEFI_MOCK_FOVEAL") == "1" or os.environ.get("VOICEFI_HEADLESS") == "1":
+    if (
+        os.environ.get("VOICEFI_MOCK_FOVEAL") == "1"
+        or os.environ.get("WBC_HEADLESS") == "1"
+        or os.environ.get("VOICEFI_HEADLESS") == "1"
+    ):
         return {
             "success": True,
             "message": f"[MOCK] Successfully performed '{action}' on {role_clean} '{title_clean}' in {app_name}.",

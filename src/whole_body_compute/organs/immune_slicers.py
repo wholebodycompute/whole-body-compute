@@ -119,77 +119,127 @@ def _has_skip_decorator(node: ast.AST) -> bool:
     return False
 
 
-def _fast_extract_ast_summary(tree: ast.AST) -> Dict[str, Any]:
+def _render_ast_call_span(node: ast.AST, source_code: str = "") -> str:
+    if source_code:
+        seg = ast.get_source_segment(source_code, node)
+        if seg and seg.strip():
+            return seg.strip()
+    try:
+        return ast.unparse(node).strip()
+    except Exception:
+        return ""
+
+
+def _fast_extract_ast_summary(tree: ast.AST, source_code: str = "") -> Dict[str, Any]:
     assert_count = 0
     taut_asserts = 0
     test_funcs: Set[str] = set()
     unsafe_calls: List[str] = []
+    unsafe_spans: List[Tuple[str, str]] = []
     alias_map: Dict[str, str] = {}
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
+    # Seed module-level aliases in O(len(tree.body)) before single-pass iterative DFS
+    for stmt in getattr(tree, "body", ()):
+        if isinstance(stmt, ast.Import):
+            for n in stmt.names:
+                if n.asname:
+                    alias_map[n.asname] = n.name
+        elif isinstance(stmt, ast.ImportFrom):
+            mod = stmt.module or ""
+            for n in stmt.names:
+                local_name = n.asname or n.name
+                alias_map[local_name] = f"{mod}.{n.name}" if mod else n.name
+
+    stack: List[ast.AST] = [tree]
+    pop_node = stack.pop
+    ext_nodes = stack.extend
+    iter_children = ast.iter_child_nodes
+    Import_cls = ast.Import
+    ImportFrom_cls = ast.ImportFrom
+    Assert_cls = ast.Assert
+    Func_cls = (ast.FunctionDef, ast.AsyncFunctionDef)
+    Call_cls = ast.Call
+
+    while stack:
+        node = pop_node()
+        children = list(iter_children(node))
+        if children:
+            children.reverse()
+            ext_nodes(children)
+
+        n_cls = node.__class__
+        if n_cls is Import_cls:
             for n in node.names:
                 if n.asname:
                     alias_map[n.asname] = n.name
-        elif isinstance(node, ast.ImportFrom):
+        elif n_cls is ImportFrom_cls:
             mod = node.module or ""
             for n in node.names:
                 local_name = n.asname or n.name
                 alias_map[local_name] = f"{mod}.{n.name}" if mod else n.name
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assert):
+        elif n_cls is Assert_cls:
             assert_count += 1
             if _fast_is_tautological(node.test):
                 taut_asserts += 1
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        elif isinstance(node, Func_cls):
             if node.name.startswith("test_") and not _has_skip_decorator(node):
                 test_funcs.add(node.name)
-        elif isinstance(node, ast.Call):
+        elif n_cls is Call_cls:
+            matched_label: Optional[str] = None
             if isinstance(node.func, ast.Subscript):
                 sub_val = node.func.value
                 if isinstance(sub_val, ast.Name) and sub_val.id in ("__builtins__", "builtins"):
-                    unsafe_calls.append("__builtins__[...]")
+                    matched_label = "__builtins__[...]"
                 elif isinstance(sub_val, ast.Call) and isinstance(sub_val.func, ast.Name) and sub_val.func.id in ("globals", "locals", "vars"):
-                    unsafe_calls.append(f"{sub_val.func.id}()[...]")
+                    matched_label = f"{sub_val.func.id}()[...]"
             elif isinstance(node.func, ast.Name):
                 resolved = alias_map.get(node.func.id, node.func.id)
                 if resolved in ("eval", "exec", "compile", "__import__", "os.system", "os.popen", "pty.spawn"):
-                    unsafe_calls.append(resolved)
+                    matched_label = resolved
                 elif resolved in ("subprocess.Popen", "subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output"):
                     for kw in node.keywords:
                         if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and bool(kw.value.value) is True:
-                            unsafe_calls.append(f"{resolved}(shell=True)")
+                            matched_label = f"{resolved}(shell=True)"
+                            break
                 elif node.func.id == "getattr" and len(node.args) >= 2:
                     arg0 = node.args[0]
                     arg1 = node.args[1]
                     arg0_name = alias_map.get(arg0.id, arg0.id) if isinstance(arg0, ast.Name) else ""
                     if isinstance(arg1, ast.Constant):
                         if arg1.value in ("system", "popen", "exec", "eval", "Popen", "spawn"):
-                            unsafe_calls.append(f'getattr(..., "{arg1.value}")')
+                            matched_label = f'getattr(..., "{arg1.value}")'
                     elif arg0_name in ("os", "subprocess", "pty", "builtins", "__builtins__", "shutil"):
-                        unsafe_calls.append(f"getattr({arg0_name}, <dynamic>)")
+                        matched_label = f"getattr({arg0_name}, <dynamic>)"
             elif isinstance(node.func, ast.Attribute):
                 attr = node.func.attr
                 val = node.func.value
                 raw_id = val.id if isinstance(val, ast.Name) else ("call()" if isinstance(val, ast.Call) else "")
                 val_repr = alias_map.get(raw_id, raw_id) if raw_id else ""
                 qual = f"{val_repr}.{attr}" if val_repr else attr
-                if qual in ("os.system", "os.popen", "pty.spawn") or attr in ("system", "popen", "spawn", "posix_spawn", "execl", "execle", "execlp", "execv", "execve", "execvp"):
-                    unsafe_calls.append(qual)
+                if (
+                    qual in ("os.system", "os.popen", "pty.spawn")
+                    or attr in ("system", "popen", "spawn", "posix_spawn", "execl", "execle", "execclp", "execv", "execve", "execvp")
+                ) and qual != "platform.system":
+                    matched_label = qual
                 elif qual in ("subprocess.Popen", "subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output"):
                     for kw in node.keywords:
                         if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and bool(kw.value.value) is True:
-                            unsafe_calls.append(f"{qual}(shell=True)")
+                            matched_label = f"{qual}(shell=True)"
+                            break
                 elif qual == "shutil.rmtree" and node.args:
                     arg0 = node.args[0]
                     if isinstance(arg0, ast.Constant) and str(arg0.value).strip() in ("/", "~", ".."):
-                        unsafe_calls.append("shutil.rmtree(root)")
+                        matched_label = "shutil.rmtree(root)"
+            if matched_label:
+                unsafe_calls.append(matched_label)
+                span = _render_ast_call_span(node, source_code) or matched_label
+                unsafe_spans.append((matched_label, span))
     return {
         "assert_count": assert_count,
         "tautological_asserts": taut_asserts,
         "test_funcs": test_funcs,
         "unsafe_calls": unsafe_calls,
+        "unsafe_spans": unsafe_spans,
     }
 
 
@@ -197,6 +247,9 @@ def _fast_three_stage_ast_secgate(
     parent_code: str,
     candidate_code: str,
     file_path: str = "",
+    *,
+    parent_tree: Optional[ast.AST] = None,
+    candidate_tree: Optional[ast.AST] = None,
 ) -> Dict[str, Any]:
     """Zero-import stdlib 3-Stage AST SecGate for sub-30ms `-S` hook execution."""
     fname = Path(file_path).name if file_path else ""
@@ -232,28 +285,39 @@ def _fast_three_stage_ast_secgate(
                 persist_to_hippocampus=False,
             )
         return gate
-    try:
-        cand_tree = ast.parse(candidate_code)
-    except SyntaxError as exc:
-        return {
-            "passed": False,
-            "stage": 1,
-            "reason": f"Stage 1 (Syntax Error): {exc.msg} at line {exc.lineno}",
-        }
-    except (ValueError, RecursionError, MemoryError) as exc:
-        return {
-            "passed": False,
-            "stage": 1,
-            "reason": f"Stage 1 (AST Parse Guard): {type(exc).__name__}",
-        }
-
-    parent_summary = {"assert_count": 0, "tautological_asserts": 0, "test_funcs": set(), "unsafe_calls": []}
-    if parent_code.strip():
+    if candidate_tree is not None:
+        cand_tree = candidate_tree
+    else:
         try:
-            parent_summary = _fast_extract_ast_summary(ast.parse(parent_code))
+            cand_tree = ast.parse(candidate_code)
+        except SyntaxError as exc:
+            return {
+                "passed": False,
+                "stage": 1,
+                "reason": f"Stage 1 (Syntax Error): {exc.msg} at line {exc.lineno}",
+            }
+        except (ValueError, RecursionError, MemoryError) as exc:
+            return {
+                "passed": False,
+                "stage": 1,
+                "reason": f"Stage 1 (AST Parse Guard): {type(exc).__name__}",
+            }
+
+    parent_summary = {
+        "assert_count": 0,
+        "tautological_asserts": 0,
+        "test_funcs": set(),
+        "unsafe_calls": [],
+        "unsafe_spans": [],
+    }
+    if parent_tree is not None:
+        parent_summary = _fast_extract_ast_summary(parent_tree, parent_code)
+    elif parent_code.strip():
+        try:
+            parent_summary = _fast_extract_ast_summary(ast.parse(parent_code), parent_code)
         except SyntaxError:
             pass
-    cand_summary = _fast_extract_ast_summary(cand_tree)
+    cand_summary = _fast_extract_ast_summary(cand_tree, candidate_code)
 
     if cand_summary["assert_count"] < parent_summary["assert_count"]:
         return {
@@ -285,10 +349,19 @@ def _fast_three_stage_ast_secgate(
         }
     new_unsafe = [c for c in cand_summary["unsafe_calls"] if c not in parent_summary["unsafe_calls"]]
     if new_unsafe:
+        parent_span_set = set(parent_summary.get("unsafe_spans", []))
+        new_spans = [
+            span
+            for pair in cand_summary.get("unsafe_spans", [])
+            if pair not in parent_span_set and pair[0] in new_unsafe
+            for span in (pair[1],)
+            if span
+        ]
+        antigen_payload = "; ".join(new_spans) if new_spans else "; ".join(new_unsafe)
         reason_str = f"Stage 3 (Unsafe Call Audit): Forbidden call(s) introduced: {new_unsafe}"
         AntibodyRegistry.get_instance().record_antigen(
             vector="ast_secgate",
-            payload=candidate_code,
+            payload=antigen_payload,
             reason=reason_str,
             stage=3,
             persist_to_hippocampus=False,

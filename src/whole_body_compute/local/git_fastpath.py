@@ -120,15 +120,51 @@ def resolve_session_id(session_id: str | None = None) -> str:
     )
 
 
+def _load_repo_zone_config(repo_root: Path) -> dict[str, Any]:
+    """Load optional repo-local `.wbc_reflex.json` (zones + blocked_paths)."""
+    cfg_path = repo_root / ".wbc_reflex.json"
+    if not cfg_path.is_file():
+        return {}
+    with contextlib.suppress(OSError, json.JSONDecodeError, TypeError, ValueError):
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def _is_blocked_repo_path(rel_path: str, blocked_paths: list[str]) -> str | None:
+    norm = rel_path.replace("\\", "/").lstrip("./")
+    for bp in blocked_paths:
+        bp_norm = str(bp).strip().replace("\\", "/").lstrip("./")
+        if bp_norm and (norm == bp_norm or norm.startswith(bp_norm.rstrip("/") + "/")):
+            return bp_norm
+    return None
+
+
+def _matches_zone_prefixes(rel_path: str, prefixes: list[Any]) -> bool:
+    norm = rel_path.replace("\\", "/").lstrip("./")
+    for pref in prefixes:
+        p_norm = str(pref).strip().replace("\\", "/").lstrip("./")
+        if not p_norm:
+            continue
+        if norm == p_norm or (p_norm.endswith("/") and norm.startswith(p_norm)) or norm.startswith(p_norm.rstrip("/") + "/"):
+            return True
+    return False
+
+
 def record_file_touch(
     paths: list[str] | str,
     session_id: str | None = None,
     repo_root: Path | None = None,
+    *,
+    record_session_edit: bool = True,
 ) -> None:
     """Atomically record file touches for an agent session under .git lock.
 
-    Prunes records older than 120.0 seconds and logs multi-agent sessions
-    touching the same file to detect collisions.
+    Maintains:
+      - `touches` (120.0s TTL) for live multi-agent collision detection.
+      - `session_edits` (86,400.0s / 24h TTL) so bare `body commit` inside a
+        conversation scopes automatically to files edited in that conversation.
     """
     root = resolve_repo_root(repo_root)
     git_dir = get_git_dir(root)
@@ -150,16 +186,16 @@ def record_file_touch(
         if fcntl is not None:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
-            data: dict[str, Any] = {"touches": {}}
+            data: dict[str, Any] = {"touches": {}, "session_edits": {}}
             if touches_path.exists():
                 try:
                     loaded = json.loads(touches_path.read_text(encoding="utf-8"))
                     if isinstance(loaded, dict) and "touches" in loaded:
                         data = loaded
                 except (json.JSONDecodeError, OSError):
-                    data = {"touches": {}}
+                    data = {"touches": {}, "session_edits": {}}
 
-            # Prune entries older than 120.0s
+            # Prune live collision entries older than 120.0s
             active_touches: dict[str, Any] = {}
             for p, entry in data.get("touches", {}).items():
                 if isinstance(entry, dict) and (now - float(entry.get("ts", 0))) < 120.0:
@@ -189,7 +225,26 @@ def record_file_touch(
                         "sessions": [sid],
                     }
 
+            # Prune 24h session_edits and append edited paths for real conversation IDs
+            raw_sess_edits = data.get("session_edits") if isinstance(data.get("session_edits"), dict) else {}
+            session_edits: dict[str, Any] = {}
+            for s_key, s_val in raw_sess_edits.items():
+                if isinstance(s_val, dict) and (now - float(s_val.get("ts", 0))) < 86400.0:
+                    files_clean = [str(f) for f in (s_val.get("files") or []) if str(f)]
+                    if files_clean:
+                        session_edits[str(s_key)] = {"ts": float(s_val.get("ts", now)), "files": files_clean}
+
+            if record_session_edit and sid and sid not in ("default", "local", "global"):
+                existing_entry = session_edits.get(sid, {"ts": now, "files": []})
+                merged_files = list(existing_entry.get("files") or [])
+                for rp in rel_paths:
+                    if rp and not rp.startswith("..") and rp not in merged_files:
+                        merged_files.append(rp)
+                if merged_files:
+                    session_edits[sid] = {"ts": now, "files": merged_files}
+
             data["touches"] = active_touches
+            data["session_edits"] = session_edits
             touches_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         finally:
             if fcntl is not None:
@@ -197,13 +252,14 @@ def record_file_touch(
 
 
 def remove_touches(repo_root: Path, rel_paths: list[str]) -> None:
-    """Remove committed files from the active touches ledger."""
+    """Remove committed files from both the 120s active touches and 24h session_edits ledgers."""
     git_dir = get_git_dir(repo_root)
     lock_path = git_dir / "wbc_active_touches.lock"
     touches_path = git_dir / "wbc_active_touches.json"
     if not touches_path.exists():
         return
 
+    removed_set = set(rel_paths)
     with (
         contextlib.suppress(OSError, json.JSONDecodeError),
         open(lock_path, "w", encoding="utf-8") as lock_file,
@@ -216,6 +272,18 @@ def remove_touches(repo_root: Path, rel_paths: list[str]) -> None:
             for p in rel_paths:
                 touches.pop(p, None)
             loaded["touches"] = touches
+
+            sess_edits = loaded.get("session_edits")
+            if isinstance(sess_edits, dict):
+                cleaned_sess: dict[str, Any] = {}
+                for s_key, s_val in sess_edits.items():
+                    if not isinstance(s_val, dict):
+                        continue
+                    rem = [f for f in (s_val.get("files") or []) if f not in removed_set]
+                    if rem:
+                        cleaned_sess[s_key] = {"ts": s_val.get("ts", time.time()), "files": rem}
+                loaded["session_edits"] = cleaned_sess
+
             touches_path.write_text(json.dumps(loaded, indent=2), encoding="utf-8")
         finally:
             if fcntl is not None:
@@ -227,8 +295,10 @@ def resolve_smart_scope(
     session_id: str | None,
     all_tracked: bool,
     repo_root: Path,
+    zone: str | None = None,
 ) -> tuple[list[str], str | None]:
-    """Resolve file scope for commit, guarding against multi-agent collisions.
+    """Resolve file scope for commit, guarding against multi-agent collisions,
+    respecting `.wbc_reflex.json` zones/blocked_paths, and auto-scoping to 24h session edits.
 
     Returns:
         (scoped_rel_paths, error_message)
@@ -236,11 +306,15 @@ def resolve_smart_scope(
     root = resolve_repo_root(repo_root)
     git_dir = get_git_dir(root)
     sid = resolve_session_id(session_id)
+    repo_cfg = _load_repo_zone_config(root)
+    blocked_paths = [str(p) for p in (repo_cfg.get("blocked_paths") or []) if str(p).strip()]
+    zones_map = repo_cfg.get("zones") if isinstance(repo_cfg.get("zones"), dict) else {}
 
-    # Load active touches (within 120s) under shared lock
+    # Load active touches (within 120s) and 24h session_edits under shared lock
     lock_path = git_dir / "wbc_active_touches.lock"
     touches_path = git_dir / "wbc_active_touches.json"
     active_touches: dict[str, Any] = {}
+    session_edits: dict[str, Any] = {}
     now = time.time()
 
     if touches_path.exists():
@@ -252,16 +326,23 @@ def resolve_smart_scope(
                 fcntl.flock(lock_file, fcntl.LOCK_SH)
             try:
                 loaded = json.loads(touches_path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict) and "touches" in loaded:
-                    for p, entry in loaded["touches"].items():
+                if isinstance(loaded, dict):
+                    for p, entry in (loaded.get("touches") or {}).items():
                         if isinstance(entry, dict) and (now - float(entry.get("ts", 0))) < 120.0:
                             active_touches[p] = entry
+                    for s_key, s_val in (loaded.get("session_edits") or {}).items():
+                        if isinstance(s_val, dict) and (now - float(s_val.get("ts", 0))) < 86400.0:
+                            session_edits[str(s_key)] = s_val
             finally:
                 if fcntl is not None:
                     fcntl.flock(lock_file, fcntl.LOCK_UN)
 
     if explicit_paths:
         normalized = [normalize_repo_path(p, root) for p in explicit_paths]
+        for np in normalized:
+            hit_blk = _is_blocked_repo_path(np, blocked_paths)
+            if hit_blk:
+                return [], f"Blocked private path '{np}' matches .wbc_reflex.json blocked_paths ('{hit_blk}')."
         if not all_tracked:
             for p in normalized:
                 if p in active_touches:
@@ -276,7 +357,7 @@ def resolve_smart_scope(
                         )
         return normalized, None
 
-    # Query modified/added/deleted tracked files
+    # Query modified/added/deleted tracked files and non-ignored untracked files
     res = subprocess.run(
         ["git", "status", "--porcelain", "-uall"],
         check=False,
@@ -288,6 +369,7 @@ def resolve_smart_scope(
         return [], f"git status failed: {res.stderr}"
 
     modified_tracked: list[str] = []
+    untracked_non_ignored: list[str] = []
     for line in res.stdout.splitlines():
         if len(line) < 3:
             continue
@@ -298,10 +380,34 @@ def resolve_smart_scope(
         if path_str.startswith('"') and path_str.endswith('"'):
             path_str = path_str[1:-1]
 
-        # Untracked files are '??', ignored are '!!'
-        if code in ("??", "!!"):
+        if code == "!!":
             continue
-        modified_tracked.append(normalize_repo_path(path_str, root))
+        norm_p = normalize_repo_path(path_str, root)
+        if _is_blocked_repo_path(norm_p, blocked_paths):
+            continue
+        if code == "??":
+            untracked_non_ignored.append(norm_p)
+        else:
+            modified_tracked.append(norm_p)
+
+    # Named `--zone <name>` filter (e.g. `body commit --zone core` or `"commit site"`)
+    if zone:
+        z_key = zone.strip()
+        if z_key not in zones_map:
+            avail = ", ".join(sorted(zones_map.keys())) if zones_map else "none (.wbc_reflex.json missing)"
+            return [], f"Unknown commit zone '{z_key}'. Available zones: {avail}."
+        prefixes = zones_map.get(z_key) or []
+        zone_scoped = [f for f in modified_tracked if _matches_zone_prefixes(f, prefixes)]
+        for zp in zone_scoped:
+            if zp in active_touches:
+                sessions = active_touches[zp].get("sessions", [])
+                if len(sessions) > 1:
+                    other = [s for s in sessions if s != sid]
+                    return [], (
+                        f"Concurrent collision detected on '{zp}' in zone '{z_key}': "
+                        f"touched by multiple active sessions {sessions} (including {other})."
+                    )
+        return zone_scoped, None
 
     distinct_sessions = set()
     for entry in active_touches.values():
@@ -311,7 +417,18 @@ def resolve_smart_scope(
         if entry.get("session_id"):
             distinct_sessions.add(entry["session_id"])
 
-    if all_tracked or len(distinct_sessions) <= 1:
+    if all_tracked:
+        return modified_tracked, None
+
+    if len(distinct_sessions) <= 1:
+        # 24h per-conversation auto-scoping: if this conversation recorded edits, commit ONLY its dirty/created files
+        if sid and sid not in ("default", "local", "global") and sid in session_edits:
+            sess_file_set = set(session_edits[sid].get("files") or [])
+            sess_scoped = [
+                f for f in (modified_tracked + untracked_non_ignored) if f in sess_file_set
+            ]
+            if sess_scoped:
+                return sess_scoped, None
         return modified_tracked, None
 
     # Multi-agent active (>1 distinct active session_id in last 120s):
@@ -387,7 +504,7 @@ def verify_no_torn_writes(
     if check_fn is not None:
         try:
             check_fn()
-        except Exception:
+        except (OSError, RuntimeError, ValueError):
             return False
 
     for rel_path, expected in pre_states.items():
@@ -630,15 +747,14 @@ def record_commit_to_dot_memory(
     session_id: str | None = None,
 ) -> None:
     """Best-effort persistence of commit event into local DotMemory."""
-    try:
+    with contextlib.suppress(ImportError, OSError, RuntimeError, ValueError):
         from whole_body_compute.local.dot_memory import record_episodic_anchor
+
         record_episodic_anchor(
             tag="git_commit",
             summary=f"Commit {commit_sha[:8]}: {message}",
             metadata={"commit_sha": commit_sha, "files": files, "session_id": session_id},
         )
-    except Exception:
-        pass
 
 
 def run_fast_commit(
@@ -649,6 +765,7 @@ def run_fast_commit(
     wip: bool = False,
     no_lint: bool = False,
     no_llm: bool = False,
+    zone: str | None = None,
     repo_root: Path | None = None,
     _mid_flight_hook: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
@@ -663,15 +780,21 @@ def run_fast_commit(
     else:
         explicit_paths = None
 
-    scoped_rel_paths, err = resolve_smart_scope(explicit_paths, sid, all_tracked, root)
+    scoped_rel_paths, err = resolve_smart_scope(explicit_paths, sid, all_tracked, root, zone=zone)
     if err is not None:
         return {"status": "error", "error": err}
 
     if not scoped_rel_paths:
-        return {"status": "clean", "message": "Nothing to commit", "files": []}
+        clean_msg = f"Nothing to commit in zone '{zone}'" if zone else "Nothing to commit"
+        return {
+            "status": "clean",
+            "message": clean_msg,
+            "files": [],
+            "receipt": f"⚪ {clean_msg}.",
+        }
 
-    # Record active touch
-    record_file_touch(scoped_rel_paths, session_id=sid, repo_root=root)
+    # Record active 120s collision touch without overwriting 24h session_edits scope
+    record_file_touch(scoped_rel_paths, session_id=sid, repo_root=root, record_session_edit=False)
 
     # Pre-staging snapshot
     pre_states = snapshot_file_states(root, scoped_rel_paths)
@@ -877,12 +1000,20 @@ def run_fast_commit(
     # Best-effort DotMemory persistence
     record_commit_to_dot_memory(root, commit_sha, cached_commit_msg, scoped_rel_paths, sid)
 
+    short_branch = branch_ref.replace("refs/heads/", "")
+    head_msg = (cached_commit_msg or "").splitlines()[0] if cached_commit_msg else "commit"
+    preview_files = ", ".join(scoped_rel_paths[:5])
+    if len(scoped_rel_paths) > 5:
+        preview_files += f", +{len(scoped_rel_paths) - 5} more"
+    receipt_line = f"✅ {commit_sha[:7]} ({short_branch}) - {head_msg} [{len(scoped_rel_paths)} file(s): {preview_files}]"
+
     return {
         "status": "ok",
         "commit_sha": commit_sha,
         "branch": branch_ref,
         "message": cached_commit_msg,
         "files": scoped_rel_paths,
+        "receipt": receipt_line,
     }
 
 
@@ -1039,6 +1170,7 @@ def run_checkpoint(
             "ref": ref_name,
             "commit_sha": commit_sha,
             "label": label or "snapshot",
+            "receipt": f"📌 Saved checkpoint {ref_name} ({commit_sha[:7]})",
         }
     finally:
         if shadow_idx.exists():

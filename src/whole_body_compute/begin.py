@@ -62,6 +62,7 @@ This workspace uses **Whole Body Compute (WBC)** (**Bicameral Compute** & **The 
   ```
 
 ## 3. Hardware, Vitals & Verified Token Savings
+- **Zero-RAM Shielding**: The Blood-Brain Barrier (`body-immune-hook`) runs in `<5ms` pure Python/AST with **0 GB local LLM RAM** required.
 - Check Apple Silicon RAM, swap, thermal state, or 5-organ health directly via CLI instead of ad-hoc `ps aux` / `vm_stat` scripts:
   ```bash
   body doctor
@@ -900,9 +901,23 @@ def install_global_claude_hooks(
         claude_dir.mkdir(parents=True, exist_ok=True)
         settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
 
+    # Also wire global ~/.claude/CLAUDE.md so Claude Code knows about `body` / `body savings`
+    # in every repository even when `body begin` was only run once from $HOME.
+    global_claude_md_path = claude_dir / "CLAUDE.md"
+    if not dry_run:
+        claude_dir.mkdir(parents=True, exist_ok=True)
+    global_claude_md_status = _upsert_marked_rule_file(
+        global_claude_md_path,
+        _load_bbb_rule_body(),
+        dry_run=dry_run,
+        force_rules=force_rules,
+    )
+
     return {
         "status": status,
         "path": str(settings_path),
+        "claude_md_status": global_claude_md_status,
+        "claude_md_path": str(global_claude_md_path),
         "dry_run": dry_run,
     }
 
@@ -2028,6 +2043,8 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
     if g_claude := result.get("global_claude_hook"):
         if g_claude.get("status") not in (None, "skipped"):
             lines.append(f"  • Global Claude Hook: {g_claude.get('status').upper()} -> {g_claude.get('path')} (active across all repos)")
+        if g_claude.get("claude_md_status") not in (None, "skipped"):
+            lines.append(f"  • Global Claude Mem:  {str(g_claude.get('claude_md_status')).upper()} -> {g_claude.get('claude_md_path')}")
     if result.get("cwd_is_home"):
         lines.append("  • [TIP] Ran from $HOME: run `body begin` inside any project repo to wire workspace-local Cursor/Codex/Git hooks too.")
     if wiring.get("codex_hooks_status") and wiring.get("codex_hooks_status") != "skipped":
@@ -2153,12 +2170,12 @@ def format_body_begin_banner(result: Dict[str, Any]) -> str:
             "",
             "WHAT TO DO NEXT",
             "─" * 84,
-            "  1. Restart your agent:   Close & reopen Claude Code / Cursor / Antigravity",
-            "                           (or `/exit` and re-run `claude` in terminal) so hooks load.",
-            "  2. Code normally:        Nothing else to run - WBC now shields context bloat and",
-            "                           prunes tool output automatically in the background.",
-            "  3. Verify in 10s:        After a few prompts, run `body savings` to see live",
-            "                           tokens & dollars saved ticking up.",
+            "  1. Restart your agent:   Run `/exit` and relaunch `claude` (or reopen Cursor /",
+            "                           Antigravity) so global hooks & CLAUDE.md load.",
+            "  2. Use a local session:  Works in terminal `claude` (with or without a folder) and",
+            "                           local Claude Desktop folders (not remote web/cloud VMs).",
+            "  3. 10-second check:      Ask Claude to run `body savings` (or run it here) - ",
+            "                           <5ms pure Python/AST shielding, 0 GB local LLM RAM.",
             "",
             "Other key tools:",
             "─" * 84,

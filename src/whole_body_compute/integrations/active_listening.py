@@ -669,7 +669,7 @@ class ActiveListeningEngine:
         # Set VOICEFI_ENABLE_SEMANTIC_SAFETY=1 to enable.
         enable_semantic_llm = os.environ.get("VOICEFI_ENABLE_SEMANTIC_SAFETY", "0") == "1"
         if not enable_semantic_llm or (
-            os.environ.get("VOICEFI_TESTING") == "1"
+            (os.environ.get("WBC_TESTING") == "1" or os.environ.get("VOICEFI_TESTING") == "1")
             and not os.environ.get("VOICEFI_TEST_LIVE_OLLAMA")
         ):
             return (False, "")

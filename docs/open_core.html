@@ -863,7 +863,7 @@
             </tr>
             <tr>
               <td><strong>Eyes &amp; Hands (Native macOS UI)</strong></td>
-              <td><span class="badge-free">FREE FOREVER</span> Unlimited <code>body eyes</code> (4ms macOS Accessibility DOM in ~38 tokens) and <code>body hands</code> (deterministic native UI actions without screenshots).</td>
+              <td><span class="badge-free">FREE FOREVER</span> Unlimited <code>body eyes</code> (4ms macOS Accessibility DOM in ~38 tokens) and <code>body hands</code> (deterministic native UI actions) isolated inside unified <code>Whole Body Compute.app</code> (Developer ID <code>Y25SHBA3P5</code>, Hardened Runtime + Library Validation ON, 1-Click Kill Switch, <code>0</code> Terminal/IDE TCC). Install via <code>body eyes --install-app</code> or <code>brew install --cask wholebodycompute/tap/whole-body-compute</code>.</td>
               <td><span class="badge-pro">PRO</span> Adds <strong>Teach Mode</strong>: demonstrate any browser or Mac chore once to compile a repeatable local skill.</td>
             </tr>
             <tr>
@@ -976,9 +976,9 @@
           }, extraProps || {})
         });
         if (navigator.sendBeacon) {
-          navigator.sendBeacon("https://us.i.posthog.com/capture/", new Blob([body], { type: "application/json" }));
+          navigator.sendBeacon("https://wholebodycompute.com/v1/telemetry", new Blob([body], { type: "application/json" }));
         } else {
-          fetch("https://us.i.posthog.com/capture/", {
+          fetch("https://wholebodycompute.com/v1/telemetry", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: body,

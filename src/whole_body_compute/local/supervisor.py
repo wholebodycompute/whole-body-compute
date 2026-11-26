@@ -325,6 +325,76 @@ class ThermalSupervisor:
             logger.debug(f"Failed to read vm.swapusage: {e}")
             return (0.0, 0.0)
 
+    def get_memory_pressure_macos(
+        self,
+        swap_used_gb: Optional[float] = None,
+        free_ram_gb: Optional[float] = None,
+        total_ram_gb: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Inspect macOS vm_stat compressed memory & pageouts and classify swap state
+        into 'clean', 'dormant', 'elevated', or 'thrashing'.
+        """
+        compressed_gb = 0.0
+        pageouts = 0
+        swapouts = 0
+
+        if self.is_macos:
+            try:
+                res = subprocess.run(
+                    ["vm_stat"],
+                    capture_output=True,
+                    text=True,
+                    timeout=1.0,
+                )
+                raw = res.stdout or ""
+                m_ps = re.search(r"page size of (\d+) bytes", raw)
+                page_size = int(m_ps.group(1)) if m_ps else 16384
+
+                def _vm_pages(label: str) -> int:
+                    m = re.search(rf"{re.escape(label)}:\s+(\d+)\.", raw)
+                    return int(m.group(1)) if m else 0
+
+                compressed_pages = _vm_pages("Pages occupied by compressor")
+                compressed_gb = round((compressed_pages * page_size) / (1024**3), 2)
+                pageouts = _vm_pages("Pageouts")
+                swapouts = _vm_pages("Swapouts")
+            except Exception as e:
+                logger.debug(f"Failed to read vm_stat: {e}")
+
+        if swap_used_gb is None:
+            swap_used_gb, _ = self.get_swap_usage_macos()
+        if free_ram_gb is None or total_ram_gb is None:
+            telem_free, telem_total = self.get_ram_usage()
+            if free_ram_gb is None:
+                free_ram_gb = telem_free
+            if total_ram_gb is None:
+                total_ram_gb = telem_total
+
+        comfortable_free_gb = max(6.0, float(total_ram_gb) * 0.15)
+        if swap_used_gb < 1.0:
+            swap_state = "clean"
+        elif (swap_used_gb >= 8.0 and free_ram_gb < 4.0) or (
+            swap_used_gb >= 16.0 and free_ram_gb < 6.0
+        ):
+            swap_state = "thrashing"
+        elif swap_used_gb >= 2.0 and free_ram_gb < comfortable_free_gb:
+            swap_state = "elevated"
+        elif swap_used_gb >= 8.0 and free_ram_gb < max(10.0, float(total_ram_gb) * 0.20):
+            swap_state = "elevated"
+        else:
+            swap_state = "dormant"
+
+        return {
+            "swap_state": swap_state,
+            "swap_used_gb": round(float(swap_used_gb), 2),
+            "free_ram_gb": round(float(free_ram_gb), 2),
+            "total_ram_gb": round(float(total_ram_gb), 2),
+            "compressed_gb": compressed_gb,
+            "pageouts": pageouts,
+            "swapouts": swapouts,
+        }
+
     def get_power_state_macos(self) -> Tuple[str, int, bool]:
         """Query macOS power source ('AC Power' | 'Battery'), battery %, and Low Power Mode (powermode 1)."""
         if not self.is_macos:
@@ -2048,8 +2118,9 @@ class ThermalSupervisor:
           1. Orphaned Dev/Test Reaper: Terminates hung `pytest` workers spinning >= 50% CPU
              for longer than `pytest_max_age_sec` (default 10 mins).
           2. Apple Silicon E-Core QoS Clamping: Clamps runaway background helpers
-             (`Spotify`, `Chrome Helper`, `StocksWidget`) burning >= `cpu_clamp_threshold`% CPU
-             onto Efficiency (E) cores via `taskpolicy -b -p <pid>` and `renice +19`.
+             (`Spotify`, `Chrome Helper`, `Steam Helper`, `StocksWidget`) burning >= `cpu_clamp_threshold`% CPU
+             onto Efficiency (E) cores via `taskpolicy -b -p <pid>` and `renice +19`
+             (never clamping `steam_osx` or `steamapps/common/` games so launched games never inherit E-core throttling).
           3. Automatic Idle Specialist Model TTL Eviction: Evicts idle `mlx_lm.server` and
              `llama-server` processes (<2% CPU for >= `model_idle_ttl_sec` (default 90s), or >= 30s when a
              Steam/3D game is running) into the macOS Darwin Inactive File Cache, while
@@ -2316,16 +2387,21 @@ class ThermalSupervisor:
                     continue
 
                 # Rule 2: Runaway background helper / renderer / widget burning CPU
+                # Never clamp `steam_osx` (Steam's parent launcher) or `steamapps/common/` games:
+                # macOS inherits PRIO_DARWIN_BG (`taskpolicy -b`), throughput/latency tiers, and
+                # `nice +19` into every child game spawned by `steam_osx`, pinning games to E-cores.
                 is_widget = "Widget.appex" in cmd
-                is_clamp_target = is_widget or any(
-                    tok in cmd
-                    for tok in (
-                        "Spotify",
-                        "Google Chrome Helper",
-                        "steam_osx",
-                        "Steam Helper",
+                is_clamp_target = (
+                    is_widget
+                    or any(
+                        tok in cmd
+                        for tok in (
+                            "Spotify",
+                            "Google Chrome Helper",
+                            "Steam Helper",
+                        )
                     )
-                )
+                ) and "steamapps/common/" not in cmd
                 effective_clamp_threshold = 20.0 if is_widget else cpu_clamp_threshold
                 if is_clamp_target and pcpu >= effective_clamp_threshold:
                     already_niced = "N" in stat
@@ -2350,10 +2426,19 @@ class ThermalSupervisor:
                                 capture_output=True,
                                 timeout=1.0,
                             )
+                    helper_name = (
+                        "Spotify Helper"
+                        if "Spotify" in cmd
+                        else (
+                            "Chrome Helper"
+                            if "Chrome" in cmd
+                            else ("Steam Helper" if "Steam Helper" in cmd else "macOS Widget")
+                        )
+                    )
                     clamped_helpers.append(
                         {
                             "pid": pid,
-                            "name": "Spotify Helper" if "Spotify" in cmd else ("Chrome Helper" if "Chrome" in cmd else "macOS Widget"),
+                            "name": helper_name,
                             "cpu_pct": pcpu,
                             "rss_mb": rss_mb,
                             "elapsed": etime,

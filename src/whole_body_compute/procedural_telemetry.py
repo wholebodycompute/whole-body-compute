@@ -508,6 +508,7 @@ def get_anonymous_system_envelope(*, refresh: bool = False) -> dict[str, Any]:
             pass
 
     license_tier = "community"
+    trial_meta: dict[str, Any] = {}
     try:
         lic_path = get_wbc_data_dir() / "license.json"
         env_lic = os.environ.get("VOICEFI_LICENSE_PATH")
@@ -517,6 +518,29 @@ def get_anonymous_system_envelope(*, refresh: bool = False) -> dict[str, Any]:
             lic_raw = json.loads(lic_path.read_text(encoding="utf-8", errors="ignore"))
             if isinstance(lic_raw, dict) and lic_raw.get("tier"):
                 license_tier = str(lic_raw["tier"]).strip().lower()[:24]
+                act_low = str(lic_raw.get("activation_id") or "").lower()
+                is_trial = bool(
+                    lic_raw.get("is_trial")
+                    or (
+                        lic_raw.get("expires_at")
+                        and ("trial" in act_low or act_low.startswith("comp_"))
+                    )
+                )
+                if is_trial:
+                    trial_meta["is_trial"] = True
+                    r_hash = str(lic_raw.get("receipt_hash") or "").strip()
+                    if r_hash:
+                        trial_meta["trial_id"] = re.sub(r"[^a-zA-Z0-9_\-]", "", r_hash)[:16]
+                    issued_iso = str(lic_raw.get("issued_at") or "").strip()
+                    if issued_iso:
+                        try:
+                            norm = issued_iso[:-1] + "+00:00" if issued_iso.endswith(("Z", "z")) else issued_iso
+                            dt_iss = datetime.datetime.fromisoformat(norm)
+                            if dt_iss.tzinfo is None:
+                                dt_iss = dt_iss.replace(tzinfo=datetime.timezone.utc)
+                            trial_meta["trial_day"] = max(1, int((time.time() - dt_iss.timestamp()) // 86400) + 1)
+                        except Exception:
+                            pass
     except Exception:
         pass
 
@@ -529,6 +553,7 @@ def get_anonymous_system_envelope(*, refresh: bool = False) -> dict[str, Any]:
         "ram_gb_bucket": ram_gb_bucket,
         "cpu_cores": int(os.cpu_count() or 1),
         "python_minor": f"{sys.version_info.major}.{sys.version_info.minor}",
+        **trial_meta,
     }
     _CACHED_SYSTEM_ENVELOPE = base_env
     out = dict(base_env)
@@ -1959,8 +1984,12 @@ def flush_telemetry_outbox(
     )
     target_url = ingest_url or os.environ.get("WBC_TELEMETRY_INGEST_URL")
     if not target_url:
-        host = os.environ.get("POSTHOG_HOST") or "https://us.i.posthog.com"
-        target_url = f"{host.rstrip('/')}/capture/"
+        host = os.environ.get("POSTHOG_HOST")
+        target_url = (
+            f"{host.rstrip('/')}/capture/"
+            if host
+            else "https://wholebodycompute.com/v1/telemetry"
+        )
 
     sent_count = 0
     now = time.time()
@@ -2045,8 +2074,12 @@ def send_vitals_rollup(
     )
     target_url = ingest_url or os.environ.get("WBC_TELEMETRY_INGEST_URL")
     if not target_url:
-        host = os.environ.get("POSTHOG_HOST") or "https://us.i.posthog.com"
-        target_url = f"{host.rstrip('/')}/capture/"
+        host = os.environ.get("POSTHOG_HOST")
+        target_url = (
+            f"{host.rstrip('/')}/capture/"
+            if host
+            else "https://wholebodycompute.com/v1/telemetry"
+        )
 
     clean_props = sanitize_telemetry_payload(vitals_payload)
     for ek, ev in sys_env.items():
@@ -2240,8 +2273,12 @@ def track_wbc_event(
     )
     target_url = os.environ.get("WBC_TELEMETRY_INGEST_URL")
     if not target_url:
-        host = os.environ.get("POSTHOG_HOST") or "https://us.i.posthog.com"
-        target_url = f"{host.rstrip('/')}/capture/"
+        host = os.environ.get("POSTHOG_HOST")
+        target_url = (
+            f"{host.rstrip('/')}/capture/"
+            if host
+            else "https://wholebodycompute.com/v1/telemetry"
+        )
 
     for ek, ev in sys_env.items():
         clean_props.setdefault(ek, ev)
@@ -2373,8 +2410,11 @@ def fetch_posthog_cloud_funnel_summary(
             "hint": "Store a read-only phx_ key at ~/.whole_body_compute/posthog_personal_key (chmod 600) or set POSTHOG_PERSONAL_API_KEY.",
         }
 
-    ext_pred = (
-        "distinct_id NOT IN ('257d2d48b088ef95', 'fdfc39c286f5e2cb') "
+    internal_pred = (
+        "distinct_id NOT IN ("
+        "'257d2d48b088ef95', 'fdfc39c286f5e2cb', '45eb1e76a04f7e6f', 'bdedaac7899ffdea', "
+        "'6850c948fd6bdcce', 'b63a63d355d67745', '58594437eac88565', 'wbc_onboarding_verify'"
+        ") "
         "AND distinct_id NOT LIKE 'edge_wholebodycompute%' "
         "AND coalesce(toString(person.properties.$internal_or_test_user), 'false') != 'true' "
         "AND coalesce(toString(properties.is_internal_dev), 'false') != 'true' "
@@ -2384,6 +2424,14 @@ def fetch_posthog_cloud_funnel_summary(
         "AND coalesce(toString(properties.is_bot), 'false') != 'true' "
         "AND NOT (coalesce(toString(properties.chip_family), '') = 'Apple M5 Pro' AND toIntOrZero(toString(properties.cpu_cores)) = 18)"
     )
+    scanner_pred = (
+        "event LIKE '/tmp/%' "
+        "OR coalesce(toString(properties.chip_family), '') = 'IntelR CoreTM i7-10700 CPU @ 2.90GHz' "
+        "OR (coalesce(toString(properties.os), '') = 'linux' AND toFloatOrZero(toString(properties.ram_gb_bucket)) > 0 AND toFloatOrZero(toString(properties.ram_gb_bucket)) <= 2) "
+        "OR (coalesce(toString(properties.os_platform), toString(properties.os), '') = 'linux' AND toIntOrZero(toString(properties.conversations_scanned)) = 1 AND toIntOrZero(toString(properties.total_steps)) <= 2 AND toIntOrZero(toString(properties.actual_cumulative_input_tokens)) <= 64) "
+        "OR (coalesce(toString(properties.os), '') = 'linux' AND coalesce(toString(properties.chip_family), '') IN ('unknown', '') AND event IN ('wbc_quota_event', 'wbc_quota_bypass_detected') AND toIntOrZero(toString(properties.daily_interceptions)) = 0 AND toIntOrZero(toString(properties.current_usage)) = 0)"
+    )
+    ext_pred = f"({internal_pred}) AND NOT ({scanner_pred})"
     sql = f"""
         SELECT
             countIf(event = '$pageview' AND ({ext_pred})) AS ext_pageviews,
@@ -2406,7 +2454,8 @@ def fetch_posthog_cloud_funnel_summary(
             countIf(event = 'wbc_procedural_dna_card' AND ({ext_pred})) AS ext_procedural_dna_cards,
             count(DISTINCT if(event = 'wbc_procedural_dna_card' AND ({ext_pred}), distinct_id, NULL)) AS ext_dna_cohorts,
             countIf(event IN ('wbc_memory_fact_learned', 'wbc_habits_consolidated', 'wbc_pal_training_completed', 'wbc_workflow_executed', 'wbc_candidate_promoted', 'wbc_rem_sleep_completed', 'wbc_skill_activated', 'wbc_skills_pruned', 'wbc_mcp_pruned', 'wbc_state_capsule_saved') AND ({ext_pred})) AS ext_learning_events,
-            count(DISTINCT if(event IN ('wbc_memory_fact_learned', 'wbc_habits_consolidated', 'wbc_pal_training_completed', 'wbc_workflow_executed', 'wbc_candidate_promoted', 'wbc_rem_sleep_completed', 'wbc_skill_activated', 'wbc_skills_pruned', 'wbc_mcp_pruned', 'wbc_state_capsule_saved') AND ({ext_pred}), distinct_id, NULL)) AS ext_learning_cohorts
+            count(DISTINCT if(event IN ('wbc_memory_fact_learned', 'wbc_habits_consolidated', 'wbc_pal_training_completed', 'wbc_workflow_executed', 'wbc_candidate_promoted', 'wbc_rem_sleep_completed', 'wbc_skill_activated', 'wbc_skills_pruned', 'wbc_mcp_pruned', 'wbc_state_capsule_saved') AND ({ext_pred}), distinct_id, NULL)) AS ext_learning_cohorts,
+            count(DISTINCT if(({internal_pred}) AND ({scanner_pred}), distinct_id, NULL)) AS ext_scanner_cohorts_filtered
         FROM events
     """
     url = f"https://us.posthog.com/api/projects/{project_id}/query/"
@@ -2426,7 +2475,7 @@ def fetch_posthog_cloud_funnel_summary(
             payload = json.loads(resp.read().decode("utf-8"))
         rows = payload.get("results") or []
         row = list(rows[0]) if rows else []
-        while len(row) < 21:
+        while len(row) < 22:
             row.append(0)
         return {
             "status": "ok",
@@ -2452,6 +2501,7 @@ def fetch_posthog_cloud_funnel_summary(
             "ext_dna_cohorts": int(row[18] or 0),
             "ext_learning_events": int(row[19] or 0),
             "ext_learning_cohorts": int(row[20] or 0),
+            "ext_scanner_cohorts_filtered": int(row[21] or 0),
         }
     except Exception as exc:
         return {"status": "error", "reason": str(exc)}
@@ -2690,7 +2740,8 @@ def format_usage_stats_table(report: dict[str, Any]) -> str:
                     f"{cloud.get('ext_hub_fetches', 0):,} `/hub`",
                     f"      • Audits Completed (Primary): {cloud.get('ext_qualified_audits', 0):,} qualified (convs > 0) / "
                     f"{cloud.get('ext_audits_completed', 0):,} total ({cloud.get('ext_empty_audits', 0):,} empty)",
-                    f"      • Active Product Cohorts:     {cloud.get('ext_product_cohorts', 0):,} external cohort(s) | "
+                    f"      • Active Product Cohorts:     {cloud.get('ext_product_cohorts', 0):,} external cohort(s) "
+                    f"(+{cloud.get('ext_scanner_cohorts_filtered', 0):,} PyPI/sandbox scanners filtered) | "
                     f"Limit Hits: {cloud.get('ext_cohorts_hitting_limits', 0):,} cohort(s) ({cloud.get('ext_quota_events', 0):,} quota, {cloud.get('ext_quota_bypasses', 0):,} bypass)",
                     f"      • External Learning & DNA:    {cloud.get('ext_procedural_dna_cards', 0):,} Procedural DNA card(s) ({cloud.get('ext_dna_cohorts', 0):,} cohorts) • "
                     f"{cloud.get('ext_learning_events', 0):,} learning event(s) ({cloud.get('ext_learning_cohorts', 0):,} cohorts)",

@@ -93,11 +93,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc.add_argument("--exercise", action="store_true", help="Also run closed-loop 5-step reflex exercise")
     p_doc.add_argument("--chaos", "--gauntlet", dest="chaos", action="store_true", help="Also run adversarial ChaosOrganFuzzer stress suite")
 
-    # body exercise (aliases: reflex) - hidden (use `body doctor --exercise`)
+    # body exercise (aliases: reflex) - hidden (use `body doctor --exercise` or `body reflex stats`)
     p_ex = subparsers.add_parser(
         "exercise",
         aliases=["reflex"],
     )
+    p_ex.add_argument("action", nargs="?", choices=["stats"], default=None, help="Optional sub-action (e.g. 'stats' for SpinalReflexGate scorecard)")
     p_ex.add_argument("--json", action="store_true", help="Output structured JSON")
 
     # body chaos (aliases: gauntlet) - hidden (use `body doctor --chaos`)
@@ -482,6 +483,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_fin.add_argument("--price-per-m", type=float, default=5.0, dest="price_per_m", help="Frontier input USD per 1M tokens (default: 5.0)")
     p_fin.add_argument("--seats", type=int, default=10, help="Number of team seats for annual projection (default: 10)")
     p_fin.add_argument("--top", type=int, default=5, help="Number of top expensive threads to display (default: 5)")
+    p_fin.add_argument(
+        "--import",
+        dest="import_paths",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Opt-in offline cloud export to include (`conversations.json`, `.zip`, or Anthropic billing `.csv`)",
+    )
+    p_fin.add_argument(
+        "--cloud",
+        action="store_true",
+        help="Opt-in: also query Anthropic Admin API (requires ANTHROPIC_ADMIN_API_KEY or --anthropic-admin-key)",
+    )
+    p_fin.add_argument(
+        "--anthropic-admin-key",
+        dest="anthropic_admin_key",
+        default=None,
+        metavar="KEY",
+        help="Anthropic Organization Admin API key for cloud usage/cost report",
+    )
     p_fin.add_argument("--export-receipt", dest="export_receipt", metavar="PATH", help="Optional path to write a shareable Markdown FinOps ROI receipt")
     p_fin.add_argument("--json", action="store_true", help="Output structured JSON")
 
@@ -817,6 +838,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional session/agent ID for smart auto-scoping",
     )
+    p_commit.add_argument(
+        "-z",
+        "--zone",
+        default=None,
+        help="Scope commit to a named zone in .wbc_reflex.json (e.g. core, site)",
+    )
     p_commit.add_argument("--json", action="store_true", help="Emit JSON output")
 
     # body checkpoint [label] [--commit] [--list] [--restore REF] [--json]
@@ -995,6 +1022,38 @@ def build_parser() -> argparse.ArgumentParser:
             )
             p_org.add_argument("--daemon", dest="daemon", action="store_true", help="Run warm Unix socket daemon (~/.whole_body_compute/foveal.sock) + default-on AmbientWorkflowObserver")
             p_org.add_argument("--no-ambient", dest="no_ambient", action="store_true", help="Disable passive AmbientWorkflowObserver when running `body eyes --daemon`")
+            p_org.add_argument(
+                "--install-app",
+                dest="install_app",
+                action="store_true",
+                help="Download, verify (pinned SHA-256 + Team ID Y25SHBA3P5), and install Whole Body Compute.app + wire LaunchAgents",
+            )
+            p_org.add_argument(
+                "--from-source",
+                dest="from_source",
+                action="store_true",
+                help="Build Whole Body Compute.app locally from macos/WBCEyes during `--install-app`",
+            )
+            p_org.add_argument(
+                "--system",
+                dest="system",
+                action="store_true",
+                help="Install Whole Body Compute.app to /Applications instead of ~/Applications",
+            )
+            p_org.add_argument(
+                "--app-url",
+                dest="app_url",
+                type=str,
+                default=None,
+                help="Override notarized Whole-Body-Compute zip URL for `--install-app`",
+            )
+            p_org.add_argument(
+                "--app-sha256",
+                dest="app_sha256",
+                type=str,
+                default=None,
+                help="Override expected 64-char SHA-256 hex digest for `--install-app`",
+            )
         if organ_key in ("memory", "hippocampus"):
             p_org.add_argument(
                 "--remember",

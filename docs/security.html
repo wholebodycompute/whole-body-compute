@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" type="image/svg+xml" href="assets/logo-wbc-mark.svg" />
+  <title>Whole Body Compute - Security &amp; macOS TCC Architecture FAQ</title>
+  <meta name="description" content="Zero-TCC Core vs. Opt-In Desktop Embodiment, macOS Accessibility architecture, Blood-Brain Barrier choke points, and 60-second local security verification for Whole Body Compute." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg-paper: #FAFAFC;
+      --bg-surface: #FFFFFF;
+      --bg-subtle: #F1F5F9;
+      --ink-primary: #0F172A;
+      --ink-secondary: #334155;
+      --ink-muted: #64748B;
+      --hairline: #E2E8F0;
+      --accent: #FF2A2A;
+      --cta-red: #E0002A;
+      --ok-green: #0F766E;
+      --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    ::selection { background: #FF2A2A; color: #FFFFFF; }
+    body {
+      background: var(--bg-paper);
+      color: var(--ink-primary);
+      font-family: var(--font-sans);
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: rgba(250, 250, 252, 0.88);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--hairline);
+    }
+    .nav-inner {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 0 24px;
+      height: 64px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 800;
+      font-size: 18px;
+      letter-spacing: -0.035em;
+      text-decoration: none;
+      color: var(--ink-primary);
+    }
+    .brand .r { color: var(--accent); }
+    nav {
+      display: flex;
+      gap: 18px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    nav a {
+      color: var(--ink-secondary);
+      text-decoration: none;
+    }
+    nav a:hover { color: var(--accent); }
+    .shell {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 48px 24px 80px;
+    }
+    .eyebrow {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--accent);
+      margin-bottom: 12px;
+    }
+    h1 {
+      font-family: var(--font-sans);
+      font-size: clamp(30px, 4.4vw, 44px);
+      font-weight: 900;
+      line-height: 1.1;
+      letter-spacing: -0.03em;
+      margin-bottom: 18px;
+      color: #000000;
+    }
+    .lead {
+      font-size: 16.5px;
+      color: var(--ink-secondary);
+      margin-bottom: 28px;
+    }
+    .notice-box {
+      background: var(--bg-surface);
+      border: 1px solid var(--hairline);
+      border-left: 4px solid var(--accent);
+      border-radius: 12px;
+      padding: 20px 24px;
+      margin-bottom: 36px;
+      box-shadow: 0 4px 16px -6px rgba(15, 23, 42, 0.05);
+    }
+    .notice-box p {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.65;
+      color: var(--ink-primary);
+    }
+    section {
+      margin-bottom: 40px;
+      padding-top: 26px;
+      border-top: 1px solid var(--hairline);
+    }
+    h2 {
+      font-family: var(--font-sans);
+      font-size: 22px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin-bottom: 14px;
+      color: var(--ink-primary);
+    }
+    h3 {
+      font-family: var(--font-sans);
+      font-size: 16.5px;
+      font-weight: 800;
+      letter-spacing: -0.015em;
+      margin: 24px 0 10px;
+      color: var(--ink-primary);
+    }
+    p, li {
+      font-size: 15px;
+      color: var(--ink-secondary);
+    }
+    p + p { margin-top: 12px; }
+    ul, ol {
+      margin: 12px 0 0 22px;
+      display: grid;
+      gap: 8px;
+    }
+    code {
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      background: var(--bg-subtle);
+      border: 1px solid var(--hairline);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: var(--ink-primary);
+    }
+    pre {
+      margin-top: 14px;
+      background: #0F172A;
+      color: #F8FAFC;
+      border-radius: 10px;
+      padding: 16px 18px;
+      overflow-x: auto;
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      line-height: 1.6;
+    }
+    pre code {
+      background: transparent;
+      border: none;
+      padding: 0;
+      color: inherit;
+      font-size: inherit;
+    }
+    .table-wrap {
+      overflow-x: auto;
+      margin-top: 14px;
+      border: 1px solid var(--hairline);
+      border-radius: 12px;
+      background: var(--bg-surface);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13.5px;
+    }
+    th, td {
+      text-align: left;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--hairline);
+      vertical-align: top;
+    }
+    th {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      background: var(--bg-subtle);
+      color: var(--ink-primary);
+    }
+    tr:last-child td { border-bottom: none; }
+    .pill-yes {
+      display: inline-block;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 700;
+      color: #065F46;
+      background: #D1FAE5;
+      padding: 2px 8px;
+      border-radius: 999px;
+    }
+    .pill-opt {
+      display: inline-block;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 700;
+      color: #92400E;
+      background: #FEF3C7;
+      padding: 2px 8px;
+      border-radius: 999px;
+    }
+    a { color: var(--cta-red); font-weight: 600; }
+    footer {
+      margin-top: 56px;
+      padding-top: 20px;
+      border-top: 1px solid var(--hairline);
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      color: var(--ink-muted);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="nav-inner">
+      <a href="/" class="brand">
+        <img src="assets/logo-wbc-character-light.svg" alt="Whole Body Compute" width="28" height="28" />
+        <span><span class="r">W</span>hole <span class="r">B</span>ody <span class="r">C</span>ompute</span>
+      </a>
+      <nav>
+        <a href="https://wholebodycompute.com">Home</a>
+        <a href="https://wholebodycompute.com/open-core">Open-Core</a>
+        <a href="https://wholebodycompute.com/telemetry">Telemetry</a>
+        <a href="https://github.com/wholebodycompute/whole-body-compute">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="shell">
+    <h1>Security &amp; macOS TCC Architecture FAQ</h1>
+    <p class="lead">
+      Because optional desktop embodiment (<code>body eyes</code> and <code>body hands</code>) uses macOS Accessibility (<code>kTCCServiceAccessibility</code>), security-conscious engineers rightly ask what permissions are required, what the blast radius is, and how pre-egress boundaries are enforced.
+    </p>
+
+    <div class="notice-box">
+      <p>
+        <strong>ZERO-TCC CORE GUARANTEE:</strong> You do <strong>not</strong> need to grant macOS Accessibility, Screen Recording, or Microphone permissions to use Whole Body Compute's core token shield (<code>&lt;3ms</code> AST Symbol Slicer), Blood-Brain Barrier IDE hooks (<code>body begin</code>), local Metal offload, memory, or FinOps auditing. Every organ degrades cleanly when macOS permissions are withheld.
+      </p>
+    </div>
+
+    <section>
+      <h2>1. Permission Matrix: Zero-TCC Core vs. Opt-In Desktop Embodiment</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Subsystem / CLI</th>
+              <th>macOS TCC Permission</th>
+              <th>Default Egress</th>
+              <th>Zero-TCC / Linux</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Blood-Brain Barrier</strong> (<code>bin/body-immune-hook</code>, <code>body bbb</code>)<br />AST Symbol Slicer, Secret Blindfold, Vascular Shell Guard &amp; 3-Stage AST SecGate</td>
+              <td><strong>None</strong></td>
+              <td>None (100% local)</td>
+              <td><span class="pill-yes">YES</span></td>
+            </tr>
+            <tr>
+              <td><strong>The Heart</strong> (<code>body heart</code>, <code>body doctor</code>, <code>body context</code>)<br />Thermal pressure, Unified RAM headroom &amp; Context Saturation Index</td>
+              <td><strong>None</strong></td>
+              <td>None</td>
+              <td><span class="pill-yes">YES</span></td>
+            </tr>
+            <tr>
+              <td><strong>The Brainstem</strong> (<code>body scout</code>, <code>body perfusion</code>)<br />On-device Apple Silicon Metal / Ollama inference &amp; KV prefix cache</td>
+              <td><strong>None</strong></td>
+              <td>Loopback only (<code>127.0.0.1</code>)</td>
+              <td><span class="pill-yes">YES</span></td>
+            </tr>
+            <tr>
+              <td><strong>The Hippocampus</strong> (<code>body memory</code>, <code>body flush</code>, <code>body audit-spend</code>)<br />SQLite WAL memory, <code>StateCapsule</code> handoffs &amp; 30-day FinOps receipts</td>
+              <td><strong>None</strong></td>
+              <td>None</td>
+              <td><span class="pill-yes">YES</span></td>
+            </tr>
+            <tr>
+              <td><strong>The Ears</strong> (<code>body ears</code> / <code>body transcribe</code>)<br />Hold-<code>Fn</code> 100% local voice-to-code dictation via <code>Whole Body Compute.app</code></td>
+              <td>Microphone on <code>Whole Body Compute.app</code> only <em>(0 Terminal/IDE TCC)</em></td>
+              <td>None (<code>$0</code> local weights)</td>
+              <td><span class="pill-opt">OPT-IN</span></td>
+            </tr>
+            <tr>
+              <td><strong>The Eyes &amp; Hands</strong> (<code>body eyes</code>, <code>body hands</code>)<br />Live <code>AXUIElement</code> DOM inspection &amp; UI actuation via unified <code>Whole Body Compute.app</code></td>
+              <td>Accessibility on <code>Whole Body Compute.app</code> only <em>(0 Terminal/IDE TCC; Screen Recording only for OCR fallback)</em></td>
+              <td>None</td>
+              <td><span class="pill-opt">OPT-IN</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Strict Zero-TCC / Air-Gapped Setup</h3>
+      <pre><code># 1. Disable anonymous operational vitals (100% offline Tier-0 mode)
+export DO_NOT_TRACK=1
+body telemetry disable
+
+# 2. Disable passive cross-app workflow motif observation
+export WBC_AMBIENT_DISCOVERY=0
+
+# 3. Wire Blood-Brain Barrier IDE hooks (requires ZERO macOS TCC permissions)
+body begin</code></pre>
+    </section>
+
+    <section>
+      <h2>2. Frequently Asked Security Questions</h2>
+
+      <h3>Q1: "Isn't granting macOS Accessibility effectively granting GUI-session root?"</h3>
+      <p>
+        <strong>Yes - at the macOS OS level, <code>kTCCServiceAccessibility</code> is one of the highest-privilege TCC entitlements on macOS, and treating it lightly is a mistake.</strong> Apple's TCC framework does not scope Accessibility to a single target window.
+      </p>
+      <ul>
+        <li><strong>Strictly Optional:</strong> Leave Accessibility OFF unless you actively want an agent to inspect or drive live macOS GUI apps via <code>body eyes</code> / <code>body hands</code>.</li>
+        <li><strong>Deterministic Vault, Origin &amp; Field Blindfolds:</strong> Even when enabled, <code>body eyes</code> hard-blocks DOM extraction on password managers (<code>1Password</code>, <code>Bitwarden</code>, <code>Apple Passwords</code>, <code>LastPass</code>, <code>KeePassXC</code>, <code>Keychain Access</code>, <code>Dashlane</code>, <code>NordPass</code>, <code>Authy</code>, <code>YubiKey</code>), returning <code>[BLOCKED_SECURE_VAULT]</code> with zero elements. Browser tabs on web vaults or root IAM consoles (<code>my.1password.com</code>, <code>vault.bitwarden.com</code>, <code>console.aws.amazon.com/iam</code>) return <code>[BLOCKED_SENSITIVE_ORIGIN]</code>. Any <code>AXSecureTextField</code> is masked to <code>[REDACTED_PASSWORD]</code> before serialization.</li>
+        <li><strong>Engine-Level Actuation Denylists:</strong> <code>FovealVisionEngine</code> (<code>actuate</code>, <code>click_element</code>, <code>click_xy</code>, <code>type_text</code>, <code>paste_element</code>, <code>trigger_menu_item</code>, <code>dispatch_hotkey</code>), <code>ax_act</code>, and <code>PalWorkflow</code> reject clicks/keystrokes into password vaults, macOS <code>System Settings</code> / <code>SecurityAgent</code> TCC dialogs, sensitive web vault origins, or <code>AXSecureTextField</code> password fields.</li>
+      </ul>
+
+      <h3>Q2: "How is <code>body eyes</code> safer than screenshot-based Computer Use agents?"</h3>
+      <p>
+        Screenshot-loop agents upload full-screen PNGs every 1-2 seconds to cloud vision APIs - leaking Slack banners, <code>.env</code> terminal splits, and password toasts as raw pixels before any redactor can touch them. By contrast, <code>body eyes</code> parses structured <code>AXUIElement</code> nodes locally in <code>&lt;15ms</code> with zero screenshots, scrubs 23+ secret vendor formats (<code>sk-</code>, <code>ghp_</code>, <code>AKIA</code>, <code>ya29.</code>, DB URIs, Base64 tokens, SSNs, cards) in <code>&lt;1ms</code>, and neutralizes DOM prompt-injection breakouts via <code>EpithelialScreenFilter</code> before any token reaches an LLM.
+      </p>
+
+      <h3>Q3: "If I grant Accessibility to my Terminal or IDE, doesn't every child process inherit it?"</h3>
+      <p>
+        <strong>Yes - which is why Whole Body Compute isolates <code>kTCCServiceAccessibility</code> and <code>kTCCServiceMicrophone</code> inside one unified notarized app: <code>Whole Body Compute.app</code> (<code>com.wholebodycompute.app</code>, Team ID <code>Y25SHBA3P5</code>).</strong> macOS TCC attributes permissions to the responsible parent application bundle (e.g. <code>Terminal.app</code> or <code>Cursor.app</code>). Granting Accessibility to a general-purpose terminal would expose it to untrusted child scripts.
+      </p>
+      <ul>
+        <li><strong>Zero Terminal / IDE / Python TCC:</strong> <code>Whole Body Compute.app</code> is a zero-Python Swift menu-bar broker (<code>LSUIElement</code>) signed with <strong>Hardened Runtime</strong> and <strong>Library Validation ON</strong> (zero third-party or Python dylibs). Grant Accessibility once to <code>Whole Body Compute.app</code> - never to your terminal or IDE.</li>
+        <li><strong>Authenticated IPC (<code>foveal.sock</code>):</strong> <code>~/.whole_body_compute/foveal.sock</code> and its per-session <code>foveal.token</code> are locked to <code>0600</code> inside a <code>0700</code> directory, capped at <code>64 KiB</code>, and gated by kernel <code>LOCAL_PEERPID</code> + <code>LOCAL_PEERCRED</code> UID checks, HMAC-SHA256 (<code>op_bind</code> + 30s replay window), and <code>SecCodeCopyGuestWithAttributes</code>.</li>
+        <li><strong>Native Swift Blindfolds &amp; 1-Click Kill Switches:</strong> <code>PrivacyBlindfold.swift</code> redacts vaults, <code>System Settings</code> / <code>SecurityAgent</code>, sensitive web origins, and <code>AXSecureTextField</code> inside Swift prior to IPC. <code>Option</code>-click the menu-bar icon to pause all organs in 1 click (or toggle <strong>Eyes &amp; Hands</strong> and <strong>Ears</strong> independently).</li>
+        <li><strong>Verified Install:</strong> <code>body eyes --install-app</code> (pinned SHA-256 + Team ID <code>Y25SHBA3P5</code> verification) or <code>brew install --cask wholebodycompute/tap/whole-body-compute</code>.</li>
+      </ul>
+
+      <h3>Q4: "Does WBC watch my clipboard or send code/screen data to external servers?"</h3>
+      <ul>
+        <li><strong>Zero Code, Zero Prompts, Zero Screen Data in Telemetry:</strong> Whole Body Compute never transmits source code, file paths, repo names, prompts, clipboard text, window titles, screen pixels, or IP addresses (<code>"$ip": null</code>). Inspect the exact payload anytime with <code>body telemetry show</code> or opt out via <code>body telemetry disable</code> / <code>DO_NOT_TRACK=1</code>. See <a href="https://github.com/wholebodycompute/whole-body-compute/blob/main/TELEMETRY.md"><code>TELEMETRY.md</code></a>.</li>
+        <li><strong>Concealed Pasteboard Respect:</strong> Clipboard items carrying password-manager autofill markers (<code>org.nspasteboard.ConcealedType</code>, <code>org.nspasteboard.TransientType</code>, <code>org.nspasteboard.AutoGeneratedType</code>, <code>com.agilebits.onepassword</code>) are dropped before <code>NSPasteboardTypeString</code> is ever read - even when copied from a browser extension inside Chrome. Set <code>WBC_AMBIENT_DISCOVERY=0</code> to disable passive motif discovery entirely.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>3. Empirical Security Scorecard &amp; 60-Second Local Verification</h2>
+      <p>
+        Live choke-point and verbatim upstream benchmarks across <strong>AgentDojo</strong>, <strong>CyberSecEval 3</strong>, <strong>InjecAgent</strong> (<code>2,108</code> IPI cases + <code>1,066</code> benign controls), and <strong>RedCode-Exec</strong> (<code>1,410</code> Python/Bash payloads) executing the real <code>bin/body-immune-hook</code> binary and in-process organ gates (<a href="https://github.com/wholebodycompute/whole-body-compute/blob/main/benchmarks/AGENTDOJO_CYBERSECEVAL_REPORT_2026_11_10.md">choke-point receipts</a> &bull; <a href="https://github.com/wholebodycompute/whole-body-compute/blob/main/benchmarks/UPSTREAM_REDCODE_INJECAGENT_REPORT_2026_11_26.md">4,584-case upstream receipts</a>):
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Benchmark / Metric</th>
+              <th>Unshielded Baseline</th>
+              <th>Agent + Whole Body Compute (BBB)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>AgentDojo + CyberSecEval 3 Choke-Point (12 attacks / 6 benign)</strong></td>
+              <td><code>100.0% ASR</code> (12/12 compromised)</td>
+              <td><strong><code>0.0% ASR</code> (12/12 blocked &bull; 0.0% FPR)</strong></td>
+            </tr>
+            <tr>
+              <td><strong>Verbatim Upstream InjecAgent (2,108 IPI cases / 1,066 benign)</strong></td>
+              <td><code>0%</code> deterministic pre-tool defense</td>
+              <td><strong><code>0.0% ASR</code> (2,108/2,108 defended &bull; 0.0% FPR in 0.07ms)</strong></td>
+            </tr>
+            <tr>
+              <td><strong>Verbatim Upstream RedCode-Exec Host/OS Boundary (750 payloads)</strong></td>
+              <td><code>0%</code> deterministic AST/shell gate</td>
+              <td><strong><code>94.53%</code> blocked (709/750 &bull; benign /proc &amp; JSON preserved)</strong></td>
+            </tr>
+            <tr>
+              <td><strong>Benign Developer &amp; User Tool Utility (1,072 total controls)</strong></td>
+              <td><code>100.0%</code></td>
+              <td><strong><code>100.0%</code> (1,072/1,072 allowed &bull; <code>0.0%</code> FPR)</strong></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Verify Every Gate Locally in &lt;60 Seconds</h3>
+      <pre><code># 1. Run the live 18-scenario AgentDojo + CyberSecEval 3 choke-point benchmark (&lt;1s)
+uv run python3 benchmarks/agentdojo_wbc_security_suite.py
+
+# 2. Run the 4,584-evaluation verbatim upstream InjecAgent + RedCode-Exec sweep (~11s, $0)
+uv run python3 benchmarks/upstream_redcode_injecagent_suite.py</code></pre>
+
+# 2. Verify WBC Eyes.app Hardened Runtime, Kill Switch, Accessibility vault blocking &amp; actuation gates
+WBC_HEADLESS=1 WBC_TESTING=1 uv run pytest -q tests/test_wbc_eyes_helper.py tests/test_bbb_computer_use_wiring.py tests/test_hands_zero_cursor_background.py
+
+# 3. Verify AST SecGate, APFS symlink escape blocks, Keychain/SSH guards &amp; hook symlink checks
+WBC_HEADLESS=1 WBC_TESTING=1 uv run pytest -q tests/test_red_team_hardened.py tests/test_safeagents_organ5_upgrades.py tests/test_neon_xhigh_audit_hardening.py
+
+# 4. Run the 10-organ adversarial chaos &amp; concurrency fuzzer
+uv run body chaos</code></pre>
+    </section>
+
+    <section>
+      <h2>4. Responsible Disclosure</h2>
+      <p>
+        Found a bypass in <code>bin/body-immune-hook</code>, <code>VascularTrafficMonitor</code>, <code>FovealVisionEngine</code>, <code>APFSCoWSandbox</code>, or <code>redact_secrets</code>? Report it with a minimal reproduction to <a href="mailto:hello@wholebodycompute.com">hello@wholebodycompute.com</a>.
+      </p>
+    </section>
+
+    <footer>
+      <span>&copy; 2026 Whole Body Compute. All rights reserved.</span>
+      <span><a href="https://github.com/wholebodycompute/whole-body-compute/blob/main/docs/SECURITY_AND_TCC_FAQ.md">Markdown Source</a> &bull; <a href="https://github.com/wholebodycompute/whole-body-compute/blob/main/TELEMETRY.md">TELEMETRY.md</a> &bull; <a href="https://wholebodycompute.com/patents">Patents</a></span>
+    </footer>
+  </div>
+</body>
+</html>

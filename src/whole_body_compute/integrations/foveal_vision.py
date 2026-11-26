@@ -13,13 +13,17 @@ for Claude, Muse, Grok, Arc, Chrome, and native apps in <15ms with zero screensh
 from __future__ import annotations
 
 import csv
+import hashlib
+import hmac
 import io
 import json
 import logging
 import os
 import re
+import secrets
 import socket
 import subprocess
+import threading
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
@@ -66,6 +70,22 @@ IGNORE_TEXT_SUBROLES: Set[str] = {
 
 _INITIAL_FOVEAL_SOCKET_PATH = str(get_wbc_data_dir() / "foveal.sock")
 FOVEAL_SOCKET_PATH = _INITIAL_FOVEAL_SOCKET_PATH
+_FOVEAL_DAEMON_LOCAL = threading.local()
+
+_FOVEAL_ACT_BIND_KEYS: Tuple[str, ...] = (
+    "click",
+    "click_xy",
+    "hover",
+    "right_click",
+    "type_text",
+    "paste_text",
+    "hotkey",
+    "menu",
+    "scroll",
+    "attach",
+    "chain",
+    "submit",
+)
 
 
 def _resolve_foveal_socket_path() -> str:
@@ -74,7 +94,100 @@ def _resolve_foveal_socket_path() -> str:
     env_sock = os.environ.get("WBC_FOVEAL_SOCKET_PATH", "").strip()
     if env_sock:
         return os.path.expanduser(env_sock)
+    if (
+        os.environ.get("VOICEFI_TESTING") == "1" or "PYTEST_CURRENT_TEST" in os.environ
+    ) and "WBC_DATA_DIR" not in os.environ:
+        return ""
     return str(get_wbc_data_dir() / "foveal.sock")
+
+
+def _resolve_foveal_token_path(sock_path: str) -> str:
+    env_tok = os.environ.get("WBC_FOVEAL_TOKEN_PATH", "").strip()
+    if env_tok:
+        return os.path.expanduser(env_tok)
+    if sock_path.endswith(".sock"):
+        return sock_path[:-5] + ".token"
+    return sock_path + ".token"
+
+
+def _compute_foveal_op_bind(req: Dict[str, Any], method_override: Optional[str] = None) -> str:
+    op_str = method_override or (req.get("op") if isinstance(req.get("op"), str) else None) or "snapshot"
+    app_str = req.get("app_name") if isinstance(req.get("app_name"), str) else ""
+    raw_pid = req.get("pid")
+    pid_str = str(int(raw_pid)) if isinstance(raw_pid, int) and not isinstance(raw_pid, bool) else ""
+    act_parts: List[str] = []
+    for k in _FOVEAL_ACT_BIND_KEYS:
+        val = req.get(k)
+        if val is None:
+            continue
+        if isinstance(val, bool):
+            if val:
+                act_parts.append(f"{k}=true")
+        elif isinstance(val, str):
+            if val:
+                act_parts.append(f"{k}={val}")
+        elif isinstance(val, (int, float)):
+            act_parts.append(f"{k}={val}")
+        elif isinstance(val, (list, dict)):
+            act_parts.append(f"{k}={json.dumps(val, separators=(',', ':'), sort_keys=True)}")
+    return f"{op_str}:{app_str}:{pid_str}:{'|'.join(act_parts)}"
+
+
+def _read_foveal_token_secret(sock_path: str) -> Optional[bytes]:
+    tok_path = _resolve_foveal_token_path(sock_path)
+    try:
+        st = os.lstat(tok_path)
+        if st.st_uid != os.getuid() or (st.st_mode & 0o077) != 0:
+            logger.warning("Refusing insecure foveal token file permissions/owner at %s", tok_path)
+            return None
+        with open(tok_path, "r", encoding="utf-8") as f:
+            raw_hex = f.read().strip()
+        if len(raw_hex) != 64:
+            return None
+        return bytes.fromhex(raw_hex)
+    except Exception:
+        return None
+
+
+def _attach_foveal_socket_auth(payload: Dict[str, Any], sock_path: str) -> Dict[str, Any]:
+    secret = _read_foveal_token_secret(sock_path)
+    signed = dict(payload)
+    if secret is None:
+        return signed
+
+    is_jsonrpc = signed.get("jsonrpc") == "2.0"
+    if is_jsonrpc:
+        params = dict(signed.get("params") or {})
+        rpc_method = signed.get("method")
+        method_override = (
+            "status"
+            if rpc_method in ("foveal.status", "foveal.ping", "vifi.ping")
+            else ("ambient_status" if rpc_method == "foveal.ambient_status" else None)
+        )
+        op_bind = _compute_foveal_op_bind(params, method_override=method_override)
+    else:
+        params = signed
+        op_bind = _compute_foveal_op_bind(params)
+
+    caller_pid = os.getpid()
+    ts_str = f"{time.time():.3f}"
+    nonce = secrets.token_hex(16)
+    canonical_msg = f"wbc-foveal-v1:{caller_pid}:{ts_str}:{nonce}:{op_bind}".encode("utf-8")
+    mac_hex = hmac.new(secret, canonical_msg, hashlib.sha256).hexdigest()
+    auth_env = {
+        "v": 1,
+        "pid": caller_pid,
+        "ts": ts_str,
+        "nonce": nonce,
+        "op_bind": op_bind,
+        "hmac": mac_hex,
+    }
+    if is_jsonrpc:
+        params["_auth"] = auth_env
+        signed["params"] = params
+    else:
+        signed["_auth"] = auth_env
+    return signed
 
 
 class SpatialMotorCache:
@@ -278,6 +391,45 @@ class FovealUIElement:
             "is_secure": self.is_secure,
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "FovealUIElement":
+        raw_bbox = data.get("bbox")
+        if isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) == 4:
+            bbox = (float(raw_bbox[0]), float(raw_bbox[1]), float(raw_bbox[2]), float(raw_bbox[3]))
+        elif isinstance(data.get("bounds"), dict):
+            b = data["bounds"]
+            bbox = (
+                float(b.get("x", 0.0)),
+                float(b.get("y", 0.0)),
+                float(b.get("w", 0.0)),
+                float(b.get("h", 0.0)),
+            )
+        else:
+            bbox = (0.0, 0.0, 0.0, 0.0)
+        raw_center = data.get("center")
+        center = (
+            (float(raw_center[0]), float(raw_center[1]))
+            if isinstance(raw_center, (list, tuple)) and len(raw_center) == 2
+            else (0.0, 0.0)
+        )
+        lbl = str(data.get("label") or data.get("title") or "")
+        return cls(
+            role=str(data.get("role") or ""),
+            label=lbl,
+            title=str(data.get("title") or lbl),
+            description=str(data.get("description") or ""),
+            value=str(data["value"]) if data.get("value") is not None else None,
+            bbox=bbox,
+            focused=bool(data.get("focused", False)),
+            enabled=bool(data.get("enabled", True)),
+            subrole=str(data["subrole"]) if data.get("subrole") is not None else None,
+            identifier=str(data["identifier"]) if data.get("identifier") is not None else None,
+            depth=int(data.get("depth") or 0),
+            is_secure=bool(data.get("is_secure", False)),
+            id=str(data.get("id") or ""),
+            center=center,
+        )
+
     @staticmethod
     def _clean_str(val: str) -> str:
         """Sanitize text to neutralize newline breakout, secrets, and prompt injection vectors."""
@@ -387,6 +539,42 @@ class FovealWindowSnapshot:
             "reply_settled": self.reply_settled,
             "wait_reply_ms": self.wait_reply_ms,
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "FovealWindowSnapshot":
+        raw_elems = data.get("interactive_elements") or data.get("elements") or []
+        elems = [FovealUIElement.from_dict(e) for e in raw_elems if isinstance(e, dict)]
+        raw_foc = data.get("focused_element")
+        foc = FovealUIElement.from_dict(raw_foc) if isinstance(raw_foc, dict) else None
+        wb = data.get("window_bbox")
+        bbox = (
+            (float(wb[0]), float(wb[1]), float(wb[2]), float(wb[3]))
+            if isinstance(wb, (list, tuple)) and len(wb) == 4
+            else (0.0, 0.0, 0.0, 0.0)
+        )
+        return cls(
+            app_name=str(data.get("app_name") or "Unknown"),
+            bundle_id=str(data.get("bundle_id") or ""),
+            pid=int(data.get("pid") or 0),
+            window_title=str(data.get("window_title") or ""),
+            window_bbox=bbox,
+            focused_element=foc,
+            interactive_elements=elems,
+            timestamp=float(data.get("timestamp") or time.time()),
+            latency_ms=float(data.get("latency_ms") or 0.0),
+            headless_route=str(data.get("headless_route") or ""),
+            frame_path=data.get("frame_path"),
+            latest_frame_path=data.get("latest_frame_path"),
+            estimated_tokens=int(data.get("estimated_tokens") or 0),
+            screenshot_token_baseline=int(data.get("screenshot_token_baseline") or 15000),
+            token_savings_pct=float(data.get("token_savings_pct") or 0.0),
+            actuation=data.get("actuation") if isinstance(data.get("actuation"), dict) else None,
+            tactile_delta=data.get("tactile_delta") if isinstance(data.get("tactile_delta"), dict) else None,
+            last_message=data.get("last_message"),
+            last_messages=data.get("last_messages") if isinstance(data.get("last_messages"), list) else None,
+            reply_settled=data.get("reply_settled") if isinstance(data.get("reply_settled"), bool) else None,
+            wait_reply_ms=float(data["wait_reply_ms"]) if data.get("wait_reply_ms") is not None else None,
+        )
 
     def to_context_block(self, max_elements: int = 40) -> str:
         """Render a high-density, prompt-ready markdown block for the agent."""
@@ -539,12 +727,18 @@ class FovealVisionEngine:
             ws = NSWorkspace.sharedWorkspace()
 
             if pid is not None:
-                running = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+                try:
+                    pid_int = int(pid)
+                except (TypeError, ValueError):
+                    return (0, "Unknown", "")
+                if pid_int <= 0:
+                    return (0, "Unknown", "")
+                running = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid_int)
                 if running:
-                    name = str(running.localizedName() or f"PID-{pid}").strip()
+                    name = str(running.localizedName() or f"PID-{pid_int}").strip()
                     bid = str(running.bundleIdentifier() or "").strip()
-                    return (pid, name, bid)
-                return (pid, f"PID-{pid}", "")
+                    return (pid_int, name, bid)
+                return (pid_int, f"PID-{pid_int}", "")
 
             if app_name:
                 query = app_name.strip().lower()
@@ -953,6 +1147,11 @@ class FovealVisionEngine:
             "  el = findEl(p.label);"
             "}"
             "if(!el) return 'not_found';"
+            "const elType = String(el.getAttribute('type') || el.type || '').toLowerCase();"
+            "const elAuto = String(el.getAttribute('autocomplete') || '').toLowerCase();"
+            "if(elType === 'password' || elAuto === 'current-password' || elAuto === 'new-password'){"
+            "  return 'blocked_password_field';"
+            "}"
             "if(typeof el.scrollIntoView === 'function') el.scrollIntoView({block:'nearest', inline:'nearest'});"
             "const rect = el.getBoundingClientRect();"
             "const cx = rect.left + rect.width / 2; const cy = rect.top + rect.height / 2;"
@@ -986,6 +1185,13 @@ class FovealVisionEngine:
             "})()"
         )
         applescript = (
+            "on isSensitiveTab(tTitle, tUrl)\n"
+            '    set combined to (tTitle & " " & tUrl)\n'
+            '    repeat with pat in {"1password.com", "bitwarden.com", "lastpass.com", "app.dashlane.com", "nordpass.com", "console.aws.amazon.com/iam", "signin.aws.amazon.com"}\n'
+            "        if combined contains (pat as text) then return true\n"
+            "    end repeat\n"
+            "    return false\n"
+            "end isSensitiveTab\n"
             "on run argv\n"
             "    set titleQuery to item 2 of argv\n"
             "    set jsCode to item 3 of argv\n"
@@ -994,13 +1200,19 @@ class FovealVisionEngine:
             '        if titleQuery is not "" then\n'
             "            repeat with w in windows\n"
             "                repeat with t in tabs of w\n"
-            "                    if ((title of t as text) contains titleQuery) or ((URL of t as text) contains titleQuery) then\n"
+            "                    set tTitle to (title of t as text)\n"
+            "                    set tUrl to (URL of t as text)\n"
+            "                    if (tTitle contains titleQuery) or (tUrl contains titleQuery) then\n"
+            '                        if my isSensitiveTab(tTitle, tUrl) then return "blocked_sensitive_origin"\n'
             "                        return (execute t javascript jsCode) as text\n"
             "                    end if\n"
             "                end repeat\n"
             "            end repeat\n"
+            '            return "tab_not_found"\n'
             "        end if\n"
-            "        return (execute active tab of front window javascript jsCode) as text\n"
+            "        set actTab to active tab of front window\n"
+            "        if my isSensitiveTab((title of actTab as text), (URL of actTab as text)) then return \"blocked_sensitive_origin\"\n"
+            "        return (execute actTab javascript jsCode) as text\n"
             "    end tell\n"
             "end run\n"
         )
@@ -1053,6 +1265,100 @@ class FovealVisionEngine:
         return best_el
 
     @classmethod
+    def _check_actuation_security_gate(
+        cls,
+        action_name: str,
+        app_name: Optional[str] = None,
+        window_title: Optional[str] = None,
+        snapshot: Optional[FovealWindowSnapshot] = None,
+        element: Optional[FovealUIElement] = None,
+        forbid_secure_field: bool = False,
+        pid: Optional[int] = None,
+        bundle_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Low-level Blood-Brain Barrier choke point for all FovealVisionEngine UI actuations.
+        Blocks clicks, keystrokes, pastes, hotkeys, file attachments, and menu presses targeting
+        password vaults, macOS System Settings / TCC SecurityAgent surfaces, sensitive web vault
+        origins, or AXSecureTextField password inputs. # [direct-edit]
+        """
+        from whole_body_compute.integrations.ambient_discovery import AmbientPrivacyGuard
+
+        eff_pid = pid if pid is not None else (snapshot.pid if snapshot and snapshot.pid else None)
+        eff_app = app_name or (snapshot.app_name if snapshot else "") or ""
+        eff_bid = bundle_id or (snapshot.bundle_id if snapshot else "") or ""
+        eff_win = window_title or (snapshot.window_title if snapshot else "") or ""
+
+        if snapshot is None and (not eff_app or not eff_bid):
+            mock_app = os.environ.get("VOICEFI_MOCK_FRONT_APP", "").strip()
+            if mock_app and not eff_app and eff_pid is None:
+                eff_app = mock_app
+                if not eff_win:
+                    eff_win = os.environ.get("VOICEFI_MOCK_WINDOW_TITLE", "")
+            elif eff_pid is not None or eff_app:
+                try:
+                    _, res_app, res_bid = cls.resolve_target_app(
+                        pid=eff_pid, app_name=eff_app if eff_pid is None else None
+                    )
+                    if res_app and (not eff_app or eff_app == "Unknown" or eff_app.startswith("PID-")):
+                        eff_app = res_app
+                    if res_bid and not eff_bid:
+                        eff_bid = res_bid
+                except Exception:
+                    pass
+            elif os.environ.get("VOICEFI_MOCK_FOVEAL") != "1" and not (
+                os.environ.get("VOICEFI_MOCK_AUDIO") == "1" and os.environ.get("VOICEFI_HEADLESS") == "1"
+            ):
+                try:
+                    _, res_app, res_bid = cls.resolve_target_app()
+                    if res_app and res_app != "Unknown":
+                        eff_app = res_app
+                    if res_bid:
+                        eff_bid = res_bid
+                except Exception:
+                    pass
+
+        blocked, reason = AmbientPrivacyGuard.is_actuation_blocked(
+            app_name=eff_app,
+            window_title=eff_win,
+            bundle_id=eff_bid,
+        )
+        if blocked:
+            return {
+                "status": "error",
+                "action": action_name,
+                "method": "blocked_security_gate",
+                "security_blocked": True,
+                "cursor_moved": False,
+                "error": f"Security violation: {reason}",
+                "summary": f"Blocked {action_name}: {reason}",
+            }
+
+        if forbid_secure_field:
+            cand_el = element or (snapshot.focused_element if snapshot else None)
+            if cand_el is not None:
+                role_low = str(cand_el.role or "").lower()
+                sub_low = str(cand_el.subrole or "").lower()
+                if (
+                    cand_el.is_secure
+                    or "secure" in role_low
+                    or "password" in role_low
+                    or "secure" in sub_low
+                    or "password" in sub_low
+                ):
+                    msg = f"Forbidden {action_name} into secure password field ({cand_el.role})"
+                    return {
+                        "status": "error",
+                        "action": action_name,
+                        "method": "blocked_secure_field",
+                        "security_blocked": True,
+                        "cursor_moved": False,
+                        "error": f"Security violation: {msg}",
+                        "summary": f"Blocked {action_name}: secure password field",
+                    }
+        return None
+
+    @classmethod
     def click_xy(
         cls,
         x: float,
@@ -1067,6 +1373,9 @@ class FovealVisionEngine:
         When targeting a background app or `no_cursor=True`, automatically reroutes (x, y)
         to zero-cursor AXPress / ChromeBackgroundDOM instead of hijacking kCGHIDEventTap.
         """
+        sec_err = cls._check_actuation_security_gate("click_xy", snapshot=snapshot, pid=pid)
+        if sec_err is not None:
+            return sec_err
         can_cursor, guard = cls._can_use_global_cursor(
             snapshot=snapshot,
             pid=pid,
@@ -1154,6 +1463,16 @@ class FovealVisionEngine:
         """
         eff_app = app_name or (snapshot.app_name if snapshot else None)
         eff_win = window_title or (snapshot.window_title if snapshot else None)
+
+        sec_err = cls._check_actuation_security_gate(
+            "click",
+            app_name=eff_app,
+            window_title=eff_win,
+            snapshot=snapshot,
+            element=target if isinstance(target, FovealUIElement) else None,
+        )
+        if sec_err is not None:
+            return sec_err
 
         # If targeting a hidden background browser tab, drive that tab's DOM directly without touching the active tab
         if not isinstance(target, FovealUIElement) and cls._is_background_chromium_tab(
@@ -1371,6 +1690,16 @@ class FovealVisionEngine:
         target_app = snapshot.app_name if snapshot and snapshot.app_name else app_name
         target_win = window_title or (snapshot.window_title if snapshot and snapshot.window_title else None)
 
+        sec_err = cls._check_actuation_security_gate(
+            "hover",
+            app_name=target_app,
+            window_title=target_win,
+            snapshot=snapshot,
+            pid=target_pid,
+        )
+        if sec_err is not None:
+            return sec_err
+
         current_snap = snapshot
         if current_snap is None and (target_pid or target_app or target_win):
             try:
@@ -1551,6 +1880,16 @@ class FovealVisionEngine:
         target_app = snapshot.app_name if snapshot and snapshot.app_name else app_name
         target_win = window_title or (snapshot.window_title if snapshot and snapshot.window_title else None)
 
+        sec_err = cls._check_actuation_security_gate(
+            "right_click",
+            app_name=target_app,
+            window_title=target_win,
+            snapshot=snapshot,
+            pid=target_pid,
+        )
+        if sec_err is not None:
+            return sec_err
+
         current_snap = snapshot
         if current_snap is None and (target_pid or target_app or target_win):
             try:
@@ -1730,18 +2069,68 @@ class FovealVisionEngine:
     ) -> Dict[str, Any]:
         """
         Execute deterministic macOS NSOpenPanel file attachment sequence:
-        1. If trigger_target provided, click attach button first and wait 120ms
-        2. cmd+shift+g to trigger 'Go to the folder' sheet
-        3. Sleep 60ms
-        4. Atomically paste resolved absolute path
-        5. Return/submit Go sheet
-        6. Sleep 100ms
-        7. Return/submit Open file dialog
+        1. Validate target surface, Secret Blindfold (incl. symlinks), control chars, and regular-file existence
+        2. If trigger_target provided, click attach button first and wait 120ms
+        3. cmd+shift+g to trigger 'Go to the folder' sheet
+        4. Atomically paste resolved absolute path (PID-scoped)
+        5. Return/submit Go sheet + Open file dialog (PID-scoped) # [direct-edit]
         """
-        resolved_path = str(Path(file_path).expanduser().resolve())
+        from whole_body_compute.organs.immune import _is_sensitive_credential_path
+
         target_pid = snapshot.pid if snapshot and snapshot.pid else pid
         target_app = snapshot.app_name if snapshot and snapshot.app_name else app_name
         target_win = snapshot.window_title if snapshot and snapshot.window_title else window_title
+
+        sec_err = cls._check_actuation_security_gate(
+            "attach_file",
+            app_name=target_app,
+            window_title=target_win,
+            snapshot=snapshot,
+            pid=target_pid,
+        )
+        if sec_err is not None:
+            return sec_err
+
+        raw_fp = str(file_path or "")
+        if not raw_fp.strip() or any(ch in raw_fp for ch in ("\x00", "\r", "\n")):
+            return {
+                "status": "error",
+                "action": "attach_file",
+                "error": "Invalid file path: empty or contains control/newline characters",
+                "summary": "Blocked attach_file: invalid path characters",
+            }
+
+        expanded_fp = Path(raw_fp).expanduser()
+        resolved_obj = expanded_fp.resolve()
+        resolved_path = str(resolved_obj)
+        if any(ch in resolved_path for ch in ("\x00", "\r", "\n")):
+            return {
+                "status": "error",
+                "action": "attach_file",
+                "error": "Resolved file path contains forbidden control/newline characters",
+                "summary": "Blocked attach_file: resolved path contains control characters",
+            }
+
+        sens_hit = _is_sensitive_credential_path(raw_fp, resolved_path=resolved_path)
+        if sens_hit:
+            return {
+                "status": "error",
+                "action": "attach_file",
+                "method": "blocked_secret_blindfold",
+                "security_blocked": True,
+                "cursor_moved": False,
+                "error": f"Security violation: Refusing to attach sensitive credential file '{sens_hit}'",
+                "summary": f"Blocked attach_file: sensitive file '{sens_hit}'",
+            }
+
+        if not resolved_obj.is_file():
+            return {
+                "status": "error",
+                "action": "attach_file",
+                "file_path": resolved_path,
+                "error": f"Attachment target '{resolved_path}' does not exist or is not a regular file",
+                "summary": "Blocked attach_file: target is not an existing regular file",
+            }
 
         actions_taken = []
         if trigger_target:
@@ -1753,8 +2142,8 @@ class FovealVisionEngine:
         actions_taken.append(cls.dispatch_hotkey("cmd+shift+g", pid=target_pid, app_name=target_app))
         time.sleep(0.06)
 
-        # 2. Atomic paste resolved path
-        paste_ok = cls._atomic_paste_text(resolved_path)
+        # 2. Atomic paste resolved path (scoped to target_pid)
+        paste_ok = cls._atomic_paste_text(resolved_path, pid=target_pid)
         actions_taken.append({
             "status": "success" if paste_ok else "error",
             "action": "paste_path",
@@ -1763,11 +2152,11 @@ class FovealVisionEngine:
         })
 
         # 3. Submit Go-to-folder sheet
-        actions_taken.append(cls.send_submit(snapshot=snapshot))
+        actions_taken.append(cls.send_submit(snapshot=snapshot, pid=target_pid))
         time.sleep(0.10)
 
         # 4. Confirm Open dialog
-        actions_taken.append(cls.send_submit(snapshot=snapshot))
+        actions_taken.append(cls.send_submit(snapshot=snapshot, pid=target_pid))
         time.sleep(0.06)
 
         post_snap = None
@@ -1815,6 +2204,16 @@ class FovealVisionEngine:
         target_pid = snapshot.pid if snapshot and snapshot.pid else pid
         target_app = snapshot.app_name if snapshot and snapshot.app_name else app_name
         target_win = snapshot.window_title if snapshot and snapshot.window_title else window_title
+
+        sec_err = cls._check_actuation_security_gate(
+            "execute_chain",
+            app_name=target_app,
+            window_title=target_win,
+            snapshot=snapshot,
+            pid=target_pid,
+        )
+        if sec_err is not None:
+            return sec_err
 
         current_snap = snapshot
         if current_snap is None and (target_pid or target_app or target_win):
@@ -2081,17 +2480,33 @@ class FovealVisionEngine:
         Uses direct background AXValue injection first, falling back to CGEventPostToPid Cmd+V.
         """
         target_pid = snapshot.pid if snapshot and snapshot.pid else None
+        sec_err = cls._check_actuation_security_gate(
+            "paste",
+            snapshot=snapshot,
+            element=target if isinstance(target, FovealUIElement) else None,
+            forbid_secure_field=isinstance(target, FovealUIElement),
+        )
+        if sec_err is not None:
+            return sec_err
         guard = cls._check_human_hid_guard(target_pid=target_pid, allow_focus_steal=allow_focus_steal)
 
         target_elem: Optional[FovealUIElement] = None
         if target:
-            cls.click_element(target, snapshot=snapshot, allow_focus_steal=allow_focus_steal)
             if snapshot and snapshot.interactive_elements:
                 t_str = str(target).strip().lower()
                 for el in snapshot.interactive_elements:
                     if el.id.lower() == t_str or t_str in f"{el.label} {el.role}".lower():
                         target_elem = el
                         break
+            sec_target = cls._check_actuation_security_gate(
+                "paste",
+                snapshot=snapshot,
+                element=target_elem,
+                forbid_secure_field=True,
+            )
+            if sec_target is not None:
+                return sec_target
+            cls.click_element(target, snapshot=snapshot, allow_focus_steal=allow_focus_steal)
         elif snapshot:
             if snapshot.focused_element and snapshot.focused_element.role in ("AXTextField", "AXTextArea", "AXSearchField"):
                 target_elem = snapshot.focused_element
@@ -2112,6 +2527,15 @@ class FovealVisionEngine:
                     target_elem = snapshot.focused_element or next(
                         (el for el in snapshot.interactive_elements if el.role == "AXWebArea"), None
                     )
+
+        sec_resolved = cls._check_actuation_security_gate(
+            "paste",
+            snapshot=snapshot,
+            element=target_elem,
+            forbid_secure_field=True,
+        )
+        if sec_resolved is not None:
+            return sec_resolved
 
         # Never activate/focus-steal unless explicitly permitted AND no recent human HID activity
         if target_pid and guard["can_focus_steal"]:
@@ -2187,6 +2611,12 @@ class FovealVisionEngine:
         if pid is None and app_name:
             resolved_pid, _, _ = cls.resolve_target_app(app_name=app_name)
             pid = resolved_pid
+        elif pid is not None and not app_name:
+            _, app_name, _ = cls.resolve_target_app(pid=pid)
+
+        sec_err = cls._check_actuation_security_gate("hotkey", app_name=app_name)
+        if sec_err is not None:
+            return sec_err
 
         guard = cls._check_human_hid_guard(target_pid=pid, allow_focus_steal=allow_focus_steal)
         if pid and guard["can_focus_steal"]:
@@ -2249,14 +2679,24 @@ class FovealVisionEngine:
         if not parts:
             return {"status": "error", "action": "menu", "error": "Empty menu path"}
 
+        sec_err = cls._check_actuation_security_gate("menu", app_name=app_name)
+        if sec_err is not None:
+            return sec_err
+
         try:
             import ApplicationServices as AS
 
             if ax_app is None:
+                resolved_name = app_name
                 if pid is None and app_name:
-                    pid, _, _ = cls.resolve_target_app(app_name=app_name)
+                    pid, resolved_name, _ = cls.resolve_target_app(app_name=app_name)
                 elif pid is None:
-                    pid, _, _ = cls.resolve_target_app()
+                    pid, resolved_name, _ = cls.resolve_target_app()
+                elif pid is not None and not app_name:
+                    _, resolved_name, _ = cls.resolve_target_app(pid=pid)
+                sec_resolved = cls._check_actuation_security_gate("menu", app_name=resolved_name)
+                if sec_resolved is not None:
+                    return sec_resolved
                 if pid:
                     ax_app = AS.AXUIElementCreateApplication(pid)
 
@@ -2357,6 +2797,14 @@ class FovealVisionEngine:
         Scroll target window/view up/down/top/bottom via native AXScroll actions, background Chrome DOM,
         or PID keycodes. Only posts global kCGHIDEventTap scroll wheel when safe under _can_use_global_cursor.
         """
+        sec_err = cls._check_actuation_security_gate(
+            "scroll",
+            app_name=app_name,
+            window_title=window_title,
+            snapshot=snapshot,
+        )
+        if sec_err is not None:
+            return sec_err
         d = direction.lower().strip()
         ax_action_ok = False
         bg_dom_ok = False
@@ -2522,20 +2970,37 @@ class FovealVisionEngine:
         Type text into target or focused input element.
         Sets AXValue and sends PID-targeted Quartz keystrokes (never stealing focus).
         """
+        sec_pre = cls._check_actuation_security_gate(
+            "type_text",
+            snapshot=snapshot,
+            element=target if isinstance(target, FovealUIElement) else None,
+            forbid_secure_field=isinstance(target, FovealUIElement),
+        )
+        if sec_pre is not None:
+            return sec_pre
+
         target_elem: Optional[FovealUIElement] = None
         if target:
-            cls.click_element(
-                target,
-                snapshot=snapshot,
-                allow_focus_steal=allow_focus_steal,
-                no_cursor=no_cursor,
-            )
             if snapshot and snapshot.interactive_elements:
                 t_str = str(target).strip().lower()
                 for el in snapshot.interactive_elements:
                     if el.id.lower() == t_str or t_str in f"{el.label} {el.role}".lower():
                         target_elem = el
                         break
+            sec_target = cls._check_actuation_security_gate(
+                "type_text",
+                snapshot=snapshot,
+                element=target_elem,
+                forbid_secure_field=True,
+            )
+            if sec_target is not None:
+                return sec_target
+            cls.click_element(
+                target,
+                snapshot=snapshot,
+                allow_focus_steal=allow_focus_steal,
+                no_cursor=no_cursor,
+            )
         elif snapshot:
             if snapshot.focused_element and snapshot.focused_element.role in ("AXTextField", "AXTextArea", "AXSearchField"):
                 target_elem = snapshot.focused_element
@@ -2556,6 +3021,15 @@ class FovealVisionEngine:
                     target_elem = snapshot.focused_element or next(
                         (el for el in snapshot.interactive_elements if el.role == "AXWebArea"), None
                     )
+
+        sec_resolved = cls._check_actuation_security_gate(
+            "type_text",
+            snapshot=snapshot,
+            element=target_elem,
+            forbid_secure_field=True,
+        )
+        if sec_resolved is not None:
+            return sec_resolved
 
         ax_val_set = False
         is_rich_text = target_elem and target_elem.role in ("AXTextArea", "AXWebArea")
@@ -2657,6 +3131,9 @@ class FovealVisionEngine:
     ) -> Dict[str, Any]:
         """Send Return/Enter keystroke (keycode 36) via CGEventPostToPid with fallback to Send/Submit AXButton."""
         target_pid = pid if pid is not None else (snapshot.pid if snapshot and snapshot.pid else None)
+        sec_err = cls._check_actuation_security_gate("submit", snapshot=snapshot, pid=target_pid)
+        if sec_err is not None:
+            return sec_err
         try:
             import Quartz
 
@@ -2964,6 +3441,25 @@ class FovealVisionEngine:
         target_pid = snapshot.pid if snapshot and snapshot.pid else pid
         target_app = snapshot.app_name if snapshot and snapshot.app_name else app_name
         target_win = window_title or (snapshot.window_title if snapshot and snapshot.window_title else None)
+
+        sec_act = cls._check_actuation_security_gate(
+            "actuate",
+            app_name=target_app,
+            window_title=target_win,
+            snapshot=snapshot,
+            forbid_secure_field=bool((type_text or paste_text) and not click),
+            pid=target_pid,
+        )
+        if sec_act is not None:
+            return {
+                "status": "error",
+                "security_blocked": True,
+                "actions": [sec_act],
+                "error": sec_act["error"],
+                "summary": sec_act["summary"],
+                "tactile_delta": {"verified": False, "security_blocked": True},
+                "post_snapshot": None,
+            }
         is_bg_tab = bool(
             window_title and cls._is_background_chromium_tab(snapshot=snapshot, app_name=target_app, window_title=window_title)
         )
@@ -3264,6 +3760,7 @@ class FovealVisionEngine:
         record_telemetry: bool = True,
         allow_focus_steal: bool = False,
         no_cursor: bool = False,
+        _skip_socket: bool = False,
     ) -> FovealWindowSnapshot:
         """
         Capture the structured accessibility DOM of target application/window in <15ms.
@@ -3286,6 +3783,7 @@ class FovealVisionEngine:
 
         # Handle mock/headless testing mode
         mock_app = os.environ.get("VOICEFI_MOCK_FRONT_APP")
+        mock_win_title = os.environ.get("VOICEFI_MOCK_WINDOW_TITLE", "")
         if mock_app:
             from whole_body_compute.integrations.ambient_discovery import AmbientPrivacyGuard
 
@@ -3304,9 +3802,23 @@ class FovealVisionEngine:
                     latency_ms=1.0,
                     headless_route="BLOCKED: Application is an auth vault or password manager.",
                 )
+            sens_mock, sens_reason = AmbientPrivacyGuard.is_sensitive_origin(window_title=mock_win_title)
+            if sens_mock:
+                return FovealWindowSnapshot(
+                    app_name=mock_app,
+                    bundle_id=f"com.{mock_app.lower()}",
+                    pid=9998,
+                    window_title="[BLOCKED_SENSITIVE_ORIGIN]",
+                    window_bbox=(0.0, 0.0, 0.0, 0.0),
+                    focused_element=None,
+                    interactive_elements=[],
+                    latency_ms=1.0,
+                    headless_route=f"BLOCKED: {sens_reason}",
+                )
 
         if os.environ.get("VOICEFI_MOCK_FOVEAL") == "1" or (
-            os.environ.get("VOICEFI_MOCK_AUDIO") == "1" and os.environ.get("VOICEFI_HEADLESS") == "1"
+            os.environ.get("VOICEFI_MOCK_AUDIO") == "1"
+            and (os.environ.get("WBC_HEADLESS") == "1" or os.environ.get("VOICEFI_HEADLESS") == "1")
         ):
             mock_foc = FovealUIElement(
                 role="AXTextArea",
@@ -3387,6 +3899,55 @@ class FovealVisionEngine:
             return snap
 
         try:
+            # Delegate to signed `WBC Eyes.app` over `foveal.sock` when available so Python/Terminal needs zero TCC grant
+            if not _skip_socket and not getattr(_FOVEAL_DAEMON_LOCAL, "in_daemon", False):
+                sock_payload: Dict[str, Any] = {
+                    "pid": pid,
+                    "app_name": app_name,
+                    "window_title_query": window_title_query,
+                    "max_elements": max_elements,
+                    "filter_query": filter_query,
+                    "click": click,
+                    "click_xy": click_xy,
+                    "hover": hover,
+                    "right_click": right_click,
+                    "attach": attach,
+                    "chain": chain,
+                    "include_floating": include_floating,
+                    "include_status_bar": include_status_bar,
+                    "type_text": type_text,
+                    "paste_text": paste_text,
+                    "scroll": scroll,
+                    "hotkey": hotkey,
+                    "menu": menu,
+                    "submit": submit,
+                    "wait_reply": wait_reply,
+                    "read_last": read_last,
+                }
+                if allow_focus_steal:
+                    sock_payload["allow_focus_steal"] = True
+                if no_cursor:
+                    sock_payload["no_cursor"] = True
+                sock_timeout = max(2.5, float(wait_reply) + 3.0) if wait_reply is not None else (8.0 if chain else 2.5)
+                sock_resp = send_foveal_socket_request(sock_payload, timeout_sec=sock_timeout)
+                if isinstance(sock_resp, dict):
+                    if sock_resp.get("kill_switch") or sock_resp.get("paused"):
+                        err_msg = str(sock_resp.get("error") or "WBC Eyes Kill Switch is active (Paused).")
+                        return FovealWindowSnapshot(
+                            app_name=app_name or "WBC Eyes",
+                            bundle_id="com.wholebodycompute.eyes",
+                            pid=pid or 0,
+                            window_title="[PAUSED_KILL_SWITCH]",
+                            latency_ms=round((time.perf_counter() - t0) * 1000.0, 3),
+                            headless_route=f"PAUSED: {err_msg}",
+                            actuation={"status": "error", "paused": True, "kill_switch": True, "error": err_msg},
+                        )
+                    if sock_resp.get("status") != "error":
+                        snap_from_sock = FovealWindowSnapshot.from_dict(sock_resp)
+                        if record_telemetry:
+                            _record_foveal_shield_telemetry(snap_from_sock)
+                        return snap_from_sock
+
             import ApplicationServices as AS
             from whole_body_compute.integrations.foveal_memory import resolve_direct_headless_route
             from whole_body_compute.integrations.ambient_discovery import AmbientPrivacyGuard
@@ -3403,9 +3964,9 @@ class FovealVisionEngine:
                     latency_ms=(time.perf_counter() - t0) * 1000.0,
                 )
 
-            # Blood-Brain Barrier: Block password managers / auth vaults
+            # Blood-Brain Barrier: Block password managers / auth vaults (both localized name & bundle_id)
             if (
-                AmbientPrivacyGuard.is_app_blocked(resolved_app_name)
+                AmbientPrivacyGuard.is_app_blocked(resolved_app_name, bundle_id=bundle_id)
                 or any(
                     b in resolved_app_name.lower()
                     for b in getattr(AmbientPrivacyGuard, "BLOCKED_PASSWORD_MANAGERS", set())
@@ -3467,6 +4028,20 @@ class FovealVisionEngine:
                 primary_win = target_wins[0]
                 window_title = str(cls._get_ax_attribute(primary_win, "AXTitle") or "").strip()
                 window_bbox = cls._extract_bbox(primary_win)
+
+            sens_live, sens_live_reason = AmbientPrivacyGuard.is_sensitive_origin(window_title=window_title)
+            if sens_live:
+                return FovealWindowSnapshot(
+                    app_name=resolved_app_name,
+                    bundle_id=bundle_id,
+                    pid=app_pid,
+                    window_title="[BLOCKED_SENSITIVE_ORIGIN]",
+                    window_bbox=(0.0, 0.0, 0.0, 0.0),
+                    focused_element=None,
+                    interactive_elements=[],
+                    latency_ms=round((time.perf_counter() - t0) * 1000.0, 3),
+                    headless_route=f"BLOCKED: {sens_live_reason}",
+                )
 
             headless_route = resolve_direct_headless_route(resolved_app_name, window_title)
 
@@ -3825,32 +4400,84 @@ def capture_foveal_snapshot(
     return snap
 
 
+def _is_safe_owner_unix_socket(sock_path: str) -> bool:
+    """Verify `sock_path` is an actual Unix domain socket (never a symlink or regular file) owned by current UID. # [direct-edit]"""
+    if not sock_path:
+        return False
+    try:
+        import stat as stat_mod
+
+        st = os.lstat(sock_path)
+        if stat_mod.S_ISLNK(st.st_mode) or not stat_mod.S_ISSOCK(st.st_mode):
+            return False
+        if hasattr(os, "getuid") and st.st_uid != os.getuid():
+            return False
+        return True
+    except OSError:
+        return False
+
+
+def _sanitize_foveal_daemon_params(req: Dict[str, Any], allowed_keys: Set[str]) -> Dict[str, Any]:
+    """Validate and bound parameters forwarded into `FovealVisionEngine.capture_snapshot` over `foveal.sock`."""
+    safe: Dict[str, Any] = {}
+    for k, v in req.items():
+        if k not in allowed_keys or v is None:
+            continue
+        if k == "pid":
+            if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+                safe["pid"] = v
+        elif k == "max_elements":
+            if isinstance(v, int) and not isinstance(v, bool):
+                safe["max_elements"] = max(1, min(500, v))
+        elif k in ("include_floating", "include_status_bar", "read_last", "submit", "allow_focus_steal", "no_cursor"):
+            safe[k] = bool(v)
+        elif k == "wait_reply":
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                safe["wait_reply"] = max(0.0, min(60.0, float(v)))
+        elif k == "chain":
+            if isinstance(v, (str, list)):
+                safe["chain"] = v
+        elif isinstance(v, str):
+            safe[k] = v[:4096]
+    return safe
+
+
 def send_foveal_socket_request(payload: Dict[str, Any], timeout_sec: float = 2.0) -> Optional[Dict[str, Any]]:
-    """Try forwarding request to ~/.whole_body_compute/foveal.sock for sub-5ms zero-coldstart execution."""
+    """Try forwarding authenticated request to ~/.whole_body_compute/foveal.sock (`WBC Eyes.app`)."""
     sock_path = _resolve_foveal_socket_path()
-    if not os.path.exists(sock_path):
+    if not sock_path:
+        return None
+    if not _is_safe_owner_unix_socket(sock_path):
         if (
             FOVEAL_SOCKET_PATH == _INITIAL_FOVEAL_SOCKET_PATH
             and "WBC_DATA_DIR" not in os.environ
             and "WBC_FOVEAL_SOCKET_PATH" not in os.environ
         ):
             legacy_sock = os.path.expanduser("~/.voicefi/foveal.sock")
-            if os.path.exists(legacy_sock):
+            if _is_safe_owner_unix_socket(legacy_sock):
                 sock_path = legacy_sock
             else:
                 return None
         else:
             return None
+
+    eff_timeout = timeout_sec
+    if isinstance(payload.get("wait_reply"), (int, float)):
+        eff_timeout = max(eff_timeout, float(payload["wait_reply"]) + 3.0)
+    elif payload.get("chain"):
+        eff_timeout = max(eff_timeout, 8.0)
+
     try:
+        signed_payload = _attach_foveal_socket_auth(payload, sock_path)
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(timeout_sec)
+        s.settimeout(eff_timeout)
         s.connect(sock_path)
-        data = json.dumps(payload).encode("utf-8")
+        data = json.dumps(signed_payload).encode("utf-8")
         s.sendall(data + b"\n")
         resp_bytes = b""
-        while True:
+        while len(resp_bytes) < 2 * 1024 * 1024:
             chunk = s.recv(4096)
-            if not chunk:
+            if not chunk or not isinstance(chunk, (bytes, bytearray)):
                 break
             resp_bytes += chunk
             if b"\n" in chunk:
@@ -3862,24 +4489,105 @@ def send_foveal_socket_request(payload: Dict[str, Any], timeout_sec: float = 2.0
         return None
 
 
+def _write_foveal_daemon_token(socket_path: str) -> Tuple[str, bytes]:
+    tok_path = _resolve_foveal_token_path(socket_path)
+    tok_dir = os.path.dirname(tok_path)
+    if tok_dir:
+        os.makedirs(tok_dir, mode=0o700, exist_ok=True)
+    secret = secrets.token_bytes(32)
+    tmp_path = f"{tok_path}.tmp.{os.getpid()}"
+    try:
+        os.remove(tmp_path)
+    except OSError:
+        pass
+    fd = os.open(tmp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, (secret.hex() + "\n").encode("ascii"))
+    finally:
+        os.close(fd)
+    os.replace(tmp_path, tok_path)
+    os.chmod(tok_path, 0o600)
+    return tok_path, secret
+
+
+def _verify_python_daemon_hmac(
+    req: Dict[str, Any],
+    secret: bytes,
+    seen_nonces: Dict[str, float],
+) -> None:
+    auth = req.get("_auth")
+    if not isinstance(auth, dict):
+        raise ValueError("Caller authentication failed: missing '_auth' HMAC token envelope.")
+    claimed_pid = auth.get("pid")
+    ts_raw = auth.get("ts")
+    nonce = auth.get("nonce")
+    claimed_bind = auth.get("op_bind")
+    mac_hex = auth.get("hmac")
+    if not isinstance(claimed_pid, int) or claimed_pid <= 0:
+        raise ValueError("Caller authentication failed: invalid '_auth.pid'.")
+    try:
+        ts_val = float(str(ts_raw))
+    except Exception as exc:
+        raise ValueError("Caller authentication failed: malformed '_auth.ts'.") from exc
+    now = time.time()
+    if abs(now - ts_val) > 30.0:
+        raise ValueError("Caller authentication failed: expired '_auth.ts'.")
+    if not isinstance(nonce, str) or len(nonce) < 16:
+        raise ValueError("Caller authentication failed: invalid '_auth.nonce'.")
+    expected_bind = _compute_foveal_op_bind(req)
+    if claimed_bind != expected_bind:
+        raise ValueError("Caller authentication failed: op_bind mismatch.")
+    if not isinstance(mac_hex, str) or len(mac_hex) != 64:
+        raise ValueError("Caller authentication failed: invalid HMAC format.")
+    msg = f"wbc-foveal-v1:{claimed_pid}:{ts_raw}:{nonce}:{expected_bind}".encode("utf-8")
+    expected_mac = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(mac_hex.lower(), expected_mac.lower()):
+        raise ValueError("Caller authentication failed: invalid HMAC-SHA256 signature.")
+    cutoff = now - 65.0
+    if len(seen_nonces) >= 4096:
+        for k, v in list(seen_nonces.items()):
+            if v < cutoff:
+                seen_nonces.pop(k, None)
+    if nonce in seen_nonces and seen_nonces[nonce] >= cutoff:
+        raise ValueError("Caller authentication failed: replayed '_auth.nonce' rejected.")
+    seen_nonces[nonce] = now
+
+
 def run_foveal_daemon(
     socket_path: Optional[str] = None,
     enable_ambient_discovery: Optional[bool] = None,
 ) -> None:
     """
     Run persistent Unix socket daemon for zero-coldstart foveal vision (<5ms)
-    plus default-on passive `AmbientWorkflowObserver` workflow discovery.
+    plus default-on passive `AmbientWorkflowObserver` workflow discovery. # [direct-edit]
     """
+    import stat as stat_mod
+
     socket_path = (
         socket_path
         if (socket_path and socket_path != _INITIAL_FOVEAL_SOCKET_PATH)
-        else _resolve_foveal_socket_path()
+        else (os.environ.get("WBC_FOVEAL_SOCKET_PATH", "").strip() or str(get_wbc_data_dir() / "foveal.sock"))
     )
-    os.makedirs(os.path.dirname(socket_path), exist_ok=True)
-    if os.path.exists(socket_path):
+    sock_parent = os.path.dirname(socket_path)
+    if sock_parent:
+        # Allow macOS system symlinks (/tmp -> /private/tmp, /var -> /private/var) while rejecting user dir symlinks
+        if os.path.islink(sock_parent) and sock_parent not in ("/tmp", "/var"):
+            raise RuntimeError(f"Refusing to bind foveal.sock inside symlinked parent directory: {sock_parent}")
+        real_parent = os.path.realpath(sock_parent)
+        os.makedirs(real_parent, mode=0o700, exist_ok=True)
+        if real_parent not in ("/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp"):
+            try:
+                os.chmod(real_parent, 0o700)
+            except OSError:
+                pass
+    if os.path.lexists(socket_path):
+        st_existing = os.lstat(socket_path)
+        if not (stat_mod.S_ISSOCK(st_existing.st_mode) or stat_mod.S_ISLNK(st_existing.st_mode)):
+            raise RuntimeError(f"Refusing to overwrite non-socket file at {socket_path}")
         try:
-            os.remove(socket_path)
-        except Exception:
+            os.unlink(socket_path)
+        except OSError:
             pass
 
     ambient_controller = None
@@ -3903,13 +4611,9 @@ def run_foveal_daemon(
     except Exception as exc:
         logger.debug("AmbientWorkflowObserver startup notice: %s", exc)
 
-    sock_parent = os.path.dirname(socket_path)
-    if sock_parent:
-        os.makedirs(sock_parent, mode=0o700, exist_ok=True)
-        try:
-            os.chmod(sock_parent, 0o700)
-        except OSError:
-            pass
+    token_path, token_secret = _write_foveal_daemon_token(socket_path)
+    seen_nonces: Dict[str, float] = {}
+
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     old_umask = os.umask(0o177)
     try:
@@ -3920,17 +4624,33 @@ def run_foveal_daemon(
     logger.info("Foveal vision daemon listening on %s", socket_path)
     print(f"📡 Foveal Vision Daemon listening on {socket_path} (sub-5ms hot reflexes)")
 
-    _ALLOWED_READONLY_KEYS = {
+    _ALLOWED_DAEMON_KEYS = {
         "pid",
         "app_name",
         "window_title_query",
         "max_elements",
         "filter_query",
+        "click",
+        "click_xy",
+        "hover",
+        "right_click",
+        "attach",
+        "chain",
         "include_floating",
         "include_status_bar",
+        "type_text",
+        "paste_text",
+        "scroll",
+        "hotkey",
+        "menu",
+        "submit",
+        "wait_reply",
         "read_last",
+        "allow_focus_steal",
+        "no_cursor",
     }
 
+    _FOVEAL_DAEMON_LOCAL.in_daemon = True
     try:
         while True:
             conn, _ = server.accept()
@@ -3962,9 +4682,20 @@ def run_foveal_daemon(
                             if ambient_controller
                             else 0,
                         }
+                    elif req.get("op") in ("status", "eyes_helper_status", "ping"):
+                        _verify_python_daemon_hmac(req, token_secret, seen_nonces)
+                        resp = {
+                            "status": "ok",
+                            "pong": True,
+                            "provider": "python_foveal_daemon",
+                            "pid": os.getpid(),
+                            "paused": False,
+                            "kill_switch": False,
+                        }
                     else:
-                        safe_req = {k: v for k, v in req.items() if k in _ALLOWED_READONLY_KEYS}
-                        snap = FovealVisionEngine.capture_snapshot(**safe_req)
+                        _verify_python_daemon_hmac(req, token_secret, seen_nonces)
+                        safe_req = _sanitize_foveal_daemon_params(req, _ALLOWED_DAEMON_KEYS)
+                        snap = FovealVisionEngine.capture_snapshot(_skip_socket=True, **safe_req)
                         resp = snap.to_dict()
                     conn.sendall(json.dumps(resp).encode("utf-8") + b"\n")
             except Exception as exc:
@@ -3973,17 +4704,19 @@ def run_foveal_daemon(
             finally:
                 conn.close()
     finally:
+        _FOVEAL_DAEMON_LOCAL.in_daemon = False
         if ambient_controller is not None:
             try:
                 ambient_controller.stop_background_discovery()
             except Exception:
                 pass
         server.close()
-        if os.path.exists(socket_path):
-            try:
-                os.remove(socket_path)
-            except Exception:
-                pass
+        for cleanup_p in (socket_path, token_path):
+            if os.path.exists(cleanup_p):
+                try:
+                    os.remove(cleanup_p)
+                except Exception:
+                    pass
 
 
 def build_foveal_screen_context(

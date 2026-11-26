@@ -93,7 +93,10 @@ def play_chime(sound_key_or_path: str, block: bool = False) -> None:
 
     def _run():
         if not block and (
-            os.getenv("VOICEFI_TESTING") == "1" or os.getenv("VOICEFI_HEADLESS") == "1"
+            os.getenv("WBC_TESTING") == "1"
+            or os.getenv("WBC_HEADLESS") == "1"
+            or os.getenv("VOICEFI_TESTING") == "1"
+            or os.getenv("VOICEFI_HEADLESS") == "1"
         ):
             return
         try:

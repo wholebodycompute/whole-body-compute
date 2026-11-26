@@ -110,7 +110,7 @@ class PalTeachRecorder:
         self._loop = None
         self._loop_source = None
         self._thread: Optional[threading.Thread] = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         # Denoising & State Machine
         self._current_app = ""
@@ -208,6 +208,38 @@ class PalTeachRecorder:
                 pass
         return list(self.steps)
 
+    def _is_privacy_blocked_surface(self) -> bool:
+        """Return True if active app or window is a blocked password vault or sensitive web origin. # [direct-edit]"""
+        from whole_body_compute.integrations.ambient_discovery import AmbientPrivacyGuard
+
+        if AmbientPrivacyGuard.is_app_blocked(self._current_app or ""):
+            return True
+        sens_orig, _ = AmbientPrivacyGuard.is_sensitive_origin(window_title=self._current_window or "")
+        return sens_orig
+
+    @staticmethod
+    def _scrub_xhr_payload(obj: Any) -> Any:
+        """Recursively redact secrets and credential fields inside captured XHR URLs/bodies."""
+        from whole_body_compute.integrations.ambient_discovery import AmbientPrivacyGuard
+        from whole_body_compute.redaction import _NON_CREDENTIAL_KEY_RE, _SECRET_KEYWORD, redact_secrets
+
+        kw_re = re.compile(rf"(?i){_SECRET_KEYWORD}")
+        if isinstance(obj, str):
+            san, _ = AmbientPrivacyGuard.sanitize_text(redact_secrets(obj))
+            return san
+        if isinstance(obj, list):
+            return [PalTeachRecorder._scrub_xhr_payload(i) for i in obj]
+        if isinstance(obj, dict):
+            out: Dict[str, Any] = {}
+            for k, v in obj.items():
+                k_str = str(k)
+                if isinstance(v, str) and kw_re.search(k_str) and not _NON_CREDENTIAL_KEY_RE.match(k_str):
+                    out[k] = "[REDACTED_SECRET]"
+                else:
+                    out[k] = PalTeachRecorder._scrub_xhr_payload(v)
+            return out
+        return obj
+
     def attach_voice_note(self, note: str) -> None:
         """Attach active speech note from Whisper stream to next or most recent step and sync to episodic audio store."""
         clean_note = (note or "").strip()
@@ -226,6 +258,9 @@ class PalTeachRecorder:
                 self.voice_notes.append("[AUTH_RESUME_INVOKED]")
             return
 
+        from whole_body_compute.redaction import redact_secrets
+
+        clean_note = redact_secrets(clean_note)
         try:
             from whole_body_compute.integrations.foveal_memory import record_audio_transcription
 
@@ -254,17 +289,19 @@ class PalTeachRecorder:
         most recent UI step if it occurred within `max_delta_s` (default 500ms, Patent Claim 11).
         """
         with self._lock:
-            if self._auth_paused or not self.steps:
+            if self._auth_paused or self._is_privacy_blocked_surface() or not self.steps:
                 return False
             last_step = self.steps[-1]
             delta = abs(time.time() - float(getattr(last_step, "timestamp", 0.0) or 0.0))
             if delta > max_delta_s:
                 return False
             if isinstance(last_step.params, dict):
+                safe_url = str(self._scrub_xhr_payload(str(url or "").strip()))
+                safe_body = self._scrub_xhr_payload(body if body is not None else {})
                 last_step.params["captured_xhr"] = {
                     "method": str(method or "POST").upper(),
-                    "url": str(url or "").strip(),
-                    "body": body if body is not None else {},
+                    "url": safe_url,
+                    "body": safe_body,
                     "delta_ms": round(delta * 1000.0, 1),
                 }
                 return True
@@ -277,7 +314,7 @@ class PalTeachRecorder:
         """
         from whole_body_compute.integrations.pal_harness import PalHarness
 
-        if self._auth_paused or PalHarness._is_test_env():
+        if self._auth_paused or self._is_privacy_blocked_surface() or PalHarness._is_test_env():
             return []
         if app_name not in ("Google Chrome", "Brave Browser", "Arc", "Safari"):
             return []
@@ -299,15 +336,20 @@ class PalTeachRecorder:
 
                 parsed = json.loads(out.strip())
                 if isinstance(parsed, list):
-                    return [e for e in parsed if isinstance(e, dict) and e.get("url")]
+                    return [
+                        {**e, "url": str(self._scrub_xhr_payload(str(e.get("url") or "")))}
+                        for e in parsed
+                        if isinstance(e, dict) and e.get("url")
+                    ]
         except Exception:
             pass
         return []
 
     def _emit_step(self, action: str, params: Dict[str, Any], spoken: str) -> None:
-        if self._auth_paused:
+        if self._auth_paused or self._is_privacy_blocked_surface():
             return
         from whole_body_compute.integrations.pal_harness import PalHarness
+        from whole_body_compute.redaction import redact_secrets
 
         enriched_params = dict(params or {})
         is_secure = self._is_focused_secure_field()
@@ -316,6 +358,7 @@ class PalTeachRecorder:
                 del enriched_params["screenpipe_ocr"]
             if "text" in enriched_params:
                 enriched_params["text"] = "[REDACTED_SECURE_FIELD]"
+            spoken = redact_secrets(spoken)
         else:
             if (
                 action in ("click", "double_click", "press_key", "hotkey")
@@ -338,7 +381,7 @@ class PalTeachRecorder:
                         capture_live_if_empty=(action in ("select_text", "switch_app")),
                     )
                     if recs and recs[0].text:
-                        enriched_params["screenpipe_ocr"] = recs[0].text[:1500]
+                        enriched_params["screenpipe_ocr"] = redact_secrets(recs[0].text)[:1500]
                 except Exception:
                     pass
 
@@ -435,25 +478,32 @@ class PalTeachRecorder:
             self._flush_text_buffer()
             self._current_app = app_name
             self._current_window = window_title
-            self._emit_step(
-                action="switch_app",
-                params={"app_name": app_name, "bundle_id": bundle_id},
-                spoken=f"Switched to {app_name}",
-            )
+            if not self._is_privacy_blocked_surface():
+                self._emit_step(
+                    action="switch_app",
+                    params={"app_name": app_name, "bundle_id": bundle_id},
+                    spoken=f"Switched to {app_name}",
+                )
         else:
             self._current_window = window_title
 
     def _flush_text_buffer(self) -> None:
-        if not self._pending_text:
-            return
-        text = "".join(self._pending_text)
-        self._pending_text.clear()
-        if text.strip() or "\n" in text:
-            self._emit_step(
-                action="type_text",
-                params={"text": text},
-                spoken=f"Typed '{text.strip()}'",
-            )
+        with self._lock:
+            if not self._pending_text:
+                return
+            text = "".join(self._pending_text)
+            self._pending_text.clear()
+            if self._auth_paused or self._is_privacy_blocked_surface():
+                return
+            if text.strip() or "\n" in text:
+                from whole_body_compute.integrations.ambient_discovery import AmbientPrivacyGuard
+
+                clean_text, _ = AmbientPrivacyGuard.sanitize_text(text)
+                self._emit_step(
+                    action="type_text",
+                    params={"text": clean_text},
+                    spoken=f"Typed '{clean_text.strip()}'",
+                )
 
     def _schedule_flush(self) -> None:
         if self._flush_timer:
@@ -530,9 +580,14 @@ class PalTeachRecorder:
             if err == 0 and focused:
                 _, role = AXUIElementCopyAttributeValue(focused, "AXRole", None)
                 _, subrole = AXUIElementCopyAttributeValue(focused, "AXSubrole", None)
+                _, title = AXUIElementCopyAttributeValue(focused, "AXTitle", None)
+                _, desc = AXUIElementCopyAttributeValue(focused, "AXDescription", None)
                 r = str(role or "").lower()
                 sr = str(subrole or "").lower()
+                meta = f"{title or ''} {desc or ''}".lower()
                 if "secure" in r or "secure" in sr or "password" in r or "password" in sr:
+                    return True
+                if r in ("axtextfield", "axtextarea") and "password" in meta:
                     return True
         except Exception:
             pass
@@ -545,6 +600,9 @@ class PalTeachRecorder:
                 return event
 
             self._refresh_active_context()
+            if self._is_privacy_blocked_surface():
+                self._pending_text.clear()
+                return event
 
             # 1. Keyboard Events
             if event_type == Quartz.kCGEventKeyDown:
@@ -588,11 +646,15 @@ class PalTeachRecorder:
                     if combo in ("Cmd+C", "Cmd+V"):
                         try:
                             from AppKit import NSPasteboard, NSPasteboardTypeString
+                            from whole_body_compute.integrations.ambient_discovery import AmbientPrivacyGuard
 
                             pb = NSPasteboard.generalPasteboard()
-                            clip_str = pb.stringForType_(NSPasteboardTypeString)
-                            if clip_str:
-                                hotkey_params["clipboard_text"] = str(clip_str)[:500]
+                            if not AmbientPrivacyGuard.is_pasteboard_concealed(pb):
+                                clip_str = pb.stringForType_(NSPasteboardTypeString)
+                                if clip_str:
+                                    # Sanitize BEFORE slicing so tokens straddling char 500 are never partially leaked
+                                    sanitized_clip, _ = AmbientPrivacyGuard.sanitize_text(str(clip_str))
+                                    hotkey_params["clipboard_text"] = sanitized_clip[:500]
                         except Exception:
                             pass
                     self._emit_step(
@@ -686,21 +748,24 @@ class PalTeachRecorder:
                             spoken=f"{action_type.replace('_', ' ').capitalize()}ed {label}",
                         )
                     else:
-                        selected_text = self._inspect_focused_selection()
+                        selected_text = None if self._is_focused_secure_field() else self._inspect_focused_selection()
                         if selected_text:
+                            from whole_body_compute.integrations.ambient_discovery import AmbientPrivacyGuard
+
+                            safe_sel, _ = AmbientPrivacyGuard.sanitize_text(selected_text)
                             self._emit_step(
                                 action="select_text",
                                 params={
-                                    "selected_text": selected_text,
+                                    "selected_text": safe_sel,
                                     "start_x": round(self._mouse_down_pos[0]),
                                     "start_y": round(self._mouse_down_pos[1]),
                                     "end_x": round(loc.x),
                                     "end_y": round(loc.y),
                                 },
                                 spoken=(
-                                    f"Selected '{selected_text[:30]}...'"
-                                    if len(selected_text) > 30
-                                    else f"Selected '{selected_text}'"
+                                    f"Selected '{safe_sel[:30]}...'"
+                                    if len(safe_sel) > 30
+                                    else f"Selected '{safe_sel}'"
                                 ),
                             )
                         else:
@@ -818,6 +883,10 @@ class PalTrainer:
             }
             tmp_path = journal_path.with_suffix(".tmp")
             tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            try:
+                os.chmod(tmp_path, 0o600)
+            except OSError:
+                pass
             tmp_path.replace(journal_path)
         except Exception:
             pass
@@ -1400,7 +1469,10 @@ class PalTrainer:
             capture_live_if_empty=False,
         )
 
-        notes = [r.text.strip() for r in reversed(audio_records) if r.text and r.text.strip()]
+        from whole_body_compute.integrations.ambient_discovery import AmbientPrivacyGuard
+        from whole_body_compute.redaction import redact_secrets
+
+        notes = [redact_secrets(r.text.strip()) for r in reversed(audio_records) if r.text and r.text.strip()]
         trainer.recorder.voice_notes = notes
 
         steps: List[PalTeachRawStep] = []
@@ -1408,7 +1480,10 @@ class PalTrainer:
             for idx, rec in enumerate(reversed(ocr_records), start=1):
                 app = rec.app_name or "Terminal"
                 win = rec.window_name or app
-                first_line = next((ln.strip() for ln in rec.text.splitlines() if ln.strip()), win)
+                if AmbientPrivacyGuard.is_app_blocked(app) or AmbientPrivacyGuard.is_sensitive_origin(window_title=win)[0]:
+                    continue
+                safe_ocr = redact_secrets(rec.text or "")
+                first_line = next((ln.strip() for ln in safe_ocr.splitlines() if ln.strip()), win)
                 if "companion" in app.lower():
                     action_name = "companion_interaction"
                     spoken_desc = f"Companion: {first_line[:50]}"
@@ -1417,14 +1492,14 @@ class PalTrainer:
                     spoken_desc = f"Inspect {app} ({first_line[:50]})"
                 steps.append(
                     PalTeachRawStep(
-                        step_number=idx,
+                        step_number=len(steps) + 1,
                         action=action_name,
                         app_name=app,
                         window_title=win,
                         params={
                             "app_name": app,
                             "window_title": win,
-                            "screenpipe_ocr": rec.text[:600],
+                            "screenpipe_ocr": safe_ocr[:600],
                         },
                         spoken_summary=spoken_desc,
                         voice_note=notes[idx - 1] if idx - 1 < len(notes) else None,

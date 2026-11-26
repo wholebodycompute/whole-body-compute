@@ -160,6 +160,8 @@ def get_default_audio_devices() -> Tuple[Optional[Dict[str, Any]], Optional[Dict
     """
     is_mock_or_test = (
         os.getenv("VOICEFI_MOCK_AUDIO") == "1"
+        or os.getenv("WBC_HEADLESS") == "1"
+        or os.getenv("WBC_TESTING") == "1"
         or os.getenv("VOICEFI_HEADLESS") == "1"
         or os.getenv("VOICEFI_TESTING") == "1"
         or bool(os.getenv("PYTEST_CURRENT_TEST"))
@@ -403,6 +405,8 @@ def get_current_input_device_name() -> str:
     """Get the currently selected default audio input device name."""
     is_mock_or_test = (
         os.getenv("VOICEFI_MOCK_AUDIO") == "1"
+        or os.getenv("WBC_HEADLESS") == "1"
+        or os.getenv("WBC_TESTING") == "1"
         or os.getenv("VOICEFI_HEADLESS") == "1"
         or os.getenv("VOICEFI_TESTING") == "1"
         or bool(os.getenv("PYTEST_CURRENT_TEST"))
@@ -562,7 +566,11 @@ class AudioRouteWatcher:
         self.last_input_name: str = ""
 
     def start(self) -> None:
-        if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("VOICEFI_TESTING") == "1":
+        if (
+            os.getenv("PYTEST_CURRENT_TEST")
+            or os.getenv("WBC_TESTING") == "1"
+            or os.getenv("VOICEFI_TESTING") == "1"
+        ):
             return
         if self._thread is not None and self._thread.is_alive():
             return
@@ -865,6 +873,8 @@ def get_external_mic_recording_info(
 
     if (
         os.getenv("VOICEFI_MOCK_AUDIO") == "1"
+        or os.getenv("WBC_HEADLESS") == "1"
+        or os.getenv("WBC_TESTING") == "1"
         or os.getenv("VOICEFI_HEADLESS") == "1"
         or os.getenv("VOICEFI_TESTING") == "1"
         or os.getenv("PYTEST_CURRENT_TEST")

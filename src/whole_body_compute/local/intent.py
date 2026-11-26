@@ -519,18 +519,25 @@ class LocalIntentRouter:
                 "git branch",
                 "git status",
                 "git checkpoint",
+                "body checkpoint",
                 "save checkpoint",
                 "create checkpoint",
                 "checkpoint",
                 "git commit",
+                "body commit",
+                "commit this",
+                "commit all",
+                "wip commit",
                 "commit change",
                 "commit changes",
+                "body flush",
+                "flush context",
                 "stop speech",
                 "stop talking",
                 "mute audio",
                 "pause audio",
             )
-        ):
+        ) or low in ("commit", "wip", "flush", "handoff"):
             return {"target": "local_command", "action": prompt}
 
         # 7. Obsidian Notes
@@ -628,19 +635,46 @@ class LocalIntentRouter:
                 from whole_body_compute.local.git_fastpath import run_checkpoint
 
                 res = run_checkpoint()
+                if res.get("status") == "ok":
+                    short_ref = str(res.get("ref") or "").replace("refs/checkpoints/", "")
+                    return res.get("receipt") or f"Saved checkpoint {short_ref}."
                 return res.get("receipt") or res.get("error") or "Checkpoint saved."
             except Exception as e:
                 return f"Unable to save checkpoint: {e}"
 
-        # Git commit reflex
-        if "git commit" in low or ("commit" in low and "change" in low):
+        # Git / Body commit reflex
+        if (
+            "git commit" in low
+            or "body commit" in low
+            or "wip commit" in low
+            or low in ("commit", "commit this", "commit all", "wip")
+            or ("commit" in low and "change" in low)
+        ):
             try:
                 from whole_body_compute.local.git_fastpath import run_fast_commit
 
-                res = run_fast_commit(no_llm=True)
+                is_wip = "wip" in low
+                res = run_fast_commit(wip=is_wip, no_llm=True)
+                if res.get("status") == "ok":
+                    files_cnt = len(res.get("files") or [])
+                    msg_head = str(res.get("message") or "changes").splitlines()[0]
+                    return res.get("receipt") or f"Committed {files_cnt} file{'s' if files_cnt != 1 else ''}: {msg_head}."
+                if res.get("status") == "clean":
+                    return "Working tree is clean. Nothing to commit."
                 return res.get("receipt") or res.get("error") or "Unable to commit changes."
             except Exception as e:
                 return f"Unable to commit changes: {e}"
+
+        # Glymphatic Context Flush reflex
+        if "body flush" in low or "flush context" in low or low in ("flush", "handoff"):
+            try:
+                from whole_body_compute.organs.cognitive_sentry import UltradianGlymphaticFlush
+
+                flush_res = UltradianGlymphaticFlush.run_flush(auto_bridge=True)
+                cap_id = flush_res.get("capsule_id", "capsule")
+                return f"Flushed context into State Capsule {cap_id} and copied resumption prompt."
+            except Exception as e:
+                return f"Unable to flush context: {e}"
 
         # Time or Date
         if any(w in low for w in ("time", "date", "day", "clock")):

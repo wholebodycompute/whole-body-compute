@@ -242,25 +242,29 @@ _SENSITIVE_READ_BASENAMES = frozenset({
     "id_dsa",
     "authorized_keys",
 })
-_SENSITIVE_READ_EXTENSIONS = frozenset({".pem", ".key", ".p12", ".pfx"})
+_SENSITIVE_READ_EXTENSIONS = frozenset({".pem", ".key", ".p12", ".pfx", ".keychain", ".keychain-db"})
 
 
 def _is_sensitive_credential_path(raw_path: str, *, resolved_path: Optional[str] = None) -> Optional[str]:
     """
-    Detect sensitive credential/secret files on BOTH raw and `os.path.realpath()` resolved paths
-    so symlinks (e.g. `notes.txt -> .env` or `~/.ssh/id_ed25519`) never bypass the Secret Blindfold.
+    Detect sensitive credential/secret files on raw, `expanduser()`, and `realpath()` resolved paths
+    so symlinks (`~/notes_ref.txt -> ~/.env`) and Keychain/cloud vault files never bypass Secret Blindfold.
+    # [direct-edit]
     """
     if not raw_path:
         return None
+    expanded_raw = os.path.expanduser(raw_path)
     candidates = [raw_path]
+    if expanded_raw and expanded_raw not in candidates:
+        candidates.append(expanded_raw)
     if resolved_path is not None:
-        if resolved_path and resolved_path != raw_path:
+        if resolved_path and resolved_path not in candidates:
             candidates.append(resolved_path)
-    else:
+    if expanded_raw != raw_path or resolved_path is None:
         try:
-            resolved = os.path.realpath(raw_path)
-            if resolved and resolved != raw_path:
-                candidates.append(resolved)
+            resolved_exp = os.path.realpath(expanded_raw)
+            if resolved_exp and resolved_exp not in candidates:
+                candidates.append(resolved_exp)
         except OSError:
             pass
 
@@ -276,12 +280,16 @@ def _is_sensitive_credential_path(raw_path: str, *, resolved_path: Optional[str]
             return base
         if (
             "/.ssh/" in low
-            or "/.aws/credentials" in low
-            or "/.aws/config" in low
+            or low.startswith(".ssh/")
+            or "/.aws/" in low
+            or low.startswith(".aws/")
             or "/.kube/config" in low
             or "/.gnupg/" in low
-            or "/.config/gh/hosts.yml" in low
-            or low in ("/etc/shadow", "/etc/master.passwd")
+            or low.startswith(".gnupg/")
+            or "/.config/gh/" in low
+            or "/.docker/config.json" in low
+            or "/library/keychains/" in low
+            or low in ("/etc/shadow", "/etc/master.passwd", "/private/etc/master.passwd")
         ):
             return norm
     return None
@@ -614,27 +622,28 @@ _MAX_REALPATH_DIR_CACHE = 128
 
 def _fast_resolve_path_and_lstat(raw_path: str) -> Tuple[str, Optional[os.stat_result]]:
     """
-    Resolve `raw_path` with 100% symlink & parent-symlink fidelity while collapsing
-    repeated `realpath()` directory traversals on regular files inside unchanged directories.
+    Resolve `raw_path` (including leading `~`) with 100% symlink & parent-symlink fidelity while collapsing
+    repeated `realpath()` directory traversals on regular files inside unchanged directories. # [direct-edit]
     """
+    expanded_path = os.path.expanduser(raw_path) if raw_path else raw_path
     try:
-        lst = os.lstat(raw_path)
+        lst = os.lstat(expanded_path)
     except OSError:
         try:
-            return os.path.realpath(raw_path), None
+            return os.path.realpath(expanded_path), None
         except OSError:
-            return raw_path, None
+            return expanded_path, None
     if stat.S_ISLNK(lst.st_mode):
         try:
-            resolved = os.path.realpath(raw_path)
+            resolved = os.path.realpath(expanded_path)
             try:
                 st_target = os.stat(resolved)
             except OSError:
                 st_target = None
             return resolved, st_target
         except OSError:
-            return raw_path, None
-    parent_dir, base_name = os.path.split(raw_path)
+            return expanded_path, None
+    parent_dir, base_name = os.path.split(expanded_path)
     if parent_dir:
         try:
             p_lst = os.lstat(parent_dir)
@@ -652,9 +661,9 @@ def _fast_resolve_path_and_lstat(raw_path: str) -> Tuple[str, Optional[os.stat_r
         except OSError:
             pass
     try:
-        return os.path.realpath(raw_path), lst
+        return os.path.realpath(expanded_path), lst
     except OSError:
-        return raw_path, lst
+        return expanded_path, lst
 
 
 def _load_streak_state_dict(streak_file: Path) -> Dict[str, Any]:
@@ -2094,7 +2103,7 @@ def run_ide_pre_tool_hook(
         soft_step_warning = (
             f"[⚠️ Blood-Brain Barrier Context Saturation Warning: Step {step_idx} >= 45 in main thread. "
             "Quadratic context re-ingestion tax is compounding. Delegate remaining exploratory work to "
-            "`invoke_subagent(Model=\"flash\")` or run `body flush --auto` to purge context.]"
+            "`invoke_subagent(Model=\"flash\")` or run `body flush --auto --goal \"...\" --milestone \"...\" --next-step \"...\"` to purge context.]"
         )
         ephemeral_message = (
             f"{ephemeral_message}\n{soft_step_warning}" if ephemeral_message else soft_step_warning
@@ -2159,15 +2168,17 @@ def run_ide_pre_tool_hook(
             or truncation_offenders.get("NotebookRead")
             or truncation_offenders.get(tool_name)
         )
-        raw_path = str(
-            args.get("Path")
-            or args.get("AbsolutePath")
-            or args.get("file_path")
-            or args.get("target_file")
-            or args.get("notebook_path")
-            or args.get("path")
-            or ""
-        ).strip()
+        _read_key_order = (
+            ("file_path", "notebook_path", "Path", "AbsolutePath", "target_file", "path")
+            if tool_name in ("Read", "NotebookRead")
+            else ("Path", "AbsolutePath", "file_path", "target_file", "notebook_path", "path")
+        )
+        _all_read_candidates = [
+            str(args.get(_rk)).strip()
+            for _rk in _read_key_order
+            if isinstance(args.get(_rk), str) and str(args.get(_rk)).strip()
+        ]
+        raw_path = _all_read_candidates[0] if _all_read_candidates else ""
         target_path_str = raw_path
         start_line = (
             args.get("StartLine")
@@ -2229,9 +2240,17 @@ def run_ide_pre_tool_hook(
             span_lines = 999999
             max_allowed_span = 80 if is_read_trunc_offender else (180 if is_strict_test else harness_span_ceiling)
 
-        if raw_path and os.environ.get("VOICEFI_CONTEXT_GATE_DISABLED") != "1":
-            resolved_read_path, _read_target_stat = _fast_resolve_path_and_lstat(raw_path)
-            sensitive_hit = _is_sensitive_credential_path(raw_path, resolved_path=resolved_read_path)
+        if _all_read_candidates and os.environ.get("VOICEFI_CONTEXT_GATE_DISABLED") != "1":
+            # [direct-edit] Inspect EVERY path key in args to prevent decoy Path + sensitive file_path smuggling
+            sensitive_hit = None
+            for _cand_rp in _all_read_candidates:
+                _cand_res, _cand_st = _fast_resolve_path_and_lstat(_cand_rp)
+                if _cand_rp == raw_path:
+                    resolved_read_path, _read_target_stat = _cand_res, _cand_st
+                _hit = _is_sensitive_credential_path(_cand_rp, resolved_path=_cand_res)
+                if _hit:
+                    sensitive_hit = _hit
+                    break
             if sensitive_hit:
                 decision = "deny"
                 stage_triggered = 1
@@ -2714,6 +2733,30 @@ def run_ide_pre_tool_hook(
                                             f"```{fence_lang}\n{header_imports}\n```\n"
                                             f"Instant AST / Section Map for `{fpath.name}`:\n{outline}"
                                         )
+                                    elif sensory_vector.homeostatic_regime == "GREEN_ELASTIC" and not read_reflex_escalated:
+                                        # Reduce 28% auto-slice re-read churn in GREEN_ELASTIC:
+                                        # 1) Repeat unbounded read on a file already sliced in this session -> escalate to native line_ceil.
+                                        # 2) Early exploratory turn (stepIdx <= 8) with a live user prompt that matched no exact symbol -> widen to 400 lines.
+                                        _live_cs = _loaded_streak_state.get(conv_id or "local", {}) if isinstance(_loaded_streak_state, dict) else {}
+                                        _rmap = (_live_cs.get("reads") or {}) if isinstance(_live_cs, dict) else {}
+                                        prior_reads_cnt = max(
+                                            int(_rmap.get(target_path_str, 0)),
+                                            int(_rmap.get(str(fpath), 0)),
+                                            int(_rmap.get(raw_path, 0)),
+                                        )
+                                        live_user_prompt = str(
+                                            payload.get("lastUserInput")
+                                            or payload.get("prompt")
+                                            or payload.get("user_prompt")
+                                            or payload.get("composer_prompt")
+                                            or ""
+                                        ).strip()
+                                        if prior_reads_cnt >= 1:
+                                            clamp_win = max(clamp_win, line_ceil)
+                                            e_line = min(total_lines, s_line + clamp_win - 1)
+                                        elif step_idx <= 8 and live_user_prompt:
+                                            clamp_win = max(clamp_win, min(line_ceil, 400))
+                                            e_line = min(total_lines, s_line + clamp_win - 1)
 
                                 if tool_name == "developer__text_editor" or "view_range" in args:
                                     overwrite_args["view_range"] = [s_line, e_line]
@@ -2917,17 +2960,49 @@ def run_ide_pre_tool_hook(
 
     # 1. File Mutation Pre-Analysis (`edit_file`, `write_file`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`)
     elif tool_name in WRITE_EDIT_TOOL_NAMES:
-        raw_path = str(
-            args.get("Path")
-            or args.get("file_path")
-            or args.get("notebook_path")
-            or args.get("path")
-            or ""
-        ).strip()
+        _write_key_order = (
+            ("file_path", "notebook_path", "Path", "path")
+            if tool_name in ("Write", "Edit", "MultiEdit", "NotebookEdit")
+            else ("Path", "file_path", "notebook_path", "path")
+        )
+        _all_write_candidates = [
+            str(args.get(_wk)).strip()
+            for _wk in _write_key_order
+            if isinstance(args.get(_wk), str) and str(args.get(_wk)).strip()
+        ]
+        raw_path = _all_write_candidates[0] if _all_write_candidates else ""
         target_path_str = raw_path
         if raw_path:
-            fpath = Path(raw_path)
+            fpath = Path(os.path.expanduser(raw_path))
             norm_write_path = raw_path.replace("\\", "/")
+            resolved_write_path, _ = _fast_resolve_path_and_lstat(raw_path)
+            norm_resolved_write = (resolved_write_path or "").replace("\\", "/")
+            # Guard 0: Block direct or symlinked writes/edits across ALL path keys to sensitive credential paths & .git/hooks # [direct-edit]
+            sens_write_hit = None
+            git_hook_hit = False
+            for _cand_wp in _all_write_candidates:
+                _c_res_w, _ = _fast_resolve_path_and_lstat(_cand_wp)
+                _h_w = _is_sensitive_credential_path(_cand_wp, resolved_path=_c_res_w)
+                if _h_w:
+                    sens_write_hit = _h_w
+                    break
+                _nw = _cand_wp.replace("\\", "/")
+                _nrw = (_c_res_w or "").replace("\\", "/")
+                if "/.git/hooks/" in _nw or _nw.startswith(".git/hooks/") or "/.git/hooks/" in _nrw:
+                    git_hook_hit = True
+                    break
+            if sens_write_hit:
+                decision = "deny"
+                stage_triggered = 3
+                secrets_blocked_in_airlock += 1
+                reason = (
+                    f"🛡️ Blood-Brain Barrier Secret Blindfold: Direct or symlinked mutation of sensitive credential file "
+                    f"(`{sens_write_hit}`) is forbidden."
+                )
+            elif git_hook_hit:
+                decision = "deny"
+                stage_triggered = 3
+                reason = "🛡️ Blood-Brain Barrier Self-Protection: Direct or symlinked mutation of `.git/hooks/` is forbidden."
             # Guard 1: Block ad-hoc remediation / patch scripts in scripts/  # [direct-edit]
             if tool_name in ("write_file", "Write") and re.search(
                 r"(?i)(?:^|/)scripts/(?:remediate_|solve_|fix_|rebuild_|final_pass|surgical_|execute_all_orders_recut|finish_recut|finalize_recut)[^/]*\.py$",
@@ -2963,6 +3038,8 @@ def run_ide_pre_tool_hook(
 
             parent_code = ""
             raw_bytes = b""
+            parent_py_tree: Optional[ast.AST] = None
+            is_py_edit_target = fpath.suffix.lower() == ".py"
             if fpath.is_file():
                 try:
                     raw_bytes = fpath.read_bytes()
@@ -2970,10 +3047,16 @@ def run_ide_pre_tool_hook(
                     parent_code = raw_bytes.decode("utf-8", errors="replace")
                 except Exception:
                     parent_code = ""
+            if is_py_edit_target and parent_code.strip():
+                try:
+                    parent_py_tree = ast.parse(parent_code)
+                except Exception:
+                    parent_py_tree = None
             pre_file_snap = capture_file_tactile_snapshot(
                 fpath,
                 raw_text=parent_code,
                 raw_bytes=raw_bytes,
+                pre_parsed_tree=parent_py_tree,
             )
 
             # 1a. Autonomic Machine-Mark & Em-Dash Auto-Heal (`overwrite`) for write/edit tools
@@ -3099,9 +3182,31 @@ def run_ide_pre_tool_hook(
                     else:
                         cand_code = parent_code + "\n" + textwrap.dedent(effective_repl)
                         tactile_cand_code = parent_code if (target_str and parent_code) else cand_code
-                cand_file_snap = capture_file_tactile_snapshot(
-                    fpath, raw_text=tactile_cand_code
-                )
+                cand_py_tree: Optional[ast.AST] = None
+                cand_py_parse_checked = False
+                if is_py_edit_target:
+                    cand_py_parse_checked = True
+                    if cand_code is parent_code or cand_code == parent_code:
+                        cand_py_tree = parent_py_tree
+                    elif cand_code.strip():
+                        try:
+                            cand_py_tree = ast.parse(cand_code)
+                        except Exception:
+                            cand_py_tree = None
+                tactile_py_tree: Optional[ast.AST] = None
+                if is_py_edit_target:
+                    if tactile_cand_code is cand_code:
+                        tactile_py_tree = cand_py_tree
+                    elif tactile_cand_code is parent_code:
+                        tactile_py_tree = parent_py_tree
+                if tactile_cand_code is parent_code and pre_file_snap is not None:
+                    cand_file_snap = pre_file_snap
+                else:
+                    cand_file_snap = capture_file_tactile_snapshot(
+                        fpath,
+                        raw_text=tactile_cand_code,
+                        pre_parsed_tree=tactile_py_tree,
+                    )
 
             f_ext_low = fpath.suffix.lower()
             if decision != "deny" and (f_ext_low in POLYGLOT_SECGATE_EXTENSIONS or is_shell_hook):  # [direct-edit]
@@ -3110,6 +3215,8 @@ def run_ide_pre_tool_hook(
                         parent_code=parent_code,
                         candidate_code=cand_code,
                         file_path=raw_path,
+                        parent_tree=parent_py_tree if is_py_edit_target else None,
+                        candidate_tree=cand_py_tree if (is_py_edit_target and cand_py_parse_checked and cand_py_tree is not None) else None,
                     )
                     assert_delta = int(gate.get("candidate_asserts", 0)) - int(
                         gate.get("parent_asserts", 0)
@@ -3384,38 +3491,52 @@ def run_ide_pre_tool_hook(
                     f"due to recent truncation cascade events (capped at 60 lines)."
                 )
             else:
-                bloat_res = inspect_shell_command_bloat(cmd_line)
-                if bloat_res.get("blocked"):
-                    direct_tokens_saved = int(bloat_res.get("direct_tokens_saved", 1000))
+                from whole_body_compute.organs.command_reflex import rewrite_git_commit_to_body_commit
+
+                git_commit_reflex = rewrite_git_commit_to_body_commit(cmd_line, payload=payload)
+                if git_commit_reflex and os.environ.get("VOICEFI_AUTO_HEAL_SHELL", "1") == "1":
+                    healed_cmd = str(git_commit_reflex["rewritten_command"])
+                    decision = "allow"
+                    shell_auto_healed = True
+                    overwrite_args[cmd_arg_key] = healed_cmd
+                    direct_tokens_saved = int(git_commit_reflex.get("tokens_saved", 4150))
                     remaining_turns = max(1, 25 - step_idx)
                     quadratic_tokens_saved = direct_tokens_saved * remaining_turns
-                    if bloat_res.get("target"):
-                        target_path_str = str(bloat_res["target"])[:120]
+                    target_path_str = "body commit"
+                    reason = str(git_commit_reflex["reason"])
+                else:
+                    bloat_res = inspect_shell_command_bloat(cmd_line)
+                    if bloat_res.get("blocked"):
+                        direct_tokens_saved = int(bloat_res.get("direct_tokens_saved", 1000))
+                        remaining_turns = max(1, 25 - step_idx)
+                        quadratic_tokens_saved = direct_tokens_saved * remaining_turns
+                        if bloat_res.get("target"):
+                            target_path_str = str(bloat_res["target"])[:120]
 
-                    healed_cmd_candidate = bloat_res.get("auto_heal_cmd") or bloat_res.get("auto_healed_cmd")
-                    strict_shell_block = os.environ.get("WBC_STRICT_SHELL_BLOAT_BLOCK", "0") == "1"
-                    auto_heal_shell_enabled = (
-                        (is_strict_test or bloat_res.get("category") == "test_flood")
-                        and os.environ.get("VOICEFI_AUTO_HEAL_SHELL", "1") == "1"
-                        and not strict_shell_block
-                    )
-                    if healed_cmd_candidate and auto_heal_shell_enabled:
-                        healed_cmd = str(healed_cmd_candidate)
-                        decision = "allow"
-                        shell_auto_healed = True
-                        overwrite_args[cmd_arg_key] = healed_cmd
-                        reason = (
-                            f"🩹 Blood-Brain Barrier Auto-Heal: Rewrote `{cmd_line[:80]}` to `{healed_cmd}` "
-                            f"(saved ~{direct_tokens_saved:,} direct tokens)"
+                        healed_cmd_candidate = bloat_res.get("auto_heal_cmd") or bloat_res.get("auto_healed_cmd")
+                        strict_shell_block = os.environ.get("WBC_STRICT_SHELL_BLOAT_BLOCK", "0") == "1"
+                        auto_heal_shell_enabled = (
+                            (is_strict_test or bloat_res.get("category") == "test_flood")
+                            and os.environ.get("VOICEFI_AUTO_HEAL_SHELL", "1") == "1"
+                            and not strict_shell_block
                         )
-                    else:
-                        decision = "deny"
-                        stage_triggered = 1
-                        context_gate_triggered = True
-                        reason = str(
-                            bloat_res.get("reason")
-                            or "🛡️ Blood-Brain Barrier Context-Tax Gate: Shell bloat blocked"
-                        )
+                        if healed_cmd_candidate and auto_heal_shell_enabled:
+                            healed_cmd = str(healed_cmd_candidate)
+                            decision = "allow"
+                            shell_auto_healed = True
+                            overwrite_args[cmd_arg_key] = healed_cmd
+                            reason = (
+                                f"🩹 Blood-Brain Barrier Auto-Heal: Rewrote `{cmd_line[:80]}` to `{healed_cmd}` "
+                                f"(saved ~{direct_tokens_saved:,} direct tokens)"
+                            )
+                        else:
+                            decision = "deny"
+                            stage_triggered = 1
+                            context_gate_triggered = True
+                            reason = str(
+                                bloat_res.get("reason")
+                                or "🛡️ Blood-Brain Barrier Context-Tax Gate: Shell bloat blocked"
+                            )
 
         if is_strict_test and decision == "allow" and re.search(r"(?:^|[;&|\s])(grep|rg)\s", cmd_line) and "local.scout" not in cmd_line:  # [direct-edit]
             raw_grep_cnt = int(c_state.get("raw_grep_count", 0)) + 1
@@ -3428,10 +3549,14 @@ def run_ide_pre_tool_hook(
                     f'   `uv run python -m whole_body_compute.local.scout <path> -q "<query>"`'
                 )
 
-        if decision == "allow" and "chrome-devtools-mcp" in cmd_line:
+        if decision == "allow" and (
+            "chrome-devtools-mcp" in cmd_line
+            or re.search(r"\b(screencapture|cliclick|pyautogui)\b", cmd_line)
+            or ("osascript" in cmd_line and "System Events" in cmd_line)
+        ):
             foveal_guidance = (
-                "👁️✋ [Foveal Eyes & Hands Shortcut]: For inspecting or clicking live logged-in Chrome windows "
-                "without `--remote-debugging-port` or ~15,000-token screenshots, use:\n"
+                "👁️✋ [Foveal Eyes & Hands Shortcut]: For inspecting or clicking live macOS apps or logged-in Chrome windows "
+                "without `--remote-debugging-port`, `osascript`, or ~15,000-token screenshots, use:\n"
                 '  • Inspect DOM (<350ms, ~995 tok): `uv run body eyes --app "Google Chrome" --max-elements 120`\n'
                 '  • Click element/button:           `uv run body hands --click-title "<label>" --app "Google Chrome"` (or `--act <e_id>`)\n'
                 "  (Keep `chrome-devtools-mcp` for network waterfall, console, and Lighthouse audits.)"
@@ -4025,6 +4150,16 @@ def run_ide_pre_tool_hook(
             )
         except Exception:
             pass
+    elif tool_name in READ_TOOL_NAMES and target_path_str and decision == "allow":
+        try:
+            from whole_body_compute.shield import record_ast_reread_if_recent
+
+            record_ast_reread_if_recent(
+                target=target_path_str,
+                payload=payload,
+            )
+        except Exception:
+            pass
 
     out: Dict[str, Any] = {
         "decision": decision,
@@ -4282,6 +4417,19 @@ def run_ide_pre_tool_hook(
             out["additionalContext"] = merged_reflex
             if isinstance(out.get("hookSpecificOutput"), dict):
                 out["hookSpecificOutput"]["additionalContext"] = out["additionalContext"]
+
+    if decision == "allow" and session_counts.get("edit_count", 0) >= 3 and step_idx >= 12:
+        out["escalation_circuit_breaker"] = True
+        cb_cue = (
+            f"🛑 Escalation Circuit-Breaker (F*={session_counts['edit_count']}, T*={step_idx}): "
+            "3+ edits past turn 12 without resolution. Escalate sideways to another model family."
+        )
+        out["additionalContext"] = (
+            f"{out['additionalContext']}\n{cb_cue}" if out.get("additionalContext") else cb_cue
+        )
+        out["ephemeralMessage"] = out["additionalContext"]
+        if isinstance(out.get("hookSpecificOutput"), dict):
+            out["hookSpecificOutput"]["additionalContext"] = out["additionalContext"]
 
     return out
 
@@ -4711,6 +4859,14 @@ def _build_preinv_url_reflex(transcript_path_str: str) -> str:
         return ""
     content_low = str(last_obj.get("content") or "").lower()
     if "https://" not in content_low:
+        if any(
+            kw in content_low
+            for kw in ("body eyes", "body hands", "eyes and hands", "hands and eyes", "logged-in chrome", "my screen")
+        ):
+            return (
+                "👁️✋ [WBC Foveal Eyes & Hands Reflex]: Use `uv run body eyes --app \"<App>\" --max-elements 60` "
+                "and `uv run body hands --app \"<App>\" --click <e_id>` instead of `browser` subagent, `osascript`, or `screencapture`."
+            )
         return ""
     if "posthog.com" in content_low and _has_posthog_personal_key():
         return (
@@ -4834,20 +4990,63 @@ def run_ide_pre_invocation_hook(
                 f"[🔴 Organ 04 Cognitive Saturation Alert (CSI={csi_est:.2f} RED, transcript={transcript_kb:.0f}KB, steps={steps})]: "
                 "This conversation has crossed the RED Context Saturation threshold (>=900KB). "
                 "After completing the current turn, proactively notify the user that Context Saturation is RED "
-                "and offer to run `body flush` (or `/compact`) to hand off to a fresh conversation."
+                "and offer to run `body flush --auto --goal \"...\" --milestone \"...\" --next-step \"...\"` (or `/compact`) to hand off to a fresh conversation."
             )
 
     stashed_preinv = _pop_preinv_context(conv_id)
     if stashed_preinv:
         inject_steps.append({"systemMessage": {"systemMessage": stashed_preinv}})
 
+    termination_behavior = ""
+    cmd_reflex_res: Dict[str, Any] = {}
     if not is_subagent:
         url_reflex = _build_preinv_url_reflex(transcript_path_str)
         if url_reflex:
             inject_steps.append({"systemMessage": {"systemMessage": url_reflex}})
+        try:
+            from whole_body_compute.organs.command_reflex import evaluate_preinvocation_command_reflex
+
+            cmd_reflex_res = evaluate_preinvocation_command_reflex(
+                payload,
+                transcript_path_str=transcript_path_str,
+                transcript_kb=transcript_kb,
+            )
+            if cmd_reflex_res.get("matched"):
+                if cmd_reflex_res.get("termination_behavior") == "terminate" and cmd_reflex_res.get("user_markdown"):
+                    termination_behavior = "terminate"
+                    inject_steps.append(
+                        {
+                            "systemMessage": {
+                                "systemMessage": str(cmd_reflex_res.get("system_message") or ""),
+                                "metadata": {"user_markdown": str(cmd_reflex_res["user_markdown"])},
+                            }
+                        }
+                    )
+                elif cmd_reflex_res.get("system_message"):
+                    # Avoid duplicate eyes/hands systemMessage if _build_preinv_url_reflex already emitted it
+                    sys_msg_txt = str(cmd_reflex_res["system_message"])
+                    if not (url_reflex and "Foveal Eyes & Hands" in url_reflex and "Foveal Eyes & Hands" in sys_msg_txt):
+                        inject_steps.append({"systemMessage": {"systemMessage": sys_msg_txt}})
+                _append_immune_audit_event(
+                    {
+                        "timestamp": time.time(),
+                        "phase": "pre_invocation",
+                        "conversation_id": conv_id,
+                        "step_idx": steps,
+                        "tool": "command_reflex",
+                        "target": str(cmd_reflex_res.get("target") or "command_reflex"),
+                        "decision": str(cmd_reflex_res.get("action_mode") or "reflex"),
+                        "direct_tokens_saved": int(cmd_reflex_res.get("tokens_saved") or 0),
+                        "latency_ms": float(cmd_reflex_res.get("latency_ms") or 0.0),
+                        "reason": f"WBC Command Reflex ({cmd_reflex_res.get('action_mode')} -> {cmd_reflex_res.get('target')})",
+                    },
+                    audit_log_path=audit_log_path,
+                )
+        except Exception:
+            pass
 
     combined_ephemeral = "\n".join(msg_parts)
-    if combined_ephemeral:
+    if combined_ephemeral and termination_behavior != "terminate":
         inject_steps.append({"ephemeralMessage": combined_ephemeral})
 
     elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 3)
@@ -4878,7 +5077,7 @@ def run_ide_pre_invocation_hook(
     ret: Dict[str, Any] = {
         "decision": "allow",
         "injectSteps": inject_steps,
-        "terminationBehavior": "",
+        "terminationBehavior": termination_behavior,
         "subagent_escalation_nudge": subagent_escalation_nudge,
         "exploratory_streak": exploratory_streak,
     }
@@ -5261,6 +5460,23 @@ def run_ide_post_tool_hook(
     )
     post_sha256 = tactile_delta.post_sha256 if tactile_delta else ""
     file_changed = bool(tactile_delta.file_changed) if tactile_delta else False
+    if (
+        file_changed
+        and raw_edit_path
+        and tool_name in WRITE_EDIT_TOOL_NAMES
+        and conv_id not in ("local", "global", "")
+    ):
+        try:
+            edit_p = Path(str(raw_edit_path)).expanduser()
+            edit_str = str(edit_p).replace("\\", "/")
+            if "/brain/" not in edit_str and "/.gemini/" not in edit_str and edit_p.exists():
+                from whole_body_compute.local.git_fastpath import record_file_touch, resolve_repo_root
+
+                repo_rt = resolve_repo_root(edit_p.parent)
+                if (repo_rt / ".git").exists() and edit_p.resolve().is_relative_to(repo_rt.resolve()):
+                    record_file_touch(str(edit_p), session_id=conv_id, repo_root=repo_rt)
+        except Exception:
+            pass
 
     from whole_body_compute.redaction import contains_secret, count_new_redactions, redact_secrets
 
@@ -6300,12 +6516,36 @@ def cli_hook_main(argv: Optional[List[str]] = None) -> int:
                         if keep_k in res_obj:
                             filtered_post[keep_k] = res_obj[keep_k]
                     res_obj = filtered_post
-        elif phase_arg in ("pre-invocation", "pre_invocation"):
+        elif phase_arg in ("pre-invocation", "pre_invocation", "user-prompt-submit", "user_prompt_submit"):
             res_obj = run_ide_pre_invocation_hook(in_payload)
             if not isinstance(res_obj, dict):
                 res_obj = {"injectSteps": []}
             else:
-                res_obj = {"injectSteps": res_obj.get("injectSteps", [])}
+                detected_preinv = detect_host_harness(in_payload) if isinstance(in_payload, dict) else "generic"
+                if detected_preinv == "claude_code":
+                    cc_ctx_parts: List[str] = []
+                    for step_item in res_obj.get("injectSteps", []):
+                        if isinstance(step_item, dict):
+                            sm = step_item.get("systemMessage")
+                            if isinstance(sm, dict) and sm.get("systemMessage"):
+                                cc_ctx_parts.append(str(sm["systemMessage"]))
+                            elif isinstance(step_item.get("ephemeralMessage"), str) and step_item["ephemeralMessage"]:
+                                cc_ctx_parts.append(step_item["ephemeralMessage"])
+                    res_obj = (
+                        {
+                            "hookSpecificOutput": {
+                                "hookEventName": "UserPromptSubmit",
+                                "additionalContext": "\n".join(cc_ctx_parts),
+                            }
+                        }
+                        if cc_ctx_parts
+                        else {}
+                    )
+                else:
+                    filtered_preinv: Dict[str, Any] = {"injectSteps": res_obj.get("injectSteps", [])}
+                    if res_obj.get("terminationBehavior"):
+                        filtered_preinv["terminationBehavior"] = res_obj["terminationBehavior"]
+                    res_obj = filtered_preinv
         else:
             if (
                 phase_arg not in ("pre", "post", "pre-invocation", "pre_invocation")

@@ -681,7 +681,7 @@ class PalWorkflowRunner:
             for pre in recipe.preconditions:
                 pre_ok, pre_msg = PalStateGetters.evaluate(pre, bound_vars)
                 if not pre_ok:
-                    if os.getenv("VOICEFI_HEADLESS") != "1":
+                    if os.getenv("WBC_HEADLESS") != "1" and os.getenv("VOICEFI_HEADLESS") != "1":
                         cls.record_cloud_savings(
                             recipe_id=recipe_id,
                             tokens_saved=0,
@@ -702,7 +702,7 @@ class PalWorkflowRunner:
         for idx, step in enumerate(steps):
             if (time.monotonic() - start_time) > total_timeout_s:
                 cls._unwind_failure()
-                if os.getenv("VOICEFI_HEADLESS") != "1":
+                if os.getenv("WBC_HEADLESS") != "1" and os.getenv("VOICEFI_HEADLESS") != "1":
                     cls.record_cloud_savings(
                         recipe_id=recipe_id,
                         tokens_saved=0,
@@ -751,7 +751,7 @@ class PalWorkflowRunner:
             if not success:
                 if step.on_failure == "abort":
                     cls._unwind_failure()
-                    if os.getenv("VOICEFI_HEADLESS") != "1":
+                    if os.getenv("WBC_HEADLESS") != "1" and os.getenv("VOICEFI_HEADLESS") != "1":
                         cls.record_cloud_savings(
                             recipe_id=recipe_id,
                             tokens_saved=0,
@@ -780,7 +780,7 @@ class PalWorkflowRunner:
                 pc_ok, pc_msg = PalStateGetters.evaluate(pc, bound_vars)
                 if not pc_ok:
                     cls._unwind_failure()
-                    if os.getenv("VOICEFI_HEADLESS") != "1":
+                    if os.getenv("WBC_HEADLESS") != "1" and os.getenv("VOICEFI_HEADLESS") != "1":
                         cls.record_cloud_savings(
                             recipe_id=recipe_id,
                             tokens_saved=0,
@@ -806,7 +806,7 @@ class PalWorkflowRunner:
         tok_label = savings["tokens_saved_formatted"]
         badge = f"⚡ {elapsed_s:.1f}s · 0 tok (~{tok_label} saved)"
 
-        if os.getenv("VOICEFI_HEADLESS") != "1":
+        if os.getenv("WBC_HEADLESS") != "1" and os.getenv("VOICEFI_HEADLESS") != "1":
             cls.record_cloud_savings(
                 recipe_id=recipe_id,
                 tokens_saved=tokens_saved,

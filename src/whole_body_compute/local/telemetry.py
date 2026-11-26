@@ -183,8 +183,12 @@ def capture_wbc_hybrid_step(
     )
     target_url = os.environ.get("WBC_TELEMETRY_INGEST_URL")
     if not target_url:
-        host = os.environ.get("POSTHOG_HOST") or "https://us.i.posthog.com"
-        target_url = f"{host.rstrip('/')}/capture/"
+        host = os.environ.get("POSTHOG_HOST")
+        target_url = (
+            f"{host.rstrip('/')}/capture/"
+            if host
+            else "https://wholebodycompute.com/v1/telemetry"
+        )
 
     envelope = {
         "api_key": api_key,
@@ -314,7 +318,7 @@ class HybridPipelineContext:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         global _ACTIVE_PIPELINE_ID
-        if os.environ.get("VOICEFI_TESTING") != "1":
+        if os.environ.get("WBC_TESTING") != "1" and os.environ.get("VOICEFI_TESTING") != "1":
             try:
                 update_workspace_scorecard()
             except Exception as e:
@@ -490,7 +494,7 @@ def record_hybrid_step(
         logger.debug(f"Native capture_wbc_hybrid_step skipped: {e}")
 
     # 3. Sync Workspace Scorecard (.agents/HYBRID_TELEMETRY.md)
-    if sync_scorecard and os.environ.get("VOICEFI_TESTING") != "1":
+    if sync_scorecard and os.environ.get("WBC_TESTING") != "1" and os.environ.get("VOICEFI_TESTING") != "1":
         try:
             update_workspace_scorecard(store=store)
         except Exception as e:

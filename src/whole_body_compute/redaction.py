@@ -74,26 +74,45 @@ _NON_CREDENTIAL_KEY_RE = re.compile(
 )
 
 _CODE_EXPRESSION_VALUE_RE = re.compile(
-    r"^(?:\$[A-Za-z_]|[\(\[\{]|(?:bool|int|float|str|list|dict|set|tuple|max|min|len|sum|any|all|getattr|setattr|re|os|sys|self|cls)\b|(?:self|cls|os|sys|env|config|settings|args|kwargs|state|ctx)\.[A-Za-z_][A-Za-z0-9_]*$|[A-Za-z_][A-Za-z0-9_.]*\(|[/.~][A-Za-z0-9_.\-/]+)"
+    r"^(?:\$[A-Za-z_]|[\(\[\{]|(?:bool|int|float|str|list|dict|set|tuple|max|min|len|sum|any|all|getattr|setattr|re|os|sys|self|cls)\b|(?:self|cls|os|sys|env|config|settings|args|kwargs|state|ctx)\.[A-Za-z_][A-Za-z0-9_]*$|[A-Za-z_][A-Za-z0-9_.]*\()"
 )
+_LIKELY_FILE_PATH_RE = re.compile(r"^(?:~|\.{1,2})?/[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+$")
+_MIXED_ENTROPY_SEGMENT_RE = re.compile(r"(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])[A-Za-z0-9+/_=\-]{12,}")
+
+
+def _is_benign_code_or_path_value(val_str: str) -> bool:
+    """Return True if `val_str` is a code expression or multi-segment file path rather than a secret."""
+    if _CODE_EXPRESSION_VALUE_RE.match(val_str):
+        return True
+    if _LIKELY_FILE_PATH_RE.match(val_str):
+        segments = [seg for seg in val_str.split("/") if seg and seg not in ("~", ".", "..")]
+        if segments and not any(_MIXED_ENTROPY_SEGMENT_RE.fullmatch(seg) for seg in segments):
+            return True
+    return False
+
 
 _COMPILED: List[Pattern[str]] = [
-    # 1. PEM private key blocks - mask the whole block, headers included.
+    # 1. PEM & PGP private key blocks - mask the whole block, headers included.
     re.compile(
-        r"-----BEGIN[ A-Z]*PRIVATE KEY-----.*?-----END[ A-Z]*PRIVATE KEY-----",
+        r"-----BEGIN[ A-Z0-9\-]*PRIVATE KEY[ A-Z0-9\-]*-----.*?-----END[ A-Z0-9\-]*PRIVATE KEY[ A-Z0-9\-]*-----",
         re.DOTALL | re.IGNORECASE,
     ),
     # 2. Vendor-prefixed credentials.
     re.compile("|".join(_PREFIXED_SECRETS)),
-    # 3. Authorization headers (evaluated before generic KEY: value so 'Bearer <tok>' is masked cleanly).
-    re.compile(r"(?i)\b(authorization\s*:\s*)(?:bearer\s+|basic\s+)?[A-Za-z0-9._\-+/=]{8,}"),
+    # 3. Authorization headers (raw HTTP and JSON/YAML quoted) evaluated before generic KEY: value.
+    re.compile(
+        r"(?i)([\"']?\bauthorization[\"']?\s*:\s*[\"']?)(?:(?:bearer|basic|token)\s+)?[A-Za-z0-9._\-+/=~]{8,}"
+    ),
     # 4. KEY=value / KEY: value / "KEY": "value" / KEY is value where the key name is sensitive.
-    #    The value is masked; the key name survives so the text still reads.
-    #    Excludes '&' so query strings do not greedily swallow subsequent parameters, and
-    #    excludes boolean/null/numeric/placeholder literals so YAML/JSON config booleans stay intact.
+    #    Supports full quoted values (including spaces/punctuation inside matching quotes) and
+    #    unquoted tokens while preserving booleans, numbers, placeholders, and already-redacted text.
     re.compile(
         rf"(?i)(\"?\b([A-Za-z0-9_\-]*{_SECRET_KEYWORD}[A-Za-z0-9_\-]*)\"?\s*(?:[:=]|\s+is\s+)\s*)"
-        r"(\"|')?(?!(?:true|false|null|none|yes|no|\d+(?:\.\d+)?)\b|\[redacted\])([^\s\"'\}\],;\[&]{6,})(\3)?",
+        r"(?:"
+        r"(\"|')(?!(?:true|false|null|none|yes|no|\d+(?:\.\d+)?)\s*\3|\[redacted\]\3|<[^>]+>\3|\.{2,}\3|\*{3,}\3|•+\3)([^\r\n]{6,}?)(\3)"
+        r"|"
+        r"(?![\"'])(?!(?:true|false|null|none|yes|no|\d+(?:\.\d+)?)\b|\[redacted\])([^\s\"'\}\],;\[&]{6,})"
+        r")",
     ),
     # 5. Database URI passwords (e.g. postgres://user:secret@host, mysql://user:p@ss!@host)
     re.compile(
@@ -101,10 +120,10 @@ _COMPILED: List[Pattern[str]] = [
         r"(?:[^\s/]+)"
         r"(@(?:\[[0-9a-f:]+\]|[a-z0-9.\-]+)(?::\d+)?(?:/[^\s]*)?)"
     ),
-    # 6. Sensitive query parameter values in URLs (e.g. ?token=secret, &apiKey=key)
+    # 6. Sensitive query or OAuth fragment parameter values in URLs (e.g. ?token=secret, #access_token=...)
     re.compile(
-        r"(?i)([?&](?:token|apiKey|api_key|key|password|passwd|pwd|secret|auth)=)"
-        r"([^&\s\"'>]{6,})"
+        r"(?i)([?&#](?:[a-z0-9_\-]*(?:token|api_?key|secret|password|passwd|pwd)|key|auth|sig|x-amz-signature|x-amz-security-token)=)"
+        r"([^&#\s\"'>]{6,})"
     ),
 ]
 
@@ -138,11 +157,12 @@ def redact_secrets(text: str, placeholder: str = REDACTION_PLACEHOLDER) -> str:
     result = _COMPILED[2].sub(lambda m: f"{m.group(1)}{placeholder}", result)
 
     def _replace_keyword_assignment(m: re.Match[str]) -> str:
+        # [direct-edit] Handle both quoted (group 4) and unquoted (group 6) values
         key_name = (m.group(2) or "").strip()
-        val_str = (m.group(4) or "").strip()
+        val_str = (m.group(4) or m.group(6) or "").strip()
         if _NON_CREDENTIAL_KEY_RE.match(key_name):
             return m.group(0)
-        if _CODE_EXPRESSION_VALUE_RE.match(val_str):
+        if _is_benign_code_or_path_value(val_str):
             return m.group(0)
         return f"{m.group(1)}{placeholder}"
 
@@ -152,12 +172,37 @@ def redact_secrets(text: str, placeholder: str = REDACTION_PLACEHOLDER) -> str:
 
     # Entropy-based sweep last, so already-masked spans are not re-scanned.
     def _replace_high_entropy(m: re.Match[str]) -> str:
+        # [direct-edit] Preserve non-secret KEY=org/model-slug tokens where '=' joins an assignment
         tok = m.group(0)
         start = m.start()
+        if "=" in tok.rstrip("="):
+            lhs, rhs = tok.split("=", 1)
+            if (
+                len(rhs) < 32
+                or (
+                    rhs.count("/") == 1
+                    and rhs.count("-") >= 2
+                    and not rhs.endswith("=")
+                    and re.match(r"^[a-z0-9][a-z0-9._-]+/[A-Za-z0-9][A-Za-z0-9._-]+$", rhs)
+                )
+                or _is_benign_code_or_path_value(rhs)
+            ):
+                return tok
+            if not (re.search(r"[a-z]", rhs) and re.search(r"[A-Z]", rhs) and re.search(r"[0-9]", rhs)):
+                return tok
+            return f"{lhs}={placeholder}"
         if "/" in tok and ((start > 0 and result[start - 1] == "/") or tok.count("/") >= 2):
             return tok
         # Skip snake_case / dunder Python & test identifiers (e.g. test_round4_high_entropy_2026_11_10)
         if tok.count("_") >= 2 and not tok.endswith("="):
+            return tok
+        # Skip org/model-slug identifiers (e.g. mlx-community/Muse-Glimmer-30B-4bit) while still masking Base64 keys
+        if (
+            tok.count("/") == 1
+            and tok.count("-") >= 2
+            and not tok.endswith("=")
+            and re.match(r"^[a-z0-9][a-z0-9._-]+/[A-Za-z0-9][A-Za-z0-9._-]+$", tok)
+        ):
             return tok
         return placeholder
 

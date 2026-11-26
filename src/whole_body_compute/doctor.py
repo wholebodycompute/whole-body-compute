@@ -1028,6 +1028,7 @@ def run_diagnostics(full: bool = False, socket_path: Optional[str] = None) -> Di
     checks = list(pipe_report["checks"])
 
     if full:
+        checks.append(check_memory_and_swap())
         checks.append(check_speech_pipe_locks())
         checks.append(check_python_environment())
         checks.extend(check_package_dependencies())
@@ -1045,6 +1046,80 @@ def run_diagnostics(full: bool = False, socket_path: Optional[str] = None) -> Di
     return pipe_report
 
 
+_SAFE_PIP_SPEC_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\[\]<>=!~,\s-]{0,127}$")
+_ALLOWED_TACHYCARDIC_MARKERS = (
+    "voicefi",
+    "whole_body_compute",
+    "whole-body-compute",
+    "foveal-vision-mcp",
+    "foveal_memory",
+)
+
+
+def _is_allowed_doctor_fix_argv(cmd_args: Sequence[str]) -> bool:
+    """Only permit `[sys.executable, '-m', 'pip', 'install', <safe_pkg_specs...>]` during `--fix`."""
+    if not isinstance(cmd_args, (list, tuple)) or len(cmd_args) < 5:
+        return False
+    if list(cmd_args[:4]) != [sys.executable, "-m", "pip", "install"]:
+        return False
+    for spec in cmd_args[4:]:
+        if not isinstance(spec, str):
+            return False
+        s = spec.strip()
+        if not s or s.startswith("-") or "\x00" in s or not _SAFE_PIP_SPEC_RE.match(s):
+            return False
+    return True
+
+
+def _is_safe_tachycardic_target(pid: Any) -> bool:
+    """Verify PID > 1, not self/parent, owned by current UID, and still a WBC/VoiceFi daemon."""
+    if isinstance(pid, bool) or not isinstance(pid, int):
+        return False
+    if pid <= 1 or pid in (os.getpid(), os.getppid()):
+        return False
+    try:
+        import psutil
+
+        proc = psutil.Process(pid)
+        if hasattr(os, "getuid"):
+            uids = proc.uids()
+            if uids and uids.real != os.getuid():
+                return False
+        name_l = (proc.name() or "").lower()
+        cmd_l = " ".join(proc.cmdline() or []).lower()
+        hay = f"{name_l} {cmd_l}"
+        return any(marker in hay for marker in _ALLOWED_TACHYCARDIC_MARKERS)
+    except Exception:
+        return False
+
+
+def _is_safe_stale_unlink_path(stale_path: str) -> bool:
+    """Confine stale lock deletion to non-directory files owned by the current user inside temp/data dirs."""
+    import stat
+    import tempfile
+
+    try:
+        p = Path(stale_path)
+        st = os.lstat(p)
+        if stat.S_ISDIR(st.st_mode):
+            return False
+        if hasattr(os, "getuid") and st.st_uid != os.getuid():
+            return False
+        parent_resolved = p.parent.resolve()
+        allowed_roots = {
+            Path("/tmp").resolve(),
+            Path(tempfile.gettempdir()).resolve(),
+            (Path.home() / ".whole_body_compute").resolve(),
+            (Path.home() / ".voicefi").resolve(),
+        }
+        return any(
+            parent_resolved == root or root in parent_resolved.parents
+            for root in allowed_roots
+        )
+    except OSError:
+        return False
+
+
 def apply_doctor_fixes(diagnostics: Dict[str, Any], quiet: bool = False) -> List[str]:
     """Apply automated self-healing remedies for detected failures and stale locks."""
     actions_taken = []
@@ -1052,6 +1127,8 @@ def apply_doctor_fixes(diagnostics: Dict[str, Any], quiet: bool = False) -> List
     # 1. Clear stale speech/mic status files & dead-PID locks
     lock_check = check_speech_pipe_locks()
     for stale_path in lock_check.get("stale_files", []):
+        if not _is_safe_stale_unlink_path(stale_path):
+            continue
         try:
             Path(stale_path).unlink(missing_ok=True)
             actions_taken.append(f"Removed stale lock/status file: {stale_path}")
@@ -1065,22 +1142,26 @@ def apply_doctor_fixes(diagnostics: Dict[str, Any], quiet: bool = False) -> List
         try:
             p_sock = Path(DEFAULT_DOCTOR_SOCKET_PATH)
             if p_sock.is_symlink():
-                p_sock.unlink(missing_ok=True)
-            p_sock.symlink_to(FALLBACK_DOCTOR_SOCKET_PATH)
-            actions_taken.append("Restored /tmp/vifi.sock -> /tmp/voicefi.sock symlink")
-            if not quiet:
-                print("  ✅ Restored /tmp/vifi.sock -> /tmp/voicefi.sock symlink")
+                if not hasattr(os, "getuid") or os.lstat(p_sock).st_uid == os.getuid():
+                    p_sock.unlink(missing_ok=True)
+            if not p_sock.exists():
+                p_sock.symlink_to(FALLBACK_DOCTOR_SOCKET_PATH)
+                actions_taken.append("Restored /tmp/vifi.sock -> /tmp/voicefi.sock symlink")
+                if not quiet:
+                    print("  ✅ Restored /tmp/vifi.sock -> /tmp/voicefi.sock symlink")
         except Exception:
             pass
 
-    # 3. Run package/dependency fix commands
+    # 3. Run package/dependency fix commands (strictly confined to safe pip package specs)
     for c in diagnostics.get("checks", []):
         if c.get("status") == "fail" and (c.get("fix_args") or c.get("fix_command")):
             cmd_args = c.get("fix_args") or shlex.split(str(c["fix_command"]))
+            if not _is_allowed_doctor_fix_argv(cmd_args):
+                continue
             if not quiet:
                 print(f"🔧 Applying automated fix for {c['name']}...")
             try:
-                res = subprocess.run(cmd_args, shell=False, capture_output=True, text=True, timeout=60)
+                res = subprocess.run(cmd_args, shell=False, capture_output=True, text=True, timeout=60)  # noqa: S603
                 if res.returncode == 0:
                     actions_taken.append(f"Successfully ran fix for {c['name']}")
                     if not quiet:
@@ -1101,7 +1182,7 @@ def apply_doctor_fixes(diagnostics: Dict[str, Any], quiet: bool = False) -> List
             pid = tachy.get("pid")
             name = tachy.get("name")
             cpu = tachy.get("cpu_pct", 0)
-            if pid and pid > 0:
+            if _is_safe_tachycardic_target(pid):
                 try:
                     os.kill(pid, 15)  # SIGTERM for clean launchd respawn
                     actions_taken.append(f"Recycled tachycardic {name} (PID {pid}, {cpu:.0f}% CPU)")
@@ -1110,10 +1191,138 @@ def apply_doctor_fixes(diagnostics: Dict[str, Any], quiet: bool = False) -> List
                 except Exception as e:
                     if not quiet:
                         print(f"  ❌ Failed to recycle {name} (PID {pid}): {e}")
+
+        # 5. Reclaim Unified RAM when swap pressure is elevated/thrashing or idle models are hogging RAM
+        mem_check = check_memory_and_swap()
+        swap_state = mem_check.get("swap_state", "clean")
+        reclaimable_gb = float(mem_check.get("reclaimable_ram_gb", 0.0))
+        if swap_state in ("elevated", "thrashing") or reclaimable_gb >= 0.5:
+            reclaimed_gb = 0.0
+            try:
+                reclaimed_gb += float(
+                    default_supervisor.try_auto_sweep_for_model(
+                        model_name="__doctor_fix__",
+                        required_gb=999.0,
+                        current_free_gb=0.0,
+                    )
+                    or 0.0
+                )
+            except Exception:
+                pass
+            try:
+                ext_res = default_supervisor.evict_external_runner_models(dry_run=False)
+                evicted_ext = []
+                for runner_key in ("lm_studio", "llama_server"):
+                    evicted_ext.extend(ext_res.get(runner_key, {}).get("evicted", []))
+                if evicted_ext:
+                    msg = f"Unloaded external runner models: {', '.join(evicted_ext)}"
+                    actions_taken.append(msg)
+                    if not quiet:
+                        print(f"  ✅ {msg}")
+            except Exception:
+                pass
+
+            if reclaimed_gb > 0.0:
+                msg = f"Evicted idle local models to relieve swap pressure (reclaimed ~{reclaimed_gb:.1f}GB)"
+                actions_taken.append(msg)
+                if not quiet:
+                    print(f"  ✅ {msg}")
+            elif swap_state in ("elevated", "thrashing") and not quiet:
+                top_procs = mem_check.get("top_processes", [])
+                if top_procs:
+                    top_str = ", ".join(
+                        f"{p.get('name', '?')} ({p.get('rss_gb', 0.0):.1f}GB)" for p in top_procs[:3]
+                    )
+                    print(f"  ℹ️ No idle local models to evict. Top RAM consumers: {top_str}")
     except Exception:
         pass
 
     return actions_taken
+
+
+def check_memory_and_swap() -> Dict[str, Any]:
+    """
+    Inspect Unified RAM, compressed memory, and swap pressure (distinguishing dormant swap
+    from active thrashing), and attribute top RAM consumers + evictable local model bloat.
+    """
+    t0 = time.perf_counter()
+    try:
+        from whole_body_compute.local.supervisor import default_supervisor
+
+        telem = default_supervisor.get_telemetry()
+        perfusion = default_supervisor.get_resident_model_processes()
+        pressure = default_supervisor.get_memory_pressure_macos(
+            swap_used_gb=telem.swap_used_gb,
+            free_ram_gb=telem.free_ram_gb,
+            total_ram_gb=telem.total_ram_gb,
+        )
+        swap_state = pressure.get("swap_state", "clean")
+        compressed_gb = float(pressure.get("compressed_gb", 0.0))
+        reclaimable_gb = float(perfusion.get("reclaimable_ram_gb", 0.0))
+        large_procs = perfusion.get("large_processes", []) or []
+
+        if swap_state == "thrashing":
+            status = "fail"
+            state_label = "THRASHING"
+            action = "Run `body doctor --fix` or `body flush` and close top RAM hogs"
+        elif swap_state == "elevated":
+            status = "warn"
+            state_label = "active pressure"
+            action = "Run `body doctor --fix` to evict idle models" if reclaimable_gb > 0 else "Close top RAM hogs to relieve swap"
+        elif swap_state == "dormant":
+            status = "warn" if telem.swap_used_gb >= 8.0 else "pass"
+            state_label = "dormant - safe"
+            action = None
+        else:
+            status = "pass"
+            state_label = "clean"
+            action = None
+
+        parts = [
+            f"{telem.free_ram_gb:.1f}GB/{telem.total_ram_gb:.1f}GB free",
+            f"{telem.swap_used_gb:.1f}GB swap ({state_label})",
+        ]
+        if compressed_gb >= 1.0:
+            parts.append(f"{compressed_gb:.1f}GB compressed")
+        if reclaimable_gb > 0:
+            parts.append(f"{reclaimable_gb:.1f}GB evictable")
+        if large_procs and swap_state != "clean":
+            top_str = ", ".join(
+                f"{p.get('name', '?')} {p.get('rss_gb', 0.0):.1f}GB" for p in large_procs[:3]
+            )
+            parts.append(f"Top: {top_str}")
+
+        return {
+            "category": "Memory & Swap",
+            "name": "Memory & Swap",
+            "status": status,
+            "details": " • ".join(parts),
+            "latency_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+            "swap_state": swap_state,
+            "swap_used_gb": telem.swap_used_gb,
+            "free_ram_gb": telem.free_ram_gb,
+            "total_ram_gb": telem.total_ram_gb,
+            "compressed_gb": compressed_gb,
+            "reclaimable_ram_gb": reclaimable_gb,
+            "top_processes": large_procs[:5],
+            "recommended_action": action,
+        }
+    except Exception as exc:
+        return {
+            "category": "Memory & Swap",
+            "name": "Memory & Swap",
+            "status": "warn",
+            "details": f"Unable to inspect memory/swap: {exc}",
+            "latency_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+            "swap_state": "unknown",
+            "swap_used_gb": 0.0,
+            "free_ram_gb": 0.0,
+            "total_ram_gb": 0.0,
+            "compressed_gb": 0.0,
+            "reclaimable_ram_gb": 0.0,
+            "top_processes": [],
+            "recommended_action": None,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1129,21 +1338,39 @@ def check_organ_heart() -> Dict[str, Any]:
 
         telem = default_supervisor.get_telemetry()
         perfusion = default_supervisor.get_resident_model_processes()
+        pressure = default_supervisor.get_memory_pressure_macos(
+            swap_used_gb=telem.swap_used_gb,
+            free_ram_gb=telem.free_ram_gb,
+            total_ram_gb=telem.total_ram_gb,
+        )
+        swap_state = pressure.get("swap_state", "clean")
+        compressed_gb = float(pressure.get("compressed_gb", 0.0))
         cognitive = default_supervisor.get_cognitive_telemetry()
         csi = float(cognitive.get("csi", 0.0))
         cog_tier = cognitive.get("health_tier", "GREEN")
         cog_steps = cognitive.get("steps", 0)
         reclaimable_gb = perfusion.get("reclaimable_ram_gb", 0.0)
         tachycardic = perfusion.get("tachycardic_processes", [])
+        large_procs = perfusion.get("large_processes", []) or []
         lat = round((time.perf_counter() - t0) * 1000.0, 2)
         state = getattr(telem, "thermal_state", "NORMAL")
         status = "pass"
-        if state in ("SERIOUS", "HEAVY") or tachycardic:
-            status = "warn"
-        elif state == "CRITICAL" or not getattr(telem, "is_safe", True):
+        if state == "CRITICAL" or not getattr(telem, "is_safe", True) or swap_state == "thrashing":
             status = "fail"
-        elif cog_tier == "RED":
+        elif (
+            state in ("SERIOUS", "HEAVY")
+            or tachycardic
+            or cog_tier == "RED"
+            or swap_state == "elevated"
+            or (swap_state == "dormant" and telem.swap_used_gb >= 8.0)
+        ):
             status = "warn"
+        swap_tag = {
+            "clean": "",
+            "dormant": " (dormant)",
+            "elevated": " (active pressure)",
+            "thrashing": " (THRASHING)",
+        }.get(swap_state, "")
         reclaim_note = f" • {reclaimable_gb:.1f}GB evictable" if reclaimable_gb > 0 else " • 0GB idle model bloat"
         cog_note = f" • Context CSI {csi:.2f} ({cog_tier})" if cog_steps > 0 else ""
         tachy_note = ""
@@ -1152,9 +1379,15 @@ def check_organ_heart() -> Dict[str, Any]:
                 f"{p['name']} (PID {p['pid']}, {p.get('cpu_pct', 0):.0f}% CPU)" for p in tachycardic
             )
             tachy_note = f" • ⚠️ Autonomic Tachycardia: {tachy_pids}"
+        top_note = ""
+        if large_procs and swap_state in ("elevated", "thrashing"):
+            top_str = ", ".join(
+                f"{p.get('name', '?')} {p.get('rss_gb', 0.0):.1f}GB" for p in large_procs[:2]
+            )
+            top_note = f" • Top: {top_str}"
         detail = (
             f"{state} • {telem.free_ram_gb:.1f}GB RAM free / {telem.total_ram_gb:.1f}GB "
-            f"• {telem.swap_used_gb:.1f}GB swap{reclaim_note}{cog_note}{tachy_note}"
+            f"• {telem.swap_used_gb:.1f}GB swap{swap_tag}{reclaim_note}{top_note}{cog_note}{tachy_note}"
         )
         return {
             "organ_num": "01",
@@ -1168,9 +1401,11 @@ def check_organ_heart() -> Dict[str, Any]:
                 "free_ram_gb": telem.free_ram_gb,
                 "total_ram_gb": telem.total_ram_gb,
                 "swap_used_gb": telem.swap_used_gb,
+                "swap_state": swap_state,
+                "compressed_gb": compressed_gb,
                 "reclaimable_model_ram_gb": reclaimable_gb,
                 "tachycardic_processes": tachycardic,
-                "large_processes": perfusion.get("large_processes", []),
+                "large_processes": large_procs,
                 "cognitive_csi": csi,
                 "cognitive_tier": cog_tier,
                 "cognitive_steps": cog_steps,
@@ -1688,15 +1923,39 @@ def check_organ_the_eyes() -> Dict[str, Any]:
     except Exception:
         pass
 
-    ax_trusted = _check_macos_accessibility_trusted()
-    ax_tag = "AX:trusted" if ax_trusted else "AX:untrusted"
+    helper_status: Optional[Dict[str, Any]] = None
+    try:
+        from whole_body_compute.integrations.foveal_vision import send_foveal_socket_request
+
+        raw_helper = send_foveal_socket_request({"op": "status"}, timeout_sec=0.25)
+        if isinstance(raw_helper, dict) and raw_helper.get("status") == "ok":
+            helper_status = raw_helper
+    except Exception:
+        pass
+
+    helper_paused = bool(helper_status and (helper_status.get("paused") or helper_status.get("kill_switch")))
+    if helper_status and helper_status.get("provider") in ("Whole Body Compute.app", "WBC Eyes.app"):
+        prov = str(helper_status["provider"])
+        ax_trusted = bool(helper_status.get("ax_trusted", False))
+        ax_tag = (
+            f"{prov}:PAUSED"
+            if helper_paused
+            else (f"{prov}:AX-trusted (0 Terminal TCC)" if ax_trusted else f"{prov}:AX-untrusted")
+        )
+    else:
+        ax_trusted = _check_macos_accessibility_trusted()
+        ax_tag = "AX:trusted" if ax_trusted else "AX:untrusted"
+
     vagus_tag = "Vagus:armed" if vagus_armed else "Vagus:standby"
     lat = round((time.perf_counter() - t0) * 1000.0, 2)
-    status = "pass" if (foveal_memory_online or elem_count > 0 or frame_ok or ax_trusted) else "warn"
+    if helper_paused:
+        status = "warn"
+    else:
+        status = "pass" if (foveal_memory_online or elem_count > 0 or frame_ok or ax_trusted) else "warn"
     fm_note = ":9382 online" if foveal_memory_online else ":9382 standby"
     frame_note = " • Visual Frame Active" if frame_ok else ""
     details = (
-        f"PyObjC AXUIElement DOM ({elem_count} elements in {foveal_lat:.1f}ms) • {ax_tag} "
+        f"Foveal AXUIElement DOM ({elem_count} elements in {foveal_lat:.1f}ms) • {ax_tag} "
         f"• {vagus_tag} • {fm_note}{frame_note}"
     )
 
@@ -1726,35 +1985,55 @@ def check_organ_hippocampus() -> Dict[str, Any]:
     mem_count = 0
     habits_count = 0
     episodes_count = 0
+    pro_locked = False
     try:
-        from whole_body_compute.local.dot_memory import get_dot_store
+        from whole_body_compute.license import LicenseManager, _is_isolated_home_env, _is_open_core_enforced
+        from whole_body_compute.pro_loader import ProUpgradeRequiredError
 
-        store = get_dot_store()
-        store.search("voice", top_k=2, use_embeddings=False)
-        with store._connect() as conn:
-            mem_count = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
-            try:
-                episodes_count = conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
-            except Exception:
+        if (
+            (_is_open_core_enforced() or _is_isolated_home_env() or os.environ.get("WBC_FORCE_COMMUNITY") == "1")
+            and not ("PYTEST_CURRENT_TEST" in os.environ and not _is_open_core_enforced() and os.environ.get("WBC_FORCE_COMMUNITY") != "1")
+            and not LicenseManager().is_feature_allowed("hippocampus_memory", emit_telemetry=False)
+        ):
+            pro_locked = True
+        else:
+            from whole_body_compute.local.dot_memory import get_dot_store
+
+            store = get_dot_store()
+            store.search("voice", top_k=2, use_embeddings=False)
+            with store._connect() as conn:
+                mem_count = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
                 try:
-                    episodes_count = conn.execute("SELECT COUNT(*) FROM episodic_memory").fetchone()[0]
+                    episodes_count = conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
                 except Exception:
-                    episodes_count = 0
-            try:
-                habits_count = conn.execute("SELECT COUNT(*) FROM user_habits").fetchone()[0]
-            except Exception:
+                    try:
+                        episodes_count = conn.execute("SELECT COUNT(*) FROM episodic_memory").fetchone()[0]
+                    except Exception:
+                        episodes_count = 0
                 try:
-                    habits_count = conn.execute(
-                        "SELECT COUNT(*) FROM memories WHERE category = 'habit_pattern'"
-                    ).fetchone()[0]
+                    habits_count = conn.execute("SELECT COUNT(*) FROM user_habits").fetchone()[0]
                 except Exception:
-                    habits_count = 0
+                    try:
+                        habits_count = conn.execute(
+                            "SELECT COUNT(*) FROM memories WHERE category = 'habit_pattern'"
+                        ).fetchone()[0]
+                    except Exception:
+                        habits_count = 0
+    except ProUpgradeRequiredError:
+        pro_locked = True
+    except NotImplementedError:
+        pro_locked = True
     except Exception:
         pass
 
     lat = round((time.perf_counter() - t0) * 1000.0, 2)
     status = "pass" if mem_count >= 0 else "warn"
-    if episodes_count == 0 and mem_count == 0:
+    if pro_locked:
+        details = (
+            "🔒 Pro Tier ($29/mo) • Unlock Hippocampus SQLite WAL, --remember/--recall & 3:30 AM REM "
+            "(`body upgrade --open`)"
+        )
+    elif episodes_count == 0 and mem_count == 0:
         details = (
             f"WAL active • {mem_count} facts • {habits_count} consolidated habits "
             f"• (fresh DB - 0 episodes) • REM ready"
@@ -1773,7 +2052,8 @@ def check_organ_hippocampus() -> Dict[str, Any]:
             "memory_count": mem_count,
             "habits_count": habits_count,
             "episodes_count": episodes_count,
-            "wal_enabled": True,
+            "wal_enabled": not pro_locked,
+            "pro_locked": pro_locked,
         },
     }
 
@@ -2332,6 +2612,14 @@ def cmd_doctor(args: Any) -> int:
 
     pipe_checks = diag["checks"][:4]
     print(format_doctor_table(pipe_checks, elapsed_ms=diag.get("elapsed_ms")))
+    try:
+        mem_check = check_memory_and_swap()
+        mem_badge = {"pass": "🟢", "warn": "🟡", "fail": "🔴"}.get(mem_check["status"], "⚪")
+        print(f"🧠 Memory & Swap: {mem_badge} {mem_check['details']}")
+        if mem_check.get("recommended_action"):
+            print(f"   ↳ {mem_check['recommended_action']}")
+    except Exception:
+        pass
     try:
         from whole_body_compute.local.reflex_gate import format_reflex_gate_status_lines
 

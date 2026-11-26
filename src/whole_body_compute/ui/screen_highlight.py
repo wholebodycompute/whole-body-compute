@@ -43,7 +43,9 @@ from PyObjCTools import AppHelper
 def is_headless() -> bool:
     """Return True if running in headless or automated test environment."""
     return bool(
-        os.getenv("VOICEFI_HEADLESS") == "1"
+        os.getenv("WBC_HEADLESS") == "1"
+        or os.getenv("WBC_TESTING") == "1"
+        or os.getenv("VOICEFI_HEADLESS") == "1"
         or os.getenv("HEADLESS") == "1"
         or os.getenv("VOICEFI_TESTING") == "1"
         or os.getenv("PYTEST_CURRENT_TEST")

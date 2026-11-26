@@ -71,49 +71,91 @@ def _has_skip_decorator(node: ast.AST) -> bool:
     return False
 
 
-def compute_ast_structural_digest(code: str, is_python: bool = True) -> Tuple[bool, Optional[str], str, str, int, int, int, List[str]]:
+def compute_ast_structural_digest(
+    code: str,
+    is_python: bool = True,
+    pre_parsed_tree: Optional[ast.AST] = None,
+) -> Tuple[bool, Optional[str], str, str, int, int, int, List[str]]:
     """
-    Parse code in <1ms and return:
+    Parse code (or reuse `pre_parsed_tree`) and return in a single iterative AST pass:
     `(ast_syntax_valid, ast_error, ast_digest, topology_digest, symbol_count, assert_count, tautological_asserts, test_funcs)`.
     """
     if not is_python:
         digest = hashlib.sha256(code.encode("utf-8", errors="replace")).hexdigest()[:16] if code else ""
         return True, None, digest, digest, 0, 0, 0, []
 
-    if not code or not code.strip():
-        return True, None, "", "", 0, 0, 0, []
-
-    try:
-        tree = ast.parse(code)
-    except SyntaxError as exc:
-        err_msg = f"SyntaxError: {exc.msg} at line {exc.lineno}"
-        return False, err_msg, "", "", 0, 0, 0, []
-
-    ast_dump_str = ast.dump(tree, include_attributes=False)
-    ast_digest = hashlib.sha256(ast_dump_str.encode("utf-8")).hexdigest()[:16]
+    if pre_parsed_tree is None:
+        if not code or not code.strip():
+            return True, None, "", "", 0, 0, 0, []
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as exc:
+            err_msg = f"SyntaxError: {exc.msg} at line {exc.lineno}"
+            return False, err_msg, "", "", 0, 0, 0, []
+    else:
+        tree = pre_parsed_tree
 
     symbol_sigs: List[str] = []
     assert_count = 0
     taut_count = 0
     test_funcs: Set[str] = set()
+    ast_tokens: List[str] = []
+    append_tok = ast_tokens.append
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef):
+    # Single-pass iterative DFS in deterministic child order: eliminates both
+    # `ast.dump()` (~130ms string formatting) and `collections.deque` `ast.walk()`.
+    stack: List[ast.AST] = [tree]
+    pop_node = stack.pop
+    ext_nodes = stack.extend
+    AST_cls = ast.AST
+    ClassDef_cls = ast.ClassDef
+    Func_cls = (ast.FunctionDef, ast.AsyncFunctionDef)
+    Assert_cls = ast.Assert
+
+    while stack:
+        node = pop_node()
+        n_cls = node.__class__
+        append_tok(n_cls.__name__)
+
+        if n_cls is ClassDef_cls:
             methods = [
                 f"{item.name}({len(item.args.args)})"
                 for item in node.body
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                if isinstance(item, Func_cls)
             ]
             symbol_sigs.append(f"class:{node.name}:[{','.join(sorted(methods))}]")
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        elif isinstance(node, Func_cls):
             arg_names = ",".join(a.arg for a in node.args.args)
             symbol_sigs.append(f"def:{node.name}({arg_names})")
             if node.name.startswith("test_") and not _has_skip_decorator(node):
                 test_funcs.add(node.name)
-        elif isinstance(node, ast.Assert):
+        elif n_cls is Assert_cls:
             assert_count += 1
             if _is_tautological_assert(node.test):
                 taut_count += 1
+
+        children: List[ast.AST] = []
+        for field_name in node._fields:
+            val = getattr(node, field_name, None)
+            if val is None:
+                append_tok(f"{field_name}=None")
+            elif isinstance(val, AST_cls):
+                append_tok(field_name)
+                children.append(val)
+            elif isinstance(val, list):
+                append_tok(f"{field_name}[{len(val)}]")
+                for item in val:
+                    if isinstance(item, AST_cls):
+                        children.append(item)
+                    else:
+                        append_tok(repr(item))
+            else:
+                append_tok(f"{field_name}={val!r}")
+        if children:
+            children.reverse()
+            ext_nodes(children)
+
+    ast_digest = hashlib.sha256("\x1f".join(ast_tokens).encode("utf-8", errors="replace")).hexdigest()[:16]
 
     sorted_tests = sorted(test_funcs)
     valid_asserts = max(0, assert_count - taut_count)
@@ -371,7 +413,8 @@ class TactileSensor:
     def _get_active_surface_info(cls) -> Tuple[str, str, str]:
         """Return (app_name, window_title, focused_element_label) via PyObjC or fallback."""
         if os.environ.get("VOICEFI_MOCK_TACTILE") == "1" or (
-            os.environ.get("VOICEFI_MOCK_AUDIO") == "1" and os.environ.get("VOICEFI_HEADLESS") == "1"
+            os.environ.get("VOICEFI_MOCK_AUDIO") == "1"
+            and (os.environ.get("WBC_HEADLESS") == "1" or os.environ.get("VOICEFI_HEADLESS") == "1")
         ):
             return ("Mock App", "Mock Window", "AXTextArea [Message input]")
 
@@ -419,6 +462,7 @@ class TactileSensor:
         file_path: Path | str,
         raw_text: Optional[str] = None,
         raw_bytes: Optional[bytes] = None,
+        pre_parsed_tree: Optional[ast.AST] = None,
     ) -> FileTactileSnapshot:
         """
         Capture a <2ms single-file SHA-256, AST syntax validity, structural AST digest,
@@ -493,7 +537,11 @@ class TactileSensor:
             assert_cnt,
             taut_cnt,
             test_fn_list,
-        ) = compute_ast_structural_digest(t_data, is_python=is_py)
+        ) = compute_ast_structural_digest(
+            t_data,
+            is_python=is_py,
+            pre_parsed_tree=pre_parsed_tree if is_py else None,
+        )
 
         snap = FileTactileSnapshot(
             file_path=fpath_str,
@@ -820,12 +868,14 @@ def capture_file_tactile_snapshot(
     file_path: Path | str,
     raw_text: Optional[str] = None,
     raw_bytes: Optional[bytes] = None,
+    pre_parsed_tree: Optional[ast.AST] = None,
 ) -> FileTactileSnapshot:
     """Helper entrypoint to capture a <2ms single-file SHA-256 and AST baseline."""
     return TactileSensor.capture_file_snapshot(
         file_path=file_path,
         raw_text=raw_text,
         raw_bytes=raw_bytes,
+        pre_parsed_tree=pre_parsed_tree,
     )
 
 

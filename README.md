@@ -3,7 +3,7 @@
 **Cut agent token burn and latency with zero accuracy loss on SWE-bench Verified.**  
 Whole Body Compute makes AI computing simpler, faster, and local: giving Claude Code, Cursor, Windsurf, Cline, Goose, and Antigravity a `<3ms` AST context shield, native macOS vision, and on-device memory right on your Mac (with cross-platform Blood-Brain Barrier & FinOps audit support on Linux).
 
-[Open-Core Spec (`wholebodycompute.com/open-core`)](https://wholebodycompute.com/open-core) · [Zero-Install Audit Source (`audit.py`)](https://wholebodycompute.com/audit.py) · [Commercial Platform (`wholebodycompute.com`)](https://wholebodycompute.com) · [Benchmarks (`benchmarks/`)](https://github.com/wholebodycompute/whole-body-compute/blob/main/benchmarks/README.md) · [Architecture Wiki](https://github.com/wholebodycompute/whole-body-compute/blob/main/docs/WIKI_AND_GLOSSARY.md)
+[Open-Core Spec (`wholebodycompute.com/open-core`)](https://wholebodycompute.com/open-core) · [Security & TCC FAQ (`wholebodycompute.com/security`)](https://wholebodycompute.com/security) · [Zero-Install Audit Source (`audit.py`)](https://wholebodycompute.com/audit.py) · [Commercial Platform (`wholebodycompute.com`)](https://wholebodycompute.com) · [Benchmarks (`benchmarks/`)](https://github.com/wholebodycompute/whole-body-compute/blob/main/benchmarks/README.md) · [Architecture Wiki](https://github.com/wholebodycompute/whole-body-compute/blob/main/docs/WIKI_AND_GLOSSARY.md)
 
 ---
 
@@ -76,7 +76,7 @@ Evaluated across **180+ live unscripted agent sessions** - including **`120` cro
 | **`SWE-bench Verified` (`k=3`, `60` Trials) - Claude Code**<br>`Claude Sonnet` (`2,000L` ceiling, `10` official orgs) | `29/30` (`96.7% Pass@1`)<br>`9/10 Pass^3` · `$10.47` | **`30/30` (`100% Pass@1`)**<br>**`10/10 Pass^3` · `$10.41`** | **`+10.0pp Pass^3`** (`mwaskom/seaborn-3069` solved `3/3`)<br>**`-12.2%` matched wall time**<br>**`-5.5%` matched ctx**<br>**`-5.3%` matched $** |
 | **`SWE-bench Verified` (`Claude Code 2x2`, `40` Runs)**<br>`Claude Sonnet` & `Claude Haiku` CLI (`k=1`) | `Vanilla Sonnet`: `9/10` (`$4.00`)<br>`Vanilla Haiku`: `8/10` (`$4.42`) | **`Sonnet + WBC`: `10/10` (`$3.89`)**<br>**`Haiku + WBC`: `-36.1%` ctx (`$3.05`)** | **`Sonnet + WBC` solved `10/10` (`100%`)**<br>**`-12.0%` LESS cost than `Vanilla Haiku`** (`$3.89` vs. `$4.42`)<br>**`+20.0pp` higher accuracy** vs. `Vanilla Haiku` |
 | **Multi-Track Live A/B (`18` Sessions)**<br>`SWE-bench` + `CORE-Bench Hard` + `OSWorld` | `Haiku 4.5`: `9/9` (`100%`)<br>`5.26M` ctx · `$1.60` · `312.9s` | **`Haiku 4.5 + WBC`: `9/9` (`100%`)**<br>**`1.55M` ctx · `$0.51` · `190.5s`** | **`-67.8%` API spend** (`3.11x` efficiency)<br>**`-71.9%` billed input**<br>**`-39.1%` faster wall-clock time** |
-| **Security & Reliability (`AgentDojo` + `CyberSecEval 3`)** | `100.0%` Attack Success (`12/12`) | **`0.0%` Attack Success (`12/12` blocked)** | **`0.0%` false-positive rate** (`6/6` benign passed)<br>**`0.102ms` in-process gate overhead** |
+| **Security & Reliability (`InjecAgent` + `RedCode-Exec` + `AgentDojo`)** | `100.0%` Choke-Point Compromise (`0%` pre-tool gate) | **`0.0% ASR` on `InjecAgent` (`2,108/2,108`) & `AgentDojo` (`12/12`)**<br>**`94.53%` `RedCode-Exec` OS boundary blocked (`709/750`)** | **`0.0%` false-positive rate** (`1,072/1,072` benign passed)<br>**`0.07ms–0.72ms` in-process gate overhead** |
 
 Full per-repository tables, `120`-trial cross-harness synthesis ([`CROSS_HARNESS_120_TRIAL_SWEBENCH_K3_REPORT.md`](https://github.com/wholebodycompute/whole-body-compute/blob/main/benchmarks/CROSS_HARNESS_120_TRIAL_SWEBENCH_K3_REPORT.md)), `2x2` model matrices, raw JSON telemetry receipts, and 1-command verification harnesses: **[`benchmarks/README.md`](https://github.com/wholebodycompute/whole-body-compute/blob/main/benchmarks/README.md)**.
 
@@ -92,7 +92,7 @@ body savings        # Inspect live Blood-Brain Barrier token savings & active sh
 body report         # 5-Pillar operational & FinOps scorecard (Session, 24h & 7d trends)
 body doctor         # Sub-second 5-organ health check (--exercise runs closed-loop reflex verification)
 body heart          # Thermal state, Unified RAM headroom & model perfusion status
-body eyes           # Live macOS AXUIElement Foveal DOM snapshot + on-demand Apple Vision OCR
+body eyes           # Live macOS AXUIElement Foveal DOM snapshot (`--install-app` installs unified Whole Body Compute.app TCC broker)
 body hands          # Deterministic UI actuation (ax_act) & <50ms tactile git/file delta sensor
 body ears           # 100% local code dictation (Hold Fn / Fn+Space) grounded in live symbols.db AST vocab
 body bbb            # Blood-Brain Barrier audit (--window 24h --tools --blocked --blob; alias: body immune)
@@ -112,9 +112,9 @@ Deep-dive component reference and glossary: **[`docs/WIKI_AND_GLOSSARY.md`](http
 
 ---
 
-## Sovereign Telemetry & Privacy (`TELEMETRY.md`)
+## Sovereign Telemetry, Security & Privacy (`TELEMETRY.md` · `SECURITY_AND_TCC_FAQ.md`)
 
-Whole Body Compute **never** collects source code, AST slice text, file paths, repository names, prompts, window titles, screen pixels, IP addresses (`$ip: null`), or PII. By default, anonymous operational vitals and sanitized Procedural DNA efficiency cards help benchmark local + cloud hybrid compute across Apple Silicon and Linux. Inspect the exact JSON payload anytime with `body telemetry show`, or opt out completely with `body telemetry disable` or `export DO_NOT_TRACK=1`. Full schema & CI redaction proofs: **[`TELEMETRY.md`](https://github.com/wholebodycompute/whole-body-compute/blob/main/TELEMETRY.md)**.
+Whole Body Compute **never** collects source code, AST slice text, file paths, repository names, prompts, window titles, screen pixels, IP addresses (`$ip: null`), or PII. Core context shielding (`body begin`, Blood-Brain Barrier, local Metal offload, and FinOps audit) requires **zero macOS TCC permissions**. Optional desktop vision & dictation (`body eyes`, `body hands`, `body ears`) isolate `kTCCServiceAccessibility` and `kTCCServiceMicrophone` inside one unified notarized app: **`Whole Body Compute.app`** (`com.wholebodycompute.app`, Team ID `Y25SHBA3P5`, Hardened Runtime + Library Validation ON, `LOCAL_PEERPID` + `0600` HMAC-SHA256 + `SecCode` caller auth, 1-Click menu-bar Kill Switches, and native Swift blindfolds for password vaults, `System Settings`, sensitive web origins, and `AXSecureTextField` - so Terminal/IDEs need zero TCC). Install via `body eyes --install-app` or `brew install --cask wholebodycompute/tap/whole-body-compute`. Inspect the exact outbound JSON payload anytime with `body telemetry show`, or opt out completely with `body telemetry disable` or `export DO_NOT_TRACK=1`. Full specs & 60-second verification suites: **[`wholebodycompute.com/security`](https://wholebodycompute.com/security)** · **[`docs/SECURITY_AND_TCC_FAQ.md`](https://github.com/wholebodycompute/whole-body-compute/blob/main/docs/SECURITY_AND_TCC_FAQ.md)** · **[`TELEMETRY.md`](https://github.com/wholebodycompute/whole-body-compute/blob/main/TELEMETRY.md)**.
 
 ---
 

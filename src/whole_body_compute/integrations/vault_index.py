@@ -1162,7 +1162,7 @@ class LocalVaultSynthesizer:
         model_used = "retrieval-only"
         is_local = True
 
-        if use_local_llm and os.environ.get("VOICEFI_TESTING") != "1":
+        if use_local_llm and os.environ.get("WBC_TESTING") != "1" and os.environ.get("VOICEFI_TESTING") != "1":
             spoken_answer, model_used, is_local = self._query_hybrid_model(query, chunks, mode=mode)
 
         if not spoken_answer:

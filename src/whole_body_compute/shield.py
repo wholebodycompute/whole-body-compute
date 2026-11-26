@@ -505,6 +505,16 @@ def _estimate_event_time_saved_sec(
         # Eliminates 1 full exploratory `read_file` LLM round-trip (~5.2s TTFT + tool decode) after a crash/test failure
         return 5.2 + (saved_tok / 75_000.0) - actual_sec
 
+    if ev == "command_reflex":
+        if mode == "spinal_short_circuit":
+            # Eliminates full cloud LLM invocation + ~2 prep tool round-trips (~11.5s)
+            return 11.5 + (saved_tok / 75_000.0) - actual_sec
+        if mode == "pretool_git_rewrite":
+            # Upgrades raw git commit in-place without extra LLM round-trip (~2.4s saved)
+            return 2.4 + (saved_tok / 75_000.0) - actual_sec
+        # preinv_directive / spinal_failthrough: avoids ~1.5 exploratory git status/diff/search turns (~4.2s)
+        return 4.2 + (saved_tok / 75_000.0) - actual_sec
+
     if ev == "vascular_block":
         return (1.5 - actual_sec) if mode != "hard_deny" else (-1.5 - actual_sec)
 
@@ -680,9 +690,102 @@ class ShieldTelemetryLedger:
         except Exception:
             return False
 
+    def record_ast_reread_if_recent(
+        self,
+        target: str,
+        *,
+        bot_name: Optional[str] = None,
+        session_id: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        raw_tokens_est: int = 0,
+        window_sec: float = 300.0,
+        timestamp: Optional[float] = None,
+    ) -> bool:
+        """
+        Log an `ast_slice_miss` event if the same `(session_id, target)` was recently
+        sliced by `ast_slice_gate` within `window_sec` and has not already logged a miss
+        for that slice.
+        """
+        try:
+            if str(self.db_path) != ":memory:" and not Path(self.db_path).is_file():
+                return False
+            self.ensure_schema()
+            resolved_bot = (
+                BOT_ALIASES.get(bot_name.strip().lower(), bot_name.strip().lower())
+                if bot_name
+                else detect_bot_name(payload)
+            )
+            resolved_session = (
+                session_id or detect_active_session_id(payload, bot_name=resolved_bot) or "default-session"
+            ).strip()
+            clean_target = _normalize_target_label(str(target or ""))
+            if not clean_target or clean_target == "unknown":
+                return False
+            ts = float(timestamp if timestamp is not None else time.time())
+            cutoff = ts - max(1.0, float(window_sec))
+
+            with _LEDGER_LOCK:
+                conn = self._connect()
+                try:
+                    last_slice = conn.execute(
+                        """
+                        SELECT MAX(timestamp) FROM shield_savings_ledger
+                        WHERE event_type = 'ast_slice_gate'
+                          AND session_id = ?
+                          AND target = ?
+                          AND timestamp >= ?
+                          AND timestamp <= ?;
+                        """,
+                        (resolved_session, clean_target, cutoff, ts),
+                    ).fetchone()
+                    last_slice_ts = float(last_slice[0]) if last_slice and last_slice[0] is not None else None
+                    if last_slice_ts is None:
+                        return False
+
+                    already_missed = conn.execute(
+                        """
+                        SELECT 1 FROM shield_savings_ledger
+                        WHERE event_type = 'ast_slice_miss'
+                          AND session_id = ?
+                          AND target = ?
+                          AND timestamp >= ?
+                        LIMIT 1;
+                        """,
+                        (resolved_session, clean_target, last_slice_ts),
+                    ).fetchone()
+                    if already_missed is not None:
+                        return False
+
+                    resolved_model, _ = detect_active_model_and_rate(payload=payload, session_id=resolved_session)
+                    conn.execute(
+                        """
+                        INSERT INTO shield_savings_ledger (
+                            timestamp, bot_name, session_id, model_name, event_type, action_mode,
+                            target, raw_tokens_est, compressed_tokens_est, tokens_saved,
+                            secrets_blocked, latency_ms
+                        ) VALUES (?, ?, ?, ?, 'ast_slice_miss', 'reread_after_slice', ?, ?, 0, 0, 0, 0.0);
+                        """,
+                        (
+                            ts,
+                            resolved_bot,
+                            resolved_session,
+                            resolved_model,
+                            clean_target,
+                            max(0, int(raw_tokens_est or 0)),
+                        ),
+                    )
+                    conn.commit()
+                    return True
+                finally:
+                    conn.close()
+        except Exception:
+            return False
+
     def reset(self) -> int:
         """Delete all rows in `shield_savings_ledger` and return the deleted count."""
         try:
+            if str(self.db_path) != ":memory:" and not Path(self.db_path).is_file():
+                return False
             self.ensure_schema()
             with _LEDGER_LOCK:
                 conn = self._connect()
@@ -916,6 +1019,8 @@ class ShieldTelemetryLedger:
         shield_time_sec = 0.0
         total_time_saved_sec = 0.0
         total_direct_usd = 0.0
+        ast_slice_events = 0
+        ast_slice_misses = 0
 
         # Per-(bot_name, session_id, target) high-water-mark deduplication for file/log reads
         dedup_credits: Dict[Tuple[str, str, str], int] = {}
@@ -939,6 +1044,12 @@ class ShieldTelemetryLedger:
             ev_t = str(cr["event_type"] or "")
             tgt_name = _normalize_target_label(str(cr["target"] or ""))
             lat_v = float(cr["latency_ms"] or 0.0)
+
+            if ev_t == "ast_slice_miss":
+                ast_slice_misses += 1
+                continue
+            if ev_t == "ast_slice_gate":
+                ast_slice_events += 1
 
             if ev_t in _DEDUP_FILE_EVENT_TYPES and tgt_name:
                 d_key = (b_name, s_id, tgt_name)
@@ -1061,7 +1172,9 @@ class ShieldTelemetryLedger:
 
             if ev_t in ("local_metal_scout", "screen_local_digest"):
                 scout_lats.append(lat_v)
-            elif ev_t in ("ast_slice_gate", "secret_redaction", "vascular_block", "crash_triage_fusion"):
+            elif ev_t in ("ast_slice_gate", "secret_redaction", "vascular_block", "crash_triage_fusion") or (
+                ev_t == "command_reflex" and act_mode != "spinal_short_circuit"
+            ):
                 reflex_lats.append(lat_v)
 
             if ev_t in ("eyes_foveal_dom", "screen_local_digest"):
@@ -1336,6 +1449,16 @@ class ShieldTelemetryLedger:
         ]
 
         rounded_total_time_sec = round(total_time_saved_sec, 1)
+        ast_miss_rate_pct = (
+            round((ast_slice_misses / ast_slice_events) * 100.0, 2)
+            if ast_slice_events > 0
+            else 0.0
+        )
+        ast_precision_pct = (
+            round(max(0.0, 100.0 - ast_miss_rate_pct), 2)
+            if ast_slice_events > 0
+            else 100.0
+        )
 
         return {
             "db_path": str(self.db_path),
@@ -1343,7 +1466,11 @@ class ShieldTelemetryLedger:
             "since_timestamp": since_ts,
             "bot_filter": norm_bot,
             "active_model": detected_model,
-            "total_events": total_events,
+            "total_events": max(0, total_events - ast_slice_misses),
+            "ast_slice_events": ast_slice_events,
+            "ast_slice_misses": ast_slice_misses,
+            "ast_miss_rate_pct": ast_miss_rate_pct,
+            "ast_precision_pct": ast_precision_pct,
             "actual_turns_observed": actual_turns_observed,
             "raw_tokens_blocked": raw_tokens_blocked,
             "compressed_tokens_sent": compressed_tokens_sent,
@@ -1377,6 +1504,29 @@ class ShieldTelemetryLedger:
             },
             "recent_events": recent_events,
         }
+
+
+def record_ast_reread_if_recent(
+    target: str,
+    *,
+    bot_name: Optional[str] = None,
+    session_id: Optional[str] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    raw_tokens_est: int = 0,
+    window_sec: float = 300.0,
+    db_path: Optional[Path | str] = None,
+    timestamp: Optional[float] = None,
+) -> bool:
+    """Module-level convenience wrapper for recording an AST slice re-read miss."""
+    return ShieldTelemetryLedger(db_path=db_path).record_ast_reread_if_recent(
+        target=target,
+        bot_name=bot_name,
+        session_id=session_id,
+        payload=payload,
+        raw_tokens_est=raw_tokens_est,
+        window_sec=window_sec,
+        timestamp=timestamp,
+    )
 
 
 def record_shield_event(
@@ -1548,8 +1698,10 @@ def format_savings_receipt(summary: Dict[str, Any]) -> str:
                 _box_line("How to activate your first session:"),
                 _box_line("  1. Close & reopen Claude Code / Cursor / Antigravity"),
                 _box_line("     (or `/exit` and re-run `claude` in terminal) so hooks load."),
-                _box_line("  2. Work normally for a few prompts (reads, tests, git diffs)."),
-                _box_line("  3. Re-run `body savings` to see live tokens & dollars saved."),
+                _box_line("  2. Use a LOCAL session (terminal `claude` or a local folder in"),
+                _box_line("     Claude Desktop - remote web/cloud VMs cannot run local hooks)."),
+                _box_line("  3. Work normally for a few prompts, then re-run `body savings`."),
+                _box_line("     (Zero-RAM Shielding: <5ms pure Python/AST, 0 GB local LLM RAM.)"),
                 f"╰{'─' * (width - 2)}╯",
             ]
         )
@@ -1584,6 +1736,17 @@ def format_savings_receipt(summary: Dict[str, Any]) -> str:
         _box_line(f"Subscription Runway:    {mult:.1f}x longer before 5-hour cap"),
         _box_line(f"Secrets Scrubbed:       {sec_blocked:,} leaked keys blocked"),
         _box_line(f"Hook Reflex Latency:    {hook_lat:.1f} ms ($0.00 local compute)"),
+        *(
+            [
+                _box_line(
+                    f"AST Slice Precision:    {float(summary.get('ast_precision_pct', 100.0)):.1f}% "
+                    f"({int(summary.get('ast_slice_misses', 0)):,} re-reads / "
+                    f"{int(summary.get('ast_slice_events', 0)):,} slices)"
+                )
+            ]
+            if int(summary.get("ast_slice_events", 0) or 0) > 0
+            else []
+        ),
         _box_line(f"Local Metal Scout:      {scout_line_val}"),
         f"╰{'─' * (width - 2)}╯",
     ]

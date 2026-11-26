@@ -1,8 +1,8 @@
 class WholeBodyCompute < Formula
   desc "Local AST context shield, vision & memory runtime for AI coding agents"
   homepage "https://wholebodycompute.com/open-core"
-  url "https://files.pythonhosted.org/packages/source/w/whole-body-compute/whole_body_compute-0.1.3.tar.gz"
-  sha256 "8a2e826eb11b636ed228e03ee5b9fb7111ad72e3b293c31a0599e4976f6432dc"
+  url "https://files.pythonhosted.org/packages/source/w/whole-body-compute/whole_body_compute-0.1.7.tar.gz"
+  sha256 "6ae65ce1a73419170e85cc51ac0b042a44b1f59e10725784563666c7a0c91ca2"
   license :cannot_represent
   head "https://github.com/wholebodycompute/whole-body-compute.git", branch: "main"
 
@@ -31,12 +31,13 @@ class WholeBodyCompute < Formula
       Awaken Whole Body Compute in any coding workspace in <10 seconds:
         body begin
 
-      Optional macOS background LaunchAgents (Foveal Socket & :3030 Memory HTTP):
+      macOS Accessibility & Microphone TCC broker (Whole Body Compute.app, Team Y25SHBA3P5):
+        brew install --cask wholebodycompute/tap/whole-body-compute
         body daemon install
 
-      Upgrade to Whole Body Compute Pro ($29/mo) or Team ($79/seat/mo):
+      Upgrade to Whole Body Compute Pro ($20/mo) or Team ($49/seat/mo):
         body license --activate <POLAR_KEY>
-        https://wholebodycompute.com/pricing
+        https://wholebodycompute.com/#pricing
     EOS
   end
 

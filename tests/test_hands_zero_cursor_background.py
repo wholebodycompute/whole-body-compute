@@ -23,6 +23,7 @@ from whole_body_compute.integrations.foveal_vision import (
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("VOICEFI_MOCK_FOVEAL", raising=False)
+    monkeypatch.delenv("WBC_HEADLESS", raising=False)
     monkeypatch.delenv("VOICEFI_HEADLESS", raising=False)
     monkeypatch.delenv("VOICEFI_MOCK_FRONT_APP", raising=False)
     monkeypatch.delenv("WBC_HANDS_NO_CURSOR", raising=False)

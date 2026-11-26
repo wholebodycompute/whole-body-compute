@@ -758,6 +758,18 @@ def _dispatch_main(
         return 0 if report.get("overall_status") != "fail" else 1
 
     if cmd in ("exercise", "reflex"):
+        if getattr(args, "action", None) == "stats":
+            from whole_body_compute.local.reflex_gate import (
+                build_reflex_stats_report,
+                format_reflex_stats_table,
+            )
+
+            stats_report = build_reflex_stats_report()
+            if getattr(args, "json", False):
+                print(json.dumps(stats_report, indent=2))
+            else:
+                print(format_reflex_stats_table(stats_report))
+            return 0
         reflex = exercise_10_organ_reflex_loop()
         if getattr(args, "json", False):
             print(json.dumps(reflex, indent=2))

@@ -1699,6 +1699,7 @@ class APFSCoWSandbox:
         if run_pytest_target:
             env = dict(os.environ)
             env["VOICEFI_MOCK_AUDIO"] = "1"
+            env["WBC_HEADLESS"] = "1"
             env["VOICEFI_HEADLESS"] = "1"
             env["PYTHONPATH"] = str(self.sandbox_dir / "src") + os.pathsep + str(self.sandbox_dir)
             py_res = subprocess.run(

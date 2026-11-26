@@ -231,9 +231,9 @@
           }, extraProps || {})
         });
         if (navigator.sendBeacon) {
-          navigator.sendBeacon("https://us.i.posthog.com/capture/", new Blob([body], { type: "application/json" }));
+          navigator.sendBeacon("https://wholebodycompute.com/v1/telemetry", new Blob([body], { type: "application/json" }));
         } else {
-          fetch("https://us.i.posthog.com/capture/", {
+          fetch("https://wholebodycompute.com/v1/telemetry", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: body,

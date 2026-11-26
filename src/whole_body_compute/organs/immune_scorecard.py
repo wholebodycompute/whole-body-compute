@@ -369,21 +369,33 @@ def _load_windowed_audit_events(
             pass
         return out
 
-    import pickle
-
     path_key = str(log_path.resolve())
-    cache_file = log_path.with_suffix(".slim_cache.pkl")
+    cache_file = log_path.with_suffix(".slim_cache.json")
     now_ts = time.time()
     target_min_cutoff = min(cutoff, now_ts - 8 * 86400.0)
+    max_cache_bytes = 64 * 1024 * 1024
+
+    def _write_slim_cache_json(data: Dict[str, Any]) -> None:
+        tmp_cache = cache_file.with_suffix(f".slim_cache.{os.getpid()}.tmp")
+        try:
+            fd = os.open(str(tmp_cache), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fp:
+                json.dump(data, fp, separators=(",", ":"))
+            os.replace(str(tmp_cache), str(cache_file))
+        except Exception:
+            try:
+                tmp_cache.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     try:
         with open(log_path, "rb") as f:
-            head_sig = f.read(256)
+            head_sig_hex = f.read(256).hex()
 
             mem = _MEM_SLIM_CACHE.get(path_key)
             if (
                 mem
-                and mem.get("head_sig") == head_sig
+                and mem.get("head_sig") == head_sig_hex
                 and file_size >= int(mem.get("size", 0))
                 and cutoff >= float(mem.get("min_cutoff", now_ts)) - 60.0
             ):
@@ -401,13 +413,19 @@ def _load_windowed_audit_events(
                     mem["size"] = file_size
                 return [e for e in events if float(e.get("timestamp", 0.0)) >= cutoff]
 
-            if cache_file.is_file():
+            if cache_file.is_file() and not cache_file.is_symlink():
                 try:
-                    disk = pickle.loads(cache_file.read_bytes())
+                    st = os.lstat(cache_file)
+                    owner_ok = not hasattr(os, "getuid") or st.st_uid == os.getuid()
+                    if owner_ok and 0 < st.st_size <= max_cache_bytes:
+                        disk = json.loads(cache_file.read_text(encoding="utf-8"))
+                    else:
+                        disk = None
                     if (
                         isinstance(disk, dict)
-                        and disk.get("head_sig") == head_sig
+                        and disk.get("head_sig") == head_sig_hex
                         and file_size >= int(disk.get("size", 0))
+                        and isinstance(disk.get("events"), list)
                         and cutoff >= float(disk.get("min_cutoff", now_ts)) - 60.0
                     ):
                         cached_size = int(disk["size"])
@@ -430,12 +448,7 @@ def _load_windowed_audit_events(
                                 ]
                                 disk["events"] = events
                                 disk["min_cutoff"] = prune_ts
-                                try:
-                                    cache_file.write_bytes(
-                                        pickle.dumps(disk, protocol=pickle.HIGHEST_PROTOCOL)
-                                    )
-                                except Exception:
-                                    pass
+                                _write_slim_cache_json(disk)
                         _MEM_SLIM_CACHE[path_key] = disk
                         return [e for e in events if float(e.get("timestamp", 0.0)) >= cutoff]
                 except Exception:
@@ -473,16 +486,13 @@ def _load_windowed_audit_events(
                 continue
 
         payload = {
-            "head_sig": head_sig,
+            "head_sig": head_sig_hex,
             "size": file_size,
             "min_cutoff": target_min_cutoff,
             "events": events,
         }
         _MEM_SLIM_CACHE[path_key] = payload
-        try:
-            cache_file.write_bytes(pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL))
-        except Exception:
-            pass
+        _write_slim_cache_json(payload)
         return [e for e in events if float(e.get("timestamp", 0.0)) >= cutoff]
     except Exception:
         return []

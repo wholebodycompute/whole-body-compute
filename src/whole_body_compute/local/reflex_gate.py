@@ -1197,6 +1197,9 @@ class SpinalReflexGate:
         new_state = STATE_SHADOW
 
         if n_samples >= self.min_samples and n_pos >= self.min_per_class and n_neg >= self.min_per_class:
+            # Multi-repo `__global__` anchors span heterogeneous repo feature distributions,
+            # so evaluate decisive predictions at >=8% coverage (>=15% on single-repo gates).
+            eff_min_cov = 0.08 if repo_key == "__global__" else 0.15
             cv_acc, false_local_rate = _stratified_kfold_cv(
                 X,
                 y,
@@ -1206,7 +1209,7 @@ class SpinalReflexGate:
                 b_prior=prior_b,
                 low_margin=self.low_margin,
                 high_margin=self.high_margin,
-                min_decisive_coverage=0.15,
+                min_decisive_coverage=eff_min_cov,
                 balanced=True,
             )
             if (
@@ -1333,19 +1336,45 @@ class SpinalReflexGate:
 
     def _rolling_audit_accuracy_locked(self, gate_id: str, repo_key: str, window: int = 50) -> float:
         cur = self._conn.cursor()
-        cur.execute(
-            """
-            SELECT label, predicted_local FROM reflex_samples
-            WHERE gate_id = ? AND repo_key = ? AND predicted_local IS NOT NULL
-            ORDER BY sample_id DESC LIMIT ?
-            """,
-            (gate_id, repo_key, window),
-        )
+        if repo_key == "__global__":
+            cur.execute(
+                """
+                SELECT label, predicted_local FROM reflex_samples
+                WHERE gate_id = ? AND predicted_local IS NOT NULL
+                ORDER BY sample_id DESC LIMIT ?
+                """,
+                (gate_id, window),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT label, predicted_local FROM reflex_samples
+                WHERE gate_id = ? AND repo_key = ? AND predicted_local IS NOT NULL
+                ORDER BY sample_id DESC LIMIT ?
+                """,
+                (gate_id, repo_key, window),
+            )
         rows = cur.fetchall()
         if len(rows) < 10:
             return 1.0
         matches = sum(1 for r in rows if int(r["label"]) == int(r["predicted_local"]))
         return matches / float(len(rows))
+
+    def _sync_pending_scout_sentinel(self, pending_basenames: list[str] | None) -> None:
+        """Sync `$WBC_RUN_DIR/pending_reflex_scout` with active pending filenames for POSIX sh fast-path."""
+        if self.read_only or self.db_path == ":memory:":
+            return
+        try:
+            db_parent = Path(self.db_path).parent
+            run_dir = Path(os.environ.get("WBC_RUN_DIR") or (db_parent / "run"))
+            sentinel = run_dir / "pending_reflex_scout"
+            if pending_basenames:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                sentinel.write_text("|" + "|".join(dict.fromkeys(pending_basenames)) + "|\n", encoding="utf-8")
+            else:
+                sentinel.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def reset_circuit_breaker(self, gate_id: str, repo_key: str = "__global__") -> None:
         """Reset a TRIPPED gate back to SHADOW and re-evaluate."""
@@ -1426,7 +1455,7 @@ class SpinalReflexGate:
 
         if not self.read_only and decision.reason != "graduated_escalate":
             blob = np.asarray(features, dtype=np.float32).tobytes()
-            pred_int = 1 if decision.use_local else 0
+            pred_int = (1 if decision.use_local else 0) if decision.state == STATE_GRADUATED else -1
             now = time.time()
 
             def _insert_pending_scout() -> None:
@@ -1439,6 +1468,9 @@ class SpinalReflexGate:
                 )
 
             self._run_write_tx(_insert_pending_scout)
+            with self._lock:
+                rem_rows = self._conn.execute("SELECT DISTINCT target_path FROM pending_scouts").fetchall()
+            self._sync_pending_scout_sentinel([Path(str(r[0])).name for r in rem_rows if r[0]])
         return decision
 
     def observe_tool_turn(
@@ -1504,7 +1536,9 @@ class SpinalReflexGate:
                         for r in matched:
                             feat = np.frombuffer(r["feature_blob"], dtype=np.float32).copy()
                             row_gid = str(r["gate_id"] or "recon_scout_sufficiency")
-                            events.append((feat, False, row_gid, str(r["repo_key"]), bool(r["predicted_local"])))
+                            p_raw = r["predicted_local"]
+                            p_loc = None if (p_raw is None or int(p_raw) < 0) else bool(p_raw)
+                            events.append((feat, False, row_gid, str(r["repo_key"]), p_loc))
 
                 if g_filter is not None:
                     cur.execute(
@@ -1545,7 +1579,9 @@ class SpinalReflexGate:
                     for r in expired:
                         feat = np.frombuffer(r["feature_blob"], dtype=np.float32).copy()
                         row_gid = str(r["gate_id"] or "recon_scout_sufficiency")
-                        events.append((feat, True, row_gid, str(r["repo_key"]), bool(r["predicted_local"])))
+                        p_raw = r["predicted_local"]
+                        p_loc = None if (p_raw is None or int(p_raw) < 0) else bool(p_raw)
+                        events.append((feat, True, row_gid, str(r["repo_key"]), p_loc))
 
                 if async_retrain and self.db_path != ":memory:":
                     for feat, actual_ok, row_gid, r_key, pred_local in events:
@@ -1555,7 +1591,7 @@ class SpinalReflexGate:
                             r_key=r_key,
                             feat_bytes=feat.tobytes(),
                             label_int=1 if actual_ok else 0,
-                            pred_int=1 if pred_local else 0,
+                            pred_int=(1 if pred_local else 0) if pred_local is not None else None,
                             predicted_local=pred_local,
                             actual_local_ok=actual_ok,
                             is_audit=False,
@@ -1566,6 +1602,8 @@ class SpinalReflexGate:
                 return events, gates_repos_to_bg_retrain
 
             resolved_events, bg_pairs = self._run_write_tx(_resolve_scout_tx)
+            rem_rows = self._conn.execute("SELECT DISTINCT target_path FROM pending_scouts").fetchall()
+            self._sync_pending_scout_sentinel([Path(str(r[0])).name for r in rem_rows if r[0]])
 
         if async_retrain and self.db_path != ":memory:":
             for row_gid, r_key in bg_pairs:
@@ -1578,7 +1616,7 @@ class SpinalReflexGate:
                 r_key=r_key,
                 feat_bytes=feat.tobytes(),
                 label_int=1 if actual_ok else 0,
-                pred_int=1 if pred_local else 0,
+                pred_int=(1 if pred_local else 0) if pred_local is not None else None,
                 predicted_local=pred_local,
                 actual_local_ok=actual_ok,
                 is_audit=False,
@@ -2937,4 +2975,160 @@ def bootstrap_reflex_gates_from_logs(
             for m in metrics
         ],
     }
+
+
+def build_reflex_stats_report(db_path: Path | None = None) -> dict[str, object]:
+    """Build a structured scorecard of SpinalReflexGate performance (bootstrap vs. live, CV, FLR, canary audits, ROI)."""
+    target_db = Path(db_path) if db_path is not None else (get_wbc_data_dir() / "reflex_gates.sqlite")
+    if not target_db.is_file():
+        return {"db_path": str(target_db), "exists": False, "gates": [], "summary": {}}
+
+    conn = sqlite3.connect(str(target_db), timeout=5.0)
+    try:
+        models_rows = conn.execute(
+            """
+            SELECT gate_id, repo_key, state, sample_count, cv_accuracy, false_local_rate, consecutive_misses, updated_at
+            FROM reflex_models
+            ORDER BY sample_count DESC
+            """
+        ).fetchall()
+
+        sample_rows = conn.execute(
+            """
+            SELECT gate_id, label, is_audit, created_at
+            FROM reflex_samples
+            ORDER BY created_at ASC
+            """
+        ).fetchall()
+
+        pending_scouts = int(conn.execute("SELECT COUNT(*) FROM pending_scouts").fetchone()[0])
+        pending_stdout = int(conn.execute("SELECT COUNT(*) FROM pending_stdout_compactions").fetchone()[0])
+    finally:
+        conn.close()
+
+    by_gate: dict[str, list[tuple[int, int, float]]] = {}
+    for gid, lbl, is_aud, ts in sample_rows:
+        by_gate.setdefault(str(gid), []).append((int(lbl), int(is_aud), float(ts)))
+
+    model_index: dict[str, tuple[str, str, int, float, float, int]] = {}
+    for gid, rkey, state, scnt, cv, flr, misses, _upd in models_rows:
+        g_str = str(gid)
+        # Prefer __global__ if scored, otherwise highest-sample model for this gate_id
+        prev = model_index.get(g_str)
+        if prev is None or (str(rkey) == "__global__" and float(cv) > 0.0) or (float(cv) > prev[3] and int(scnt) >= 20):
+            model_index[g_str] = (str(rkey), str(state), int(scnt), float(cv), float(flr), int(misses))
+
+    now_ts = time.time()
+    gate_reports: list[dict[str, object]] = []
+    total_live_retries = 0
+    max_live_span_days = 0.0
+
+    for gid in sorted(set(by_gate.keys()) | set(model_index.keys())):
+        rows = by_gate.get(gid, [])
+        total = len(rows)
+        pos_cnt = sum(1 for lbl, _, _ in rows if lbl == 1)
+        neg_cnt = total - pos_cnt
+        audit_cnt = sum(1 for _, aud, _ in rows if aud == 1)
+
+        # Detect initial bulk bootstrap burst (>50 rows within first 120s)
+        bootstrap_cnt = 0
+        live_rows = rows
+        if rows:
+            first_ts = rows[0][2]
+            burst = [r for r in rows if r[2] <= first_ts + 120.0]
+            if len(burst) >= 50:
+                bootstrap_cnt = len(burst)
+                live_rows = [r for r in rows if r[2] > first_ts + 120.0]
+
+        live_cnt = len(live_rows)
+        live_retries = sum(1 for lbl, _, _ in live_rows if lbl == 0)
+        live_span_days = 0.0
+        if live_rows:
+            live_span_days = max(0.25, (now_ts - live_rows[0][2]) / 86400.0)
+            max_live_span_days = max(max_live_span_days, live_span_days)
+        total_live_retries += live_retries
+
+        rkey, state, _scnt, cv, flr, misses = model_index.get(gid, ("__global__", STATE_SHADOW, 0, 0.0, 1.0, 0))
+        gate_reports.append(
+            {
+                "gate_id": gid,
+                "best_scope": rkey,
+                "state": state,
+                "total_samples": total,
+                "bootstrap_samples": bootstrap_cnt,
+                "live_samples": live_cnt,
+                "live_retries": live_retries,
+                "label_1_local_ok": pos_cnt,
+                "label_0_needed_raw": neg_cnt,
+                "audit_samples": audit_cnt,
+                "cv_accuracy": round(cv, 4),
+                "false_local_rate": round(flr, 4),
+                "consecutive_misses": misses,
+            }
+        )
+
+    retries_per_day = (total_live_retries / max_live_span_days) if max_live_span_days > 0 else 0.0
+    proj_monthly_turns = round(retries_per_day * 30.0 * 0.95, 1)
+    proj_monthly_sec = round(proj_monthly_turns * 5.0, 1)
+    proj_monthly_direct_usd = round((proj_monthly_turns * 1000.0 / 1_000_000.0) * 5.0, 2)
+
+    return {
+        "db_path": str(target_db),
+        "exists": True,
+        "pending_scouts": pending_scouts,
+        "pending_stdout_compactions": pending_stdout,
+        "gates": gate_reports,
+        "summary": {
+            "live_span_days": round(max_live_span_days, 2),
+            "total_live_retries": total_live_retries,
+            "live_retries_per_day": round(retries_per_day, 2),
+            "projected_monthly_avoided_turns": proj_monthly_turns,
+            "projected_monthly_latency_saved_sec": proj_monthly_sec,
+            "projected_monthly_direct_usd": proj_monthly_direct_usd,
+        },
+    }
+
+
+def format_reflex_stats_table(report: dict[str, object]) -> str:
+    """Render a concise terminal scorecard for `body reflex stats`."""
+    if not report.get("exists"):
+        return f"SpinalReflexGate DB not found at {report.get('db_path')}"
+
+    lines = [
+        "",
+        "⚡ SpinalReflexGate Live Scorecard",
+        f"{'Gate':<32} {'State':<10} {'Scope':<18} {'Live (Boot)':<13} {'Retries':<8} {'CV Acc':<8} {'FLR':<7} {'Audits':<6}",
+        "-" * 108,
+    ]
+    for g in report.get("gates", []):
+        if not isinstance(g, dict):
+            continue
+        live_str = f"{g['live_samples']} ({g['bootstrap_samples']})"
+        lines.append(
+            f"{str(g['gate_id'])[:31]:<32} "
+            f"{str(g['state']):<10} "
+            f"{str(g['best_scope'])[:17]:<18} "
+            f"{live_str:<13} "
+            f"{int(g['live_retries']):<8} "
+            f"{float(g['cv_accuracy'])*100:>5.1f}%   "
+            f"{float(g['false_local_rate'])*100:>4.1f}%  "
+            f"{int(g['audit_samples']):<6}"
+        )
+
+    s = report.get("summary", {})
+    if isinstance(s, dict):
+        lines.append("-" * 108)
+        lines.append(
+            f"Live window: {s.get('live_span_days', 0)}d | "
+            f"Live retries: {s.get('total_live_retries', 0)} ({s.get('live_retries_per_day', 0)}/day) | "
+            f"Pending: scouts={report.get('pending_scouts', 0)}, stdout={report.get('pending_stdout_compactions', 0)}"
+        )
+        lines.append(
+            f"Projected @95% catch: ~{s.get('projected_monthly_avoided_turns', 0)} turns/mo "
+            f"(~{s.get('projected_monthly_latency_saved_sec', 0)}s/mo latency, "
+            f"~${s.get('projected_monthly_direct_usd', 0):.2f}/mo direct tokens)"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
 

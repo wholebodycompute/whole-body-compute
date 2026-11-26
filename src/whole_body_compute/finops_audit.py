@@ -317,48 +317,229 @@ def analyze_bloat_attribution(
     return primary_cause, avoidable_bloat_kb, sorted_tools, recommendations[:3]
 
 
+def _inspect_claude_jsonl_lightweight(jpath: Path) -> Optional[Dict[str, Any]]:
+    """Parse a Claude Code `*.jsonl` session file into a Community-safe CSI vitals dict."""
+    if not jpath.is_file():
+        return None
+    full_kb = round(os.path.getsize(jpath) / 1024.0, 1)
+    norm_lines: List[Dict[str, Any]] = []
+    tool_bytes: Dict[str, int] = {}
+    tool_calls: Dict[str, int] = {}
+    total_tool_bytes = 0
+    try:
+        with open(jpath, "r", encoding="utf-8", errors="ignore") as fh:
+            for raw_line in fh:
+                s = raw_line.strip()
+                if not s:
+                    continue
+                try:
+                    obj = json.loads(s)
+                except Exception:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+                role = str(obj.get("type") or obj.get("role") or msg.get("role") or "").lower()
+                ts_val = obj.get("timestamp") or obj.get("created_at") or msg.get("created_at")
+                norm_entry: Dict[str, Any] = {
+                    "type": "USER_INPUT" if role == "user" and not isinstance(msg.get("content"), list) else role.upper(),
+                    "created_at": ts_val,
+                }
+                norm_lines.append(norm_entry)
+
+                content = msg.get("content") if "content" in msg else obj.get("content")
+                line_b = len(s.encode("utf-8"))
+                if isinstance(content, list):
+                    for blk in content:
+                        if not isinstance(blk, dict):
+                            continue
+                        btype = str(blk.get("type") or "")
+                        if btype == "tool_use":
+                            tname = str(blk.get("name") or "tool")
+                            tool_calls[tname] = tool_calls.get(tname, 0) + 1
+                        elif btype == "tool_result":
+                            total_tool_bytes += line_b
+                            tname = "tool_result"
+                            tool_bytes[tname] = tool_bytes.get(tname, 0) + line_b
+    except Exception:
+        return None
+
+    if not norm_lines:
+        return None
+
+    steps = len(norm_lines)
+    early_sec = compute_avg_step_gap(norm_lines[: min(40, steps)])
+    recent_sec = compute_avg_step_gap(norm_lines[max(0, steps - 40) :])
+    inflation = round(recent_sec / early_sec, 2) if early_sec > 0.1 and recent_sec > 0.0 else 1.0
+    csi, tier = calculate_csi(
+        steps=steps,
+        full_size_kb=full_kb,
+        truncated_steps=0,
+        recent_step_sec=recent_sec,
+        early_step_sec=early_sec,
+    )
+    avoidable_kb = round(max(0.0, (total_tool_bytes / 1024.0) * 0.65), 1)
+    primary_cause = "UNFILTERED_TOOL_OUTPUT" if avoidable_kb >= 120.0 else "NOMINAL"
+    sorted_tools = [
+        {"tool": k, "calls": v, "kb": round(tool_bytes.get(k, 0) / 1024.0, 1)}
+        for k, v in sorted(tool_calls.items(), key=lambda kv: kv[1], reverse=True)[:5]
+    ]
+    cid = jpath.stem
+    return {
+        "conv_id": cid,
+        "short_id": cid[:8],
+        "harness": "claude_code",
+        "steps": steps,
+        "csi": csi,
+        "health_tier": tier,
+        "compact_size_kb": full_kb,
+        "full_size_kb": full_kb,
+        "truncated_steps": 0,
+        "early_step_sec": early_sec or 2.8,
+        "recent_step_sec": recent_sec or 2.8,
+        "latency_inflation_ratio": inflation,
+        "primary_bloat_cause": primary_cause,
+        "avoidable_bloat_kb": avoidable_kb,
+        "top_offender_tools": sorted_tools,
+        "recommendations": [],
+    }
+
+
+def _resolve_claude_projects_dir(claude_dir: Optional[Path] = None) -> Optional[Path]:
+    """Resolve Claude Code projects directory (`CLAUDE_CODE_DIR` or `~/.claude/projects`)."""
+    env_c = os.environ.get("CLAUDE_CODE_DIR", "").strip()
+    if claude_dir is not None:
+        return Path(claude_dir).expanduser()
+    if env_c:
+        return Path(env_c).expanduser()
+    # Respect isolated test sandboxes when AGY_BRAIN_DIR is overridden without CLAUDE_CODE_DIR
+    if os.environ.get("AGY_BRAIN_DIR") or os.environ.get("ANTIGRAVITY_BRAIN_DIR"):
+        return None
+    cand = (Path.home() / ".claude" / "projects").expanduser()
+    return cand if cand.is_dir() else None
+
+
 def inspect_conversation_lightweight(
     conv_id: Optional[str] = None,
     brain_dir: Optional[Path] = None,
+    claude_dir: Optional[Path] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Lightweight Community-safe conversation vitals inspection (`steps`, `csi`, `health_tier`,
-    `full_size_kb`, `latency_inflation_ratio`) with zero Pro module dependencies.
+    `full_size_kb`, `latency_inflation_ratio`) across Antigravity and Claude Code transcripts
+    with zero Pro module dependencies.
     """
     target_brain = resolve_brain_dir(brain_dir)
-    if not target_brain.is_dir():
-        return None
+    target_claude = _resolve_claude_projects_dir(claude_dir if brain_dir is None else claude_dir)
 
     raw_id = str(conv_id or "").strip()
     if raw_id.startswith("conversation://"):
         raw_id = raw_id.replace("conversation://", "", 1).strip()
 
-    c_dir: Optional[Path] = None
+    # 1. Explicit conv_id lookup across Antigravity and Claude Code
     if raw_id:
-        exact = target_brain / raw_id
-        if exact.is_dir():
-            c_dir = exact
-        else:
-            matches = [p for p in target_brain.glob(f"{raw_id}*") if p.is_dir()]
-            if matches:
-                c_dir = matches[0]
+        if target_brain.is_dir():
+            exact = target_brain / raw_id
+            c_dir = exact if exact.is_dir() else next((p for p in target_brain.glob(f"{raw_id}*") if p.is_dir()), None)
+            if c_dir is not None:
+                agy_res = _inspect_agy_dir_lightweight(c_dir)
+                if agy_res is not None:
+                    return agy_res
+        if target_claude is not None and target_claude.is_dir():
+            for jp in target_claude.rglob(f"{raw_id}*.jsonl"):
+                cl_res = _inspect_claude_jsonl_lightweight(jp)
+                if cl_res is not None:
+                    return cl_res
+        return None
 
-    if c_dir is None:
+    # 2. Active Antigravity env var (`AGY_CONVERSATION_ID` / `CONVERSATION_ID`)
+    if target_brain.is_dir():
         for env_k in ("AGY_CONVERSATION_ID", "CONVERSATION_ID"):
             val = os.environ.get(env_k)
             if val and (target_brain / val).is_dir():
-                c_dir = target_brain / val
-                break
+                agy_env = _inspect_agy_dir_lightweight(target_brain / val)
+                if agy_env is not None:
+                    return agy_env
 
-    if c_dir is None:
+    # 3. Compare newest Antigravity transcript vs newest Claude Code transcript (preferring cwd project)
+    best_agy_mtime = -1.0
+    best_agy_dir: Optional[Path] = None
+    if target_brain.is_dir():
         transcripts = glob.glob(
             str(target_brain / "*" / ".system_generated" / "logs" / "transcript.jsonl")
         )
-        if not transcripts:
-            return None
-        transcripts.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-        c_dir = Path(transcripts[0]).parents[2]
+        if transcripts:
+            transcripts.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            best_agy_mtime = os.path.getmtime(transcripts[0])
+            best_agy_dir = Path(transcripts[0]).parents[2]
 
+    best_claude_mtime = -1.0
+    best_claude_path: Optional[Path] = None
+    if target_claude is not None and target_claude.is_dir():
+        cwd_slug = re.sub(r"[^A-Za-z0-9]", "-", str(Path.cwd().resolve()))
+        cwd_proj = target_claude / cwd_slug
+        search_root = cwd_proj if cwd_proj.is_dir() and list(cwd_proj.glob("*.jsonl")) else target_claude
+        c_files = [p for p in search_root.rglob("*.jsonl") if p.is_file()]
+        if c_files:
+            c_files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            best_claude_mtime = os.path.getmtime(c_files[0])
+            best_claude_path = c_files[0]
+
+    if best_claude_path is not None and best_claude_mtime > best_agy_mtime:
+        cl_latest = _inspect_claude_jsonl_lightweight(best_claude_path)
+        if cl_latest is not None:
+            return cl_latest
+
+    if best_agy_dir is not None:
+        agy_latest = _inspect_agy_dir_lightweight(best_agy_dir)
+        if agy_latest is not None:
+            return agy_latest
+
+    if best_claude_path is not None:
+        return _inspect_claude_jsonl_lightweight(best_claude_path)
+
+    return None
+
+
+def list_conversations_lightweight(
+    limit: int = 5,
+    brain_dir: Optional[Path] = None,
+    claude_dir: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """List most recent Antigravity + Claude Code conversation vitals sorted by mtime."""
+    target_brain = resolve_brain_dir(brain_dir)
+    target_claude = _resolve_claude_projects_dir(claude_dir if brain_dir is None else claude_dir)
+    candidates: List[Tuple[float, str, Path]] = []
+
+    if target_brain.is_dir():
+        for tp_str in glob.glob(str(target_brain / "*" / ".system_generated" / "logs" / "transcript.jsonl")):
+            try:
+                candidates.append((os.path.getmtime(tp_str), "agy", Path(tp_str).parents[2]))
+            except OSError:
+                continue
+
+    if target_claude is not None and target_claude.is_dir():
+        for jp in target_claude.rglob("*.jsonl"):
+            if jp.is_file():
+                try:
+                    candidates.append((os.path.getmtime(jp), "claude", jp))
+                except OSError:
+                    continue
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    out: List[Dict[str, Any]] = []
+    max_n = max(1, int(limit or 5))
+    for _, kind, p in candidates:
+        res = _inspect_agy_dir_lightweight(p) if kind == "agy" else _inspect_claude_jsonl_lightweight(p)
+        if res is not None:
+            out.append(res)
+        if len(out) >= max_n:
+            break
+    return out
+
+
+def _inspect_agy_dir_lightweight(c_dir: Path) -> Optional[Dict[str, Any]]:
+    """Inspect a single Antigravity conversation directory."""
     logs_dir = c_dir / ".system_generated" / "logs"
     compact_p = logs_dir / "transcript.jsonl"
     full_p = logs_dir / "transcript_full.jsonl"
@@ -406,6 +587,7 @@ def inspect_conversation_lightweight(
     return {
         "conv_id": c_dir.name,
         "short_id": c_dir.name[:8],
+        "harness": "antigravity",
         "steps": steps,
         "csi": csi,
         "health_tier": tier,

@@ -91,6 +91,7 @@ class PalHarness:
 
         return bool(
             os.getenv("PYTEST_CURRENT_TEST") is not None
+            or os.getenv("WBC_TESTING") == "1"
             or os.getenv("VOICEFI_TESTING") == "1"
             or "pytest" in sys.modules
         )

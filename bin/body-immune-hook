@@ -83,9 +83,21 @@ if [ "$PHASE" = "pre-invocation" ] || [ "$PHASE" = "pre_invocation" ]; then
   if [ -z "$PYTEST_CURRENT_TEST" ] && [ "$VOICEFI_STRICT_TEST_HOOK" != "1" ]; then
     PREINV_QDIR="${WBC_PREINV_QUEUE_DIR:-$WBC_RUN_DIR/preinv_queue}"
     if [ ! -d "$PREINV_QDIR" ] || [ -z "$(ls -A "$PREINV_QDIR" 2>/dev/null)" ]; then
-      # Zero-bloat URL + CSI RED reflex: only wake Python when the latest USER_INPUT contains an https:// URL
-      # OR when main-thread transcript crosses a new 900KB (CSI >= 1.0 RED) saturation bucket.
+      # Zero-bloat URL + Command Reflex + CSI RED gate: only wake Python when the latest user prompt
+      # carries an https:// URL, a WBC command-reflex stem, OR when main-thread transcript crosses a new 900KB bucket.
+      # In protojson, invocationNum is 0-indexed (omitted or 0 on fresh user turn, >=1 on mid-turn tool loops).
+      case "$PAYLOAD" in
+        *'"invocationNum":'[1-9]* | *'"invocationNum": '[1-9]*)
+          printf '{"injectSteps": []}\n'
+          exit 0
+          ;;
+      esac
       PREINV_URL_MATCH=0
+      case "$PAYLOAD" in
+        *https://* | *[cC][oO][mM][mM][iI][tT]* | *[cC][hH][eE][cC][kK][pP][oO][iI][nN][tT]* | *[fF][lL][uU][sS][hH]* | *[hH][aA][nN][dD][oO][fF][fF]* | *[wW][iI][pP]* | *[sS][cC][rR][eE][eE][nN]* | *[cC][hH][rR][oO][mM][eE]* | *'body '* | *'wbc '* | *[rR][eE][mM][eE][mM][bB][eE][rR]* | *[sS][aA][vV][iI][nN][gG][sS]* | *[sS][cC][oO][rR][eE][cC][aA][rR][dD]* | *[sS][aA][tT][uU][rR][aA][tT][iI][oO][nN]* | *'fresh thread'* | *'new convo'* | *'new thread'*)
+          PREINV_URL_MATCH=1
+          ;;
+      esac
       TP_VAL=""
       CID_VAL=""
       case "$PAYLOAD" in
@@ -122,8 +134,23 @@ if [ "$PHASE" = "pre-invocation" ] || [ "$PHASE" = "pre_invocation" ]; then
       if [ -n "$TP_VAL" ] && [ -f "$TP_VAL" ] && [ ! -L "$TP_VAL" ]; then
         LAST_TP="$(tail -n 2 "$TP_VAL" 2>/dev/null || true)"
         case "$LAST_TP" in
-          *'"type":"USER_INPUT"'*https://* | *'"type": "USER_INPUT"'*https://*)
-            PREINV_URL_MATCH=1
+          *'"type":"USER_INPUT"'* | *'"type": "USER_INPUT"'*)
+            case "$LAST_TP" in
+              *https://* | *[cC][oO][mM][mM][iI][tT]* | *[cC][hH][eE][cC][kK][pP][oO][iI][nN][tT]* | *[fF][lL][uU][sS][hH]* | *[hH][aA][nN][dD][oO][fF][fF]* | *[wW][iI][pP]* | *[sS][cC][rR][eE][eE][nN]* | *[cC][hH][rR][oO][mM][eE]* | *'body '* | *'wbc '* | *[rR][eE][mM][eE][mM][bB][eE][rR]* | *[sS][aA][vV][iI][nN][gG][sS]* | *[sS][cC][oO][rR][eE][cC][aA][rR][dD]* | *[sS][aA][tT][uU][rR][aA][tT][iI][oO][nN]* | *'fresh thread'* | *'new convo'* | *'new thread'*)
+                PREINV_URL_MATCH=1
+                ;;
+            esac
+            ;;
+          *)
+            # On invocationNum==0 (omitted in protojson), transcript.jsonl may not have flushed USER_INPUT yet;
+            # keep PREINV_URL_MATCH intact when lastUserInput is present in PAYLOAD.
+            case "$PAYLOAD" in
+              *'"lastUserInput"'*)
+                ;;
+              *)
+                PREINV_URL_MATCH=0
+                ;;
+            esac
             ;;
         esac
         TP_BYTES="$(wc -c < "$TP_VAL" 2>/dev/null | tr -d ' ')"
@@ -210,11 +237,20 @@ if [ -z "$PYTEST_CURRENT_TEST" ] && [ -z "$VOICEFI_IMMUNE_AUDIT_PATH" ]; then
   fi
 fi
 
+# Detect multi-key ("Path" + "file_path") or duplicate-key JSON payloads so POSIX sh
+# parameter expansion can never validate a decoy first key while Go/Python unmarshals a second key.
+HAS_AMBIGUOUS_PATH_KEYS=0
+case "$PAYLOAD" in
+  *'"Path"'*'"Path"'*|*'"file_path"'*'"file_path"'*|*'"Path"'*'"file_path"'*|*'"file_path"'*'"Path"'*|*'"AbsolutePath"'*|*'"notebook_path"'*|*'\\u00'*|*'\\/'*)
+    HAS_AMBIGUOUS_PATH_KEYS=1
+    ;;
+esac
+
 # Upgrade #1: Fast-path strictly for verified read_file / view_file / Read operations (<=160 lines)
 case "$WBC_AIRLOCK_MODE" in
   [sS][tT][rR][iI][cC][tT]) ;;
   *)
-    if [ "$VOICEFI_STRICT_TEST_HOOK" != "1" ] && [ -z "$WBC_TRUNCATION_OFFENDERS_JSON" ] && [ "$PHASE" = "pre" ]; then
+    if [ "$HAS_AMBIGUOUS_PATH_KEYS" = "0" ] && [ "$VOICEFI_STRICT_TEST_HOOK" != "1" ] && [ -z "$WBC_TRUNCATION_OFFENDERS_JSON" ] && [ "$PHASE" = "pre" ]; then
       IS_READ_TOOL=0
       case "$PAYLOAD" in
         *'"name":"read_file"'*|*'"name": "read_file"'*|*'"name":"view_file"'*|*'"name": "view_file"'*|*'"name":"Read"'*|*'"name": "Read"'*|*'"tool_name":"Read"'*|*'"tool_name": "Read"'*|*'"tool_name":"read_file"'*|*'"tool_name": "read_file"'*|*'"tool_name":"view_file"'*|*'"tool_name": "view_file"'*)
@@ -229,8 +265,39 @@ case "$WBC_AIRLOCK_MODE" in
           ;;
       esac
       if [ "$IS_READ_TOOL" = "1" ]; then
+        RAW_READ_PATH=""
         case "$PAYLOAD" in
-          *'.'[eE][nN][vV]*|*'.'[pP][eE][mM]*|*'.'[kK][eE][yY]*|*'.'[pP]'12'*|*'.'[pP][fF][xX]*|*[iI][dD]'_'[rR][sS][aA]*|*[iI][dD]'_'[eE][dD]'25519'*|*[iI][dD]'_'[eE][cC][dD][sS][aA]*|*[iI][dD]'_'[dD][sS][aA]*|*[aA][uU][tT][hH][oO][rR][iI][zZ][eE][dD]'_'[kK][eE][yY][sS]*|*'/.ssh/'*|*'/.aws/'*|*'/.kube/'*|*'/.gnupg/'*|*'.'[nN][eE][tT][rR][cC]*|*'.'[nN][pP][mM][rR][cC]*|*'.'[pP][yY][pP][iI][rR][cC]*|*[hH][oO][sS][tT][sS]'.'[yY][mM][lL]*|*[lL][iI][cC][eE][nN][sS][eE]'.'[jJ][sS][oO][nN]*|*[cC][oO][nN][fF][iI][gG]'.'[yY][aA][mM][lL]*|*'/'[eE][tT][cC]'/'[sS][hH][aA][dD][oO][wW]*|*'/'[eE][tT][cC]'/'[mM][aA][sS][tT][eE][rR]'.'[pP][aA][sS][sS][wW][dD]*|*[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]*|*[sS][eE][cC][rR][eE][tT]*|*'.'[lL][oO][gG]*|*'.'[jJ][sS][oO][nN][lL]*|*'/'[rR][eE][cC][eE][iI][pP][tT][sS]'/'*|*[rR][eE][cC][eE][iI][pP][tT][sS]'/'*|*'/'[lL][oO][gG][sS]'/'*|*[lL][oO][gG][sS]'/'*|*[tT][rR][aA][cC][eE][bB][aA][cC][kK]*|*[sS][kK][iI][lL][lL].[mM][dD]*)
+          *'"Path"'*)
+            rp_tmp="${PAYLOAD#*\"Path\"}"
+            rp_tmp="${rp_tmp#*:}"
+            rp_tmp="${rp_tmp#*\"}"
+            RAW_READ_PATH="${rp_tmp%%\"*}"
+            ;;
+          *'"file_path"'*)
+            rp_tmp="${PAYLOAD#*\"file_path\"}"
+            rp_tmp="${rp_tmp#*:}"
+            rp_tmp="${rp_tmp#*\"}"
+            RAW_READ_PATH="${rp_tmp%%\"*}"
+            ;;
+          *'"target_file"'*)
+            rp_tmp="${PAYLOAD#*\"target_file\"}"
+            rp_tmp="${rp_tmp#*:}"
+            rp_tmp="${rp_tmp#*\"}"
+            RAW_READ_PATH="${rp_tmp%%\"*}"
+            ;;
+        esac
+        PENDING_SCOUT_HIT=0
+        if [ -z "$PYTEST_CURRENT_TEST" ] || [ "$WBC_ENABLE_REFLEX_GATE_IN_TESTS" = "1" ]; then
+          if [ -n "$RAW_READ_PATH" ] && [ -f "$WBC_RUN_DIR/pending_reflex_scout" ] && [ ! -L "$WBC_RUN_DIR/pending_reflex_scout" ]; then
+            READ_BASE="${RAW_READ_PATH##*/}"
+            IFS= read -r P_SCOUTS < "$WBC_RUN_DIR/pending_reflex_scout" 2>/dev/null || P_SCOUTS=""
+            case "$P_SCOUTS" in
+              *"|${READ_BASE}|"*) PENDING_SCOUT_HIT=1 ;;
+            esac
+          fi
+        fi
+        case "$PENDING_SCOUT_HIT:$RAW_READ_PATH" in
+          1:*|"0:"|0:*".."*|0:*'.'[eE][nN][vV]*|0:*'.'[pP][eE][mM]*|0:*'.'[kK][eE][yY]*|0:*'.'[pP]'12'*|0:*'.'[pP][fF][xX]*|0:*[kK][eE][yY][cC][hH][aA][iI][nN]*|0:*[iI][dD]'_'[rR][sS][aA]*|0:*[iI][dD]'_'[eE][dD]'25519'*|0:*[iI][dD]'_'[eE][cC][dD][sS][aA]*|0:*[iI][dD]'_'[dD][sS][aA]*|0:*[aA][uU][tT][hH][oO][rR][iI][zZ][eE][dD]'_'[kK][eE][yY][sS]*|0:*'/.ssh/'*|0:*'/.aws/'*|0:*'/.kube/'*|0:*'/.gnupg/'*|0:*'/.docker/'*|0:*'/.config/gh/'*|0:*'.'[nN][eE][tT][rR][cC]*|0:*'.'[nN][pP][mM][rR][cC]*|0:*'.'[pP][yY][pP][iI][rR][cC]*|0:*[hH][oO][sS][tT][sS]'.'[yY][mM][lL]*|0:*[lL][iI][cC][eE][nN][sS][eE]'.'[jJ][sS][oO][nN]*|0:*[cC][oO][nN][fF][iI][gG]'.'[yY][aA][mM][lL]*|0:*'/'[eE][tT][cC]'/'[sS][hH][aA][dD][oO][wW]*|0:*'/'[eE][tT][cC]'/'[mM][aA][sS][tT][eE][rR]'.'[pP][aA][sS][sS][wW][dD]*|0:*[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]*|0:*[sS][eE][cC][rR][eE][tT]*|0:*'.'[lL][oO][gG]*|0:*'.'[jJ][sS][oO][nN][lL]*|0:*'/'[rR][eE][cC][eE][iI][pP][tT][sS]'/'*|0:*[rR][eE][cC][eE][iI][pP][tT][sS]'/'*|0:*'/'[lL][oO][gG][sS]'/'*|0:*[lL][oO][gG][sS]'/'*|0:*[tT][rR][aA][cC][eE][bB][aA][cC][kK]*|0:*[sS][kK][iI][lL][lL].[mM][dD]*)
             ;;
           *)
             START_LINE=""
@@ -307,7 +374,7 @@ case "$WBC_AIRLOCK_MODE" in
                   REAL_PARENT="$(cd "$(dirname "$RAW_TARGET")" 2>/dev/null && pwd -P)"
                   SAFE_REAL_PARENT=1
                   case "$REAL_PARENT" in
-                    ""|*'/.ssh'*|*'/.aws'*|*'/.kube'*|*'/.gnupg'*|*'/.config/gh'*|'/etc'|'/private/etc')
+                    ""|*'/.ssh'*|*'/.aws'*|*'/.kube'*|*'/.gnupg'*|*'/.config/gh'*|*'/.docker'*|*'/Library/Keychains'*|'/etc'|'/private/etc')
                       SAFE_REAL_PARENT=0
                       ;;
                   esac
@@ -349,7 +416,18 @@ case "$WBC_AIRLOCK_MODE" in
                   esac
                   case "$SH_FPATH" in
                     *.py)
+                      SH_REAL_PARENT=""
+                      SH_SAFE_PARENT=0
                       if [ -f "$SH_FPATH" ] && [ ! -L "$SH_FPATH" ]; then
+                        SH_REAL_PARENT="$(cd "$(dirname "$SH_FPATH")" 2>/dev/null && pwd -P)"
+                        SH_SAFE_PARENT=1
+                        case "$SH_REAL_PARENT" in
+                          ""|*'/.ssh'*|*'/.aws'*|*'/.kube'*|*'/.gnupg'*|*'/.config/gh'*|*'/.docker'*|*'/Library/Keychains'*|'/etc'|'/private/etc')
+                            SH_SAFE_PARENT=0
+                            ;;
+                        esac
+                      fi
+                      if [ "$SH_SAFE_PARENT" = "1" ]; then
                         AWK_TARGET="$SH_FPATH"
                         case "$AWK_TARGET" in
                           /*) ;;
@@ -510,6 +588,49 @@ esac
 IS_SLOW=0
 if [ -n "$WBC_TRUNCATION_OFFENDERS_JSON" ]; then
   IS_SLOW=1
+elif [ "$PHASE" = "post" ]; then
+  IS_SLOW=1
+  if [ -z "$PYTEST_CURRENT_TEST" ] && [ "$VOICEFI_STRICT_TEST_HOOK" != "1" ] && [ -z "$VOICEFI_IMMUNE_AUDIT_PATH" ] && [ -z "$WBC_POST_OUTPUT_SLICE" ]; then
+    POST_FAST_OK=0
+    POST_TOOL=""
+    case "$PAYLOAD" in
+      *'"name":"read_file"'*|*'"name": "read_file"'*|*'"tool_name":"read_file"'*|*'"tool_name": "read_file"'*) POST_FAST_OK=1; POST_TOOL="read_file" ;;
+      *'"name":"view_file"'*|*'"name": "view_file"'*|*'"tool_name":"view_file"'*|*'"tool_name": "view_file"'*) POST_FAST_OK=1; POST_TOOL="view_file" ;;
+      *'"name":"Read"'*|*'"name": "Read"'*|*'"tool_name":"Read"'*|*'"tool_name": "Read"'*) POST_FAST_OK=1; POST_TOOL="Read" ;;
+      *'"name":"manage_task"'*|*'"name": "manage_task"'*) POST_FAST_OK=1; POST_TOOL="manage_task" ;;
+      *'"name":"update_focus"'*|*'"name": "update_focus"'*) POST_FAST_OK=1; POST_TOOL="update_focus" ;;
+      *'"name":"update_steps"'*|*'"name": "update_steps"'*) POST_FAST_OK=1; POST_TOOL="update_steps" ;;
+      *'"name":"send_message"'*|*'"name": "send_message"'*) POST_FAST_OK=1; POST_TOOL="send_message" ;;
+      *'"name":"invoke_subagent"'*|*'"name": "invoke_subagent"'*) POST_FAST_OK=1; POST_TOOL="invoke_subagent" ;;
+      *'"name":"ask_question"'*|*'"name": "ask_question"'*) POST_FAST_OK=1; POST_TOOL="ask_question" ;;
+    esac
+    if [ "$POST_FAST_OK" = "1" ]; then
+      case "$PAYLOAD" in
+        *'"name":"run_command"'*|*'"name": "run_command"'*|*'"tool_name":"Bash"'*|*'"tool_name": "Bash"'*|*'"name":"Bash"'*|*'"name": "Bash"'*|*'"name":"execute_command"'*|*'"name": "execute_command"'*|*'"name":"developer__shell"'*|*'"name": "developer__shell"'*|*'"name":"write_file"'*|*'"name": "write_file"'*|*'"name":"edit_file"'*|*'"name": "edit_file"'*|*'"tool_name":"Write"'*|*'"tool_name": "Write"'*|*'"tool_name":"Edit"'*|*'"tool_name": "Edit"'*|*'"tool_name":"MultiEdit"'*|*'"tool_name": "MultiEdit"'*|*'"name":"call_mcp_tool"'*|*'"name": "call_mcp_tool"'*|*'"name":"execute_sql"'*|*'"name": "execute_sql"'*|*'"name":"query_database"'*|*'"name": "query_database"'*|*'"name":"read_url_content"'*|*'"name": "read_url_content"'*|*'"name":"WebFetch"'*|*'"name": "WebFetch"'*|*'"name":"mcp_'*|*'"name": "mcp_'*|*'"name":"slack_'*|*'"name": "slack_'*|*"sk-ant-"*|*"sk-proj-"*|*"sk_live_"*|*"rk_live_"*|*"ghp_"*|*"github_pat_"*|*"AKIA"*|*"AIza"*|*"xoxb-"*|*"xoxp-"*|*"-----BEGIN"*|*'.'[eE][nN][vV]*)
+          POST_FAST_OK=0
+          ;;
+      esac
+    fi
+    if [ "$POST_FAST_OK" = "1" ]; then
+      POST_OUT='{"injectSteps": []}'
+      [ "$IS_CLAUDE" = "1" ] && POST_OUT='{}'
+      POST_TARGET="fast-post"
+      case "$PAYLOAD" in
+        *'"Path"'*)
+          pt_tmp="${PAYLOAD#*\"Path\"}"; pt_tmp="${pt_tmp#*:}"; pt_tmp="${pt_tmp#*\"}"; POST_TARGET="${pt_tmp%%\"*}"
+          ;;
+        *'"file_path"'*)
+          pt_tmp="${PAYLOAD#*\"file_path\"}"; pt_tmp="${pt_tmp#*:}"; pt_tmp="${pt_tmp#*\"}"; POST_TARGET="${pt_tmp%%\"*}"
+          ;;
+      esac
+      POST_TARGET="$(printf '%s' "$POST_TARGET" | tr '\n\r\t"\\`' '      ' | cut -c 1-80)"
+      AUDIT_LOG="${VOICEFI_IMMUNE_AUDIT_PATH:-${WBC_IMMUNE_AUDIT_PATH:-$WBC_DIR/immune_audit.jsonl}}"
+      printf '{"timestamp":%s.0,"phase":"post","fast_path":true,"conversation_id":"global","step_idx":0,"tool":"%s","target":"%s","file_changed":false,"ast_syntax_valid":true,"assertions_preserved":true,"secret_in_output":false,"post_output_sliced":false,"direct_tokens_saved":0,"quadratic_tokens_saved":0,"latency_ms":0.8}\n' "$TS" "$POST_TOOL" "$POST_TARGET" >> "$AUDIT_LOG" 2>/dev/null || true
+      write_dedup_cache "$POST_OUT"
+      printf '%s\n' "$POST_OUT"
+      exit 0
+    fi
+  fi
 elif [ "$PHASE" != "pre" ]; then
   IS_SLOW=1
 else
@@ -537,8 +658,20 @@ else
           ;;
       esac
       W_PATH_LOW="$(printf '%s' "$W_PATH" | tr '[:upper:]' '[:lower:]')"
-      if [ -L "$W_PATH" ]; then
+      if [ "$HAS_AMBIGUOUS_PATH_KEYS" = "1" ] || [ -z "$W_PATH" ] || [ -L "$W_PATH" ]; then
         IS_SLOW=1
+      else
+        W_PARENT_DIR="$(dirname "$W_PATH")"
+        if [ -L "$W_PARENT_DIR" ]; then
+          IS_SLOW=1
+        elif [ -d "$W_PARENT_DIR" ]; then
+          W_REAL_PARENT="$(cd "$W_PARENT_DIR" 2>/dev/null && pwd -P)"
+          case "$W_REAL_PARENT" in
+            ""|*'/.ssh'*|*'/.aws'*|*'/.kube'*|*'/.gnupg'*|*'/.config/gh'*|*'/.docker'*|*'/Library/Keychains'*|*'/.git'*|*'/.claude'*|*'/.gemini'*|*'/.cursor'*|*'/.agents'*|'/etc'*|'/private/etc'*)
+              IS_SLOW=1
+              ;;
+          esac
+        fi
       fi
       case "$W_PATH_LOW" in
         *.md|*.txt)

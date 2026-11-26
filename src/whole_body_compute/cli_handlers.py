@@ -10,13 +10,63 @@ import json
 import os
 import sys
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from whole_body_compute.cli_parser import SINGLE_ORGAN_DISPATCH
 from whole_body_compute.doctor import (
     check_organ_immune_system,
     format_organ_doctor_table,
 )
+
+
+def _resolve_pro_gate_key_and_pitch(cmd: str) -> tuple[str, str]:
+    """Map CLI command to canonical PostHog feature gate key and tailored unlock pitch."""
+    if cmd in ("team-sync", "hive-sync", "share-exemplars"):
+        return (
+            "team_sync",
+            "Unlock Shared Team Exemplar Sync (`body team-sync`), CFO Multi-Seat Rollups & Policy:",
+        )
+    if cmd in ("memory", "hippocampus"):
+        return (
+            "hippocampus_memory",
+            "Unlock Hippocampus Memory Graph (`--remember`, `--recall`, `--deja-vu`) & State Capsules:",
+        )
+    if cmd in ("sleep", "rem-sleep"):
+        return (
+            "rem_sleep_lora",
+            "Unlock 3:30 AM Nocturnal REM LoRA Distillation, Habit Promotion & Unlimited BBB:",
+        )
+    return (
+        "glymphatic_flush",
+        "Unlock Zero-Click Glymphatic Flush (`body flush --auto`), Hippocampus & Unlimited BBB:",
+    )
+
+
+def _build_local_roi_proof_lines() -> list[str]:
+    """Build personalized local token/savings proof lines when local ledger data exists."""
+    try:
+        from whole_body_compute.shield import get_savings_summary
+
+        s_all = get_savings_summary(window="all")
+        total_gates = int(s_all.get("total_events", 0) or 0)
+        cum_saved = int(s_all.get("cumulative_tokens_saved", 0) or 0)
+        usd_saved = float(s_all.get("estimated_usd_saved") or s_all.get("api_dollars_saved_est", 0.0) or 0.0)
+        if total_gates > 0 and cum_saved > 0:
+            tok_label = (
+                f"{cum_saved / 1_000_000:.2f}M"
+                if cum_saved >= 1_000_000
+                else f"{cum_saved / 1_000:.1f}K"
+            )
+            line1 = f"Your Local Shield Ledger: {total_gates:,} BBB gates • {tok_label} tokens shielded"
+            line2 = f"  • Est. Cloud Spend Already Saved: ${usd_saved:.2f} (Pro is $29/mo -> instant ROI)"
+            return [f"║  {line1:<74} ║", f"║  {line2:<74} ║"]
+    except Exception:
+        pass
+    return [
+        "║  SWE-bench_Verified (k=3, 60 Trials, N=10 Repos, 100% Pass^3 30/30):         ║",
+        "║    • 1.48x Context (-32.4%, 203.08M->137.23M) • 1.52x Net Context (-34.3%)   ║",
+        "║    • 1.34x Billed Input Runway (-25.6%, -16.7% med) • -18.8% Agent Turns    ║",
+    ]
 
 
 def render_pro_upgrade_card(
@@ -33,17 +83,38 @@ def render_pro_upgrade_card(
     required_tier = "team" if is_team_cmd else "pro"
     tier_label = "Team Hive-Mind ($79/seat/mo)" if is_team_cmd else "Pro ($29/mo)"
     monthly_usd = 79.0 if is_team_cmd else 29.0
+    gate_key, feature_pitch = _resolve_pro_gate_key_and_pitch(cmd)
     upgrade_url = "https://wholebodycompute.com/pricing"
+    checkout_url = f"https://wholebodycompute.com/checkout/{required_tier}"
+    open_checkout_cmd = (
+        "body upgrade --open team" if is_team_cmd else "body upgrade --open"
+    )
     activate_cmd = "body license --activate <POLAR_KEY>"
     raw_msg = str(exc).strip() or f"Requires Whole Body Compute {tier_label} -> {upgrade_url}"
     companion_missing = False
+    cohort_id = ""
 
     try:
-        from whole_body_compute.license import LicenseManager
+        from whole_body_compute.procedural_telemetry import TelemetryConsentManager
+
+        cohort_id = TelemetryConsentManager().get_cohort_id()
+    except Exception:
+        cohort_id = ""
+
+    try:
+        from whole_body_compute.license import LicenseManager, build_checkout_url
         from whole_body_compute.pro_loader import discover_pro_plugin_status
 
-        gate_key = "team_sync" if is_team_cmd else "glymphatic_flush"
-        if LicenseManager().is_feature_allowed(gate_key) and not discover_pro_plugin_status().get("distribution_installed"):
+        checkout_url = build_checkout_url(
+            required_tier,
+            surface=f"cli_paywall_{cmd}",
+            cohort_id=cohort_id or None,
+        )
+        if cohort_id:
+            upgrade_url = f"https://wholebodycompute.com/pricing?cohort_id={cohort_id}"
+
+        gate_res = LicenseManager().check_feature_gate(gate_key)
+        if gate_res.get("allowed") and not discover_pro_plugin_status().get("distribution_installed"):
             companion_missing = True
             activate_cmd = "body license --reinstall-wheel"
             raw_msg = (
@@ -57,12 +128,15 @@ def render_pro_upgrade_card(
         payload_out = {
             "status": "upgrade_required",
             "command": cmd,
+            "feature": gate_key,
             "required_tier": required_tier,
             "tier_label": tier_label,
             "monthly_usd": monthly_usd,
             "message": raw_msg,
+            "open_checkout_command": open_checkout_cmd,
             "activate_command": activate_cmd,
             "upgrade_url": upgrade_url,
+            "checkout_url": checkout_url,
             "swebench_k3_benchmark": {
                 "context_efficiency_multiple": 1.48,
                 "context_reduction_pct": 32.4,
@@ -80,6 +154,12 @@ def render_pro_upgrade_card(
         return 2
 
     cmd_display = f"`body {cmd}`"
+    short_checkout = (
+        f"https://wholebodycompute.com/checkout/{required_tier}?cohort_id={cohort_id}"
+        if cohort_id
+        else f"https://wholebodycompute.com/checkout/{required_tier}"
+    )
+    proof_lines = _build_local_roi_proof_lines()
     lines = [
         "",
         "╔══════════════════════════════════════════════════════════════════════════════╗",
@@ -88,18 +168,16 @@ def render_pro_upgrade_card(
         f"║  Command:        {cmd_display:<59} ║",
         f"║  Required Tier:  {tier_label:<59} ║",
         "╠══════════════════════════════════════════════════════════════════════════════╣",
-        "║  Open-Core Community includes unlimited `body audit-spend`, `body doctor`,  ║",
+        "║  Open-Core Community includes unlimited `body audit-spend`, `body context`,  ║",
         "║  `body begin`, `body eyes`, `body hands`, 50/day BBB slices & 25 offloads.  ║",
         "║                                                                              ║",
-        "║  SWE-bench_Verified (k=3, 60 Trials, N=10 Repos, 100% Pass^3 30/30):         ║",
-        "║    • 1.48x Context (-32.4%, 203.08M->137.23M) • 1.52x Net Context (-34.3%)   ║",
-        "║    • 1.34x Billed Input Runway (-25.6%, -16.7% med) • -18.8% Agent Turns    ║",
+        *proof_lines,
         "║                                                                              ║",
-        "║  Unlock Glymphatic Context Flush, 3:30 AM REM LoRA Distillation, Unlimited  ║",
-        "║  In-Flight BBB Hooks, Promoted Recipes & Team Hive-Mind Sync:               ║",
+        f"║  {feature_pitch:<74} ║",
         "║                                                                              ║",
-        f"║    1. Upgrade Online:    {upgrade_url:<51} ║",
-        f"║    2. Activate Key:      {activate_cmd:<51} ║",
+        f"║    1. Open Checkout:   {open_checkout_cmd:<53} ║",
+        f"║    2. Direct URL:      {short_checkout:<53} ║",
+        f"║    3. Activate Key:    {activate_cmd:<53} ║",
         "╚══════════════════════════════════════════════════════════════════════════════╝",
         "",
     ]
@@ -186,6 +264,7 @@ def cmd_commit(args: argparse.Namespace) -> int:
         no_llm=args.no_llm,
         wip=args.wip,
         session_id=args.session_id,
+        zone=getattr(args, "zone", None),
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
@@ -284,15 +363,111 @@ def _require_pro_cli_feature(feature_key: str = "glymphatic_flush") -> None:
         raise ProUpgradeRequiredError(gate.get("upgrade_nudge") or UPGRADE_MESSAGE)
 
 
+def _is_community_pro_gated(feature_key: str = "glymphatic_flush") -> bool:
+    """Return True when running in Community / Open-Core mode without an active Pro+ license."""
+    import os
+
+    from whole_body_compute.license import LicenseManager, _is_isolated_home_env, _is_open_core_enforced
+
+    if "PYTEST_CURRENT_TEST" in os.environ and not _is_open_core_enforced() and os.environ.get("WBC_FORCE_COMMUNITY") != "1":
+        return False
+    mgr = LicenseManager()
+    if not (_is_open_core_enforced() or _is_isolated_home_env() or mgr.license_path.is_file()):
+        return False
+    return not bool(mgr.is_feature_allowed(feature_key, emit_telemetry=False))
+
+
+def _render_community_context_banner(metrics_dict: dict[str, Any]) -> str:
+    """Render read-only Community CSI banner with a contextual Pro handoff teaser."""
+    tier = str(metrics_dict.get("health_tier", "GREEN"))
+    badge = {"GREEN": "🟢 GREEN", "YELLOW": "🟡 YELLOW", "RED": "🔴 RED"}.get(tier, tier)
+    csi = float(metrics_dict.get("csi", 0.0))
+    steps = int(metrics_dict.get("steps", 0))
+    kb = float(metrics_dict.get("full_size_kb", 0.0))
+    infl = float(metrics_dict.get("latency_inflation_ratio", 1.0))
+    short_id = str(metrics_dict.get("short_id") or metrics_dict.get("conv_id", "")[:8])
+    harness_raw = str(metrics_dict.get("harness") or "antigravity")
+    harness_label = "Claude Code" if harness_raw == "claude_code" else "Antigravity"
+    lines = [
+        f"\n🧠 [Cognitive Thermal Sentry - {harness_label} `{short_id}`] Status: {badge} (CSI {csi:.3f})",
+        "─" * 80,
+        f"  • Steps / Transcript: {steps} steps • {kb:.1f} KB • Turn Latency Inflation: {infl:.2f}x",
+        f"  • Bloat Attribution:  {metrics_dict.get('primary_bloat_cause', 'NOMINAL')} "
+        f"({float(metrics_dict.get('avoidable_bloat_kb', 0.0)):.1f} KB avoidable)",
+    ]
+    if tier in ("YELLOW", "RED"):
+        lines.append(
+            "  • 🔒 Pro ($29/mo):    Thread is saturated! Unlock 1-click `body flush --auto` "
+            "handoff -> `body upgrade --open`"
+        )
+    else:
+        lines.append(
+            "  • 💡 Pro ($29/mo):    Unlock zero-click `body flush --auto` StateCapsule handoffs "
+            "when CSI >= 0.70 -> `body upgrade --open`"
+        )
+    lines.append("─" * 80 + "\n")
+    return "\n".join(lines)
+
+
 def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> Optional[int]:
     """
     Dispatch Cognitive Sentry, FinOps, Airlock, Hippocampus, Foveal Eyes, and single-organ commands.
     Returns an integer exit code if handled, or None if `cmd` was not matched.
     """
     if cmd in ("context", "csi", "watchdog"):
-        _require_pro_cli_feature("glymphatic_flush")
-        if getattr(args, "by_model", False):
+        show_all = getattr(args, "all", False)
+        show_insights = getattr(args, "insights", False)
+        target_cid = getattr(args, "conv_id", None)
+        auto_flush = getattr(args, "auto", False)
+        by_model = getattr(args, "by_model", False)
+        is_json = getattr(args, "json", False)
+
+        # Gate Pro-only submodes (`--auto` flush, `--insights`, `--models`), while letting read-only CSI run free!
+        if auto_flush or show_insights or by_model:
+            _require_pro_cli_feature("glymphatic_flush")
+        if by_model:
             return _handle_by_model_leaderboard(args)
+
+        if _is_community_pro_gated("glymphatic_flush"):
+            from whole_body_compute.finops_audit import (
+                inspect_conversation_lightweight,
+                list_conversations_lightweight,
+            )
+
+            if show_all:
+                items = list_conversations_lightweight(limit=int(getattr(args, "limit", 5) or 5))
+                for it in items:
+                    it["pro_flush_locked"] = True
+                if is_json:
+                    print(json.dumps(items, indent=2))
+                elif not items:
+                    print("\n⚪ No active Antigravity or Claude Code conversations found.\n")
+                else:
+                    for it in items:
+                        print(_render_community_context_banner(it))
+                return 0
+
+            lw = inspect_conversation_lightweight(conv_id=target_cid)
+            if not lw:
+                if is_json:
+                    print(
+                        json.dumps(
+                            {"status": "not_found", "message": "No conversation transcript found"},
+                            indent=2,
+                        )
+                    )
+                else:
+                    print(
+                        "\n⚪ No active Antigravity or Claude Code conversation transcript found.\n"
+                    )
+                return 1
+            lw["pro_flush_locked"] = True
+            lw["upgrade_hint"] = "Run `body upgrade --open` ($29/mo Pro) to unlock 1-click `body flush --auto` handoffs."
+            if is_json:
+                print(json.dumps(lw, indent=2))
+            else:
+                print(_render_community_context_banner(lw))
+            return 0 if lw.get("health_tier") != "RED" else 1
 
         from whole_body_compute.organs.cognitive_sentry import (
             CognitiveThermalSentry,
@@ -302,11 +477,6 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
         )
 
         sentry = CognitiveThermalSentry()
-        show_all = getattr(args, "all", False)
-        show_insights = getattr(args, "insights", False)
-        target_cid = getattr(args, "conv_id", None)
-        auto_flush = getattr(args, "auto", False)
-        is_json = getattr(args, "json", False)
 
         if show_insights:
             insights = sentry.generate_longitudinal_insights(limit=getattr(args, "limit", 25))
@@ -569,6 +739,11 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
         top = getattr(args, "top", 5)
         export_path = getattr(args, "export_receipt", None)
         is_json = getattr(args, "json", False)
+        import_paths = getattr(args, "import_paths", None) or []
+        use_cloud_api = getattr(args, "cloud", False)
+        admin_key = getattr(args, "anthropic_admin_key", None) or (
+            os.environ.get("ANTHROPIC_ADMIN_API_KEY") if use_cloud_api else None
+        )
 
         audit = audit_historical_spend(
             days=days,
@@ -576,6 +751,20 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
             seats=seats,
             top=top,
         )
+
+        cloud_sources = []
+        if import_paths or use_cloud_api or admin_key:
+            from whole_body_compute.cloud_audit import (
+                fetch_anthropic_cloud_usage,
+                format_cloud_audit_section,
+                parse_cloud_export,
+            )
+
+            for imp in import_paths:
+                cloud_sources.append(parse_cloud_export(imp, days=days, price_per_m=price_per_m))
+            if use_cloud_api or admin_key:
+                cloud_sources.append(fetch_anthropic_cloud_usage(admin_key or "", days=days))
+            audit["cloud_usage"] = cloud_sources
 
         if export_path:
             out_p = Path(export_path)
@@ -587,6 +776,8 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
             print(json.dumps(audit, indent=2))
         else:
             print(format_finops_audit_receipt(audit))
+            if cloud_sources:
+                print(format_cloud_audit_section(cloud_sources))
             if export_path:
                 print(f"📄 Exported shareable Markdown FinOps ROI receipt to `{export_path}`\n")
         return 0
@@ -1061,6 +1252,25 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
                 return 0
 
     if cmd in ("eyes", "hands"):
+        if getattr(args, "install_app", False):
+            from whole_body_compute.daemon import install_wbc_eyes_app, manage_launchd_daemon
+
+            as_json = bool(getattr(args, "json", False))
+            install_res = install_wbc_eyes_app(
+                url=getattr(args, "app_url", None),
+                expected_sha256=getattr(args, "app_sha256", None),
+                system=bool(getattr(args, "system", False)),
+                from_source=bool(getattr(args, "from_source", False)),
+            )
+            if install_res.get("status") == "ok" and os.environ.get("WBC_SKIP_DAEMON_WIRE") != "1":
+                daemon_res = manage_launchd_daemon(action="install")
+                install_res["daemon_install"] = daemon_res
+            if as_json:
+                print(json.dumps(install_res, indent=2))
+            else:
+                print(install_res.get("message", ""))
+            return 0 if install_res.get("status") == "ok" else 1
+
         if getattr(args, "daemon", False):
             from whole_body_compute.integrations.foveal_vision import run_foveal_daemon
 
@@ -1108,6 +1318,7 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
         if has_target:
             from whole_body_compute.integrations.foveal_vision import (
                 FovealVisionEngine,
+                FovealWindowSnapshot,
                 send_foveal_socket_request,
             )
 
@@ -1144,24 +1355,41 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
                 req_payload["no_cursor"] = True
 
             socket_resp = send_foveal_socket_request(req_payload)
-            if socket_resp is not None and socket_resp.get("status") != "error":
-                if getattr(args, "json", False):
-                    socket_resp["organ_num"] = organ_num
-                    socket_resp["name"] = organ_name
-                    socket_resp["subsystem"] = organ_sub
-                    socket_resp["status"] = "pass"
-                    print(json.dumps(socket_resp, indent=2))
-                else:
-                    print(f"[Foveal Vision (Daemon)] App: {socket_resp.get('app_name')} | Title: {socket_resp.get('window_title')}")
-                    if socket_resp.get("last_messages"):
-                        print("Latest Messages:")
-                        for msg in socket_resp.get("last_messages")[-5:]:
-                            print(f'  - "{msg}"')
-                    elif socket_resp.get("last_message"):
-                        print(f"Last Message: \"{socket_resp.get('last_message')}\"")
-                return 0
+            if socket_resp is not None:
+                # Never silently bypass Kill Switch, Blindfold, or Auth refusals from WBC Eyes.app
+                is_authoritative_block = bool(
+                    socket_resp.get("kill_switch")
+                    or socket_resp.get("paused")
+                    or socket_resp.get("security_blocked")
+                    or socket_resp.get("auth_failed")
+                    or (
+                        isinstance(socket_resp.get("actuation"), dict)
+                        and socket_resp["actuation"].get("security_blocked")
+                    )
+                )
+                if socket_resp.get("status") == "error" and is_authoritative_block:
+                    if getattr(args, "json", False):
+                        socket_resp["organ_num"] = organ_num
+                        socket_resp["name"] = organ_name
+                        socket_resp["subsystem"] = organ_sub
+                        print(json.dumps(socket_resp, indent=2))
+                    else:
+                        print(f"[WBC Eyes Blocked] {socket_resp.get('error', 'Request refused')}")
+                    return 1
+                if socket_resp.get("status") != "error":
+                    if getattr(args, "json", False):
+                        socket_resp["organ_num"] = organ_num
+                        socket_resp["name"] = organ_name
+                        socket_resp["subsystem"] = organ_sub
+                        socket_resp["status"] = "pass"
+                        print(json.dumps(socket_resp, indent=2))
+                    else:
+                        max_show = getattr(args, "max_elements", None) or 40
+                        snap_sock = FovealWindowSnapshot.from_dict(socket_resp)
+                        print(snap_sock.to_context_block(max_elements=max_show))
+                    return 0
 
-            capture_kwargs = {}
+            capture_kwargs = {"_skip_socket": True}
             if getattr(args, "allow_focus_steal", False):
                 capture_kwargs["allow_focus_steal"] = True
             if getattr(args, "no_cursor", False):

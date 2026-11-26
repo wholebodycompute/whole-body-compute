@@ -513,6 +513,7 @@ FEATURE_MIN_TIER: Dict[str, str] = {
     "unlimited_bbb": "pro",
     "unlimited_silicon_offload": "community",
     "unlimited_anti_cheat_guard": "community",
+    "hippocampus_memory": "pro",
     "glymphatic_flush": "pro",
     "rem_sleep_lora": "pro",
     "cephalic_prewarm": "pro",
@@ -729,10 +730,19 @@ class LicenseManager:
         activation_id: Optional[str] = None
         benefit_id: Optional[str] = None
         expires_at: Optional[str] = None
+        issued_at: Optional[str] = None
         metadata: Dict[str, Any] = {}
         status_val = "granted"
+        is_signed_token = clean_key.startswith(OFFLINE_LICENSE_TOKEN_PREFIX)
 
-        if not offline:
+        if is_signed_token:
+            signed_claims = verify_signed_offline_license_token(clean_key)
+            metadata = {"tier": signed_claims["tier"], "signed_offline": True}
+            expires_at = signed_claims.get("expires_at")
+            issued_at = signed_claims.get("issued_at")
+            activation_id = str(signed_claims.get("activation_id") or "offline_ed25519")
+            benefit_id = signed_claims.get("benefit_id")
+        elif not offline:
             from whole_body_compute.pro_loader import validate_http_endpoint_url
 
             api_base = os.environ.get("WBC_POLAR_API_BASE", POLAR_API_BASE).rstrip("/")
@@ -886,8 +896,17 @@ class LicenseManager:
         tier = _resolve_tier_from_polar_key_or_benefit(clean_key, benefit_id=benefit_id, metadata=metadata)
         receipt_hash = hashlib.sha256(f"{tier}:{clean_key}:{activation_id or 'local'}".encode("utf-8")).hexdigest()[:16]
         masked_key = _mask_license_key(clean_key)
-        is_signed_offline = bool(offline and clean_key.startswith(OFFLINE_LICENSE_TOKEN_PREFIX))
-        mode = "polar_verified" if not offline else ("polar_offline_signed" if is_signed_offline else "polar_offline")
+        is_signed_offline = bool(is_signed_token)
+        mode = "polar_offline_signed" if is_signed_offline else ("polar_verified" if not offline else "polar_offline")
+        act_lower = str(activation_id or "").lower()
+        is_trial = bool(
+            expires_at
+            and (
+                "trial" in act_lower
+                or act_lower.startswith("comp_")
+                or str(metadata.get("plan_type") or "").lower().startswith("pro_trial")
+            )
+        )
 
         payload = {
             "tier": tier,
@@ -898,7 +917,9 @@ class LicenseManager:
             "activation_id": activation_id,
             "benefit_id": benefit_id,
             "organization_id": org_id or None,
+            "issued_at": issued_at,
             "expires_at": expires_at,
+            "is_trial": is_trial,
             "receipt_hash": receipt_hash,
             "updated_at": int(time.time()),
         }

@@ -3931,6 +3931,7 @@ def run_multi_harness_finops_audit(
     workspace_dir: Optional[Path] = None,
     home_dir: Optional[Path] = None,
     explicit_price_override: bool = False,
+    unshielded_only: bool = False,
 ) -> Dict[str, Any]:
     now = time.time()
     window_seconds = max(1, int(days)) * 86400.0 if days > 0 else 0.0
@@ -4102,6 +4103,8 @@ def run_multi_harness_finops_audit(
         + continue_recs
         + zed_recs
     )
+    if unshielded_only:
+        all_records = [r for r in all_records if not r.get("wbc_shielded")]
     all_records.sort(
         key=lambda r: (r.get("exact_api_spend_usd", 0.0), r.get("hal_saved_usd", 0.0), r["estimated_spend_usd"]),
         reverse=True,
@@ -4492,6 +4495,8 @@ def run_multi_harness_finops_audit(
         ),
         2,
     )
+    if unshielded_only:
+        wbc_shield_telemetry["wbc_active_on_machine"] = False
     if wbc_shield_telemetry.get("wbc_active_on_machine") and wbc_shield_telemetry.get("shielded_sessions", 0) > 0:
         eff_saved_total = unshielded_projected_saved
         eff_wbc_spend = round(max(0.0, exact_api_spend_total - eff_saved_total), 2)
@@ -4769,6 +4774,7 @@ def format_standalone_receipt(
             lines.append(
                 f"  {BOLD}Measured Hook Shield{RESET}      {GREEN}{meas_slices:,} bounded slices{RESET} • {_fmt_tok(meas_dtok)} direct tok blocked"
             )
+        lines.append(f"  {BOLD}Estimated Limit Multiplier{RESET} {quota_str}")
         if unwired_save > 0 and unwired_harnesses:
             uw_lbl = ", ".join(h.replace("_", "-") for h in unwired_harnesses[:2])
             lines.append(
@@ -5121,6 +5127,7 @@ def format_standalone_receipt(
             divider,
             f"{BOLD}{GREEN}Start Saving Now - Copy & Paste to Install (100% Free Open-Core):{RESET}",
             f"  • {BOLD}Install:{RESET}   {CYAN}curl -fsSL https://wholebodycompute.com/begin/audit | sh{RESET}",
+            f"               {DIM}Wires automatic hooks into your active agents - just restart them & code normally.{RESET}",
             f"  • {BOLD}Alt:{RESET}       {DIM}uv tool install whole-body-compute && body begin{RESET}",
             f"  • {BOLD}Share:{RESET}     {DIM}curl -sSL https://wholebodycompute.com/audit.py | python3{RESET}",
             f"  • {BOLD}Privacy:{RESET}   {DIM}Read-only scan; 1 anon ping (--offline or DO_NOT_TRACK=1){RESET}",
@@ -5334,8 +5341,14 @@ def _emit_audit_telemetry(audit: Dict[str, Any], no_telemetry: bool = False) -> 
         },
     }
     try:
+        custom_host = os.environ.get("POSTHOG_HOST", "").strip()
+        ingest_target = (
+            f"{custom_host.rstrip('/')}/capture/"
+            if custom_host
+            else "https://wholebodycompute.com/v1/telemetry"
+        )
         req = urllib.request.Request(
-            f"{host}/capture/",
+            ingest_target,
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json", "User-Agent": "WholeBodyCompute-Audit/1.0"},
             method="POST",
@@ -5344,6 +5357,180 @@ def _emit_audit_telemetry(audit: Dict[str, Any], no_telemetry: bool = False) -> 
             pass
     except Exception:
         pass
+
+
+def _collect_standalone_cloud_sources(
+    import_paths: List[str],
+    admin_key: Optional[str],
+    use_cloud_api: bool,
+    days: int = 30,
+    price_per_m: float = 5.0,
+) -> List[Dict[str, Any]]:
+    """Zero-dependency cloud export & Anthropic Admin API collector for standalone `audit.py`."""
+    import csv as _csv
+    import datetime as _dt
+    import io as _io
+    import urllib.error as _uerr
+    import urllib.parse as _uparse
+    import urllib.request as _ureq
+    import zipfile as _zf
+
+    def _parse_dt(raw: Any) -> Optional[_dt.datetime]:
+        if not raw:
+            return None
+        s = str(raw).strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        try:
+            p = _dt.datetime.fromisoformat(s)
+            return p if p.tzinfo else p.replace(tzinfo=_dt.timezone.utc)
+        except Exception:
+            for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y"):
+                try:
+                    return _dt.datetime.strptime(s[:10], fmt).replace(tzinfo=_dt.timezone.utc)
+                except Exception:
+                    continue
+        return None
+
+    cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=max(1, int(days)))
+    results: List[Dict[str, Any]] = []
+
+    for raw_path in import_paths:
+        p = Path(raw_path).expanduser().resolve()
+        if not p.is_file():
+            results.append({"ok": False, "source": "import", "label": str(raw_path), "error": f"File not found: {p}"})
+            continue
+        try:
+            suf = p.suffix.lower()
+            if suf == ".csv":
+                rows_m = in_t = out_t = cr_t = 0
+                exp_usd = 0.0
+                has_cost = False
+                for row in _csv.DictReader(_io.StringIO(p.read_text(encoding="utf-8", errors="ignore"))):
+                    if not isinstance(row, dict):
+                        continue
+                    rd = None
+                    for k in ("date", "usage_date", "timestamp", "created_at", "bucket_start", "day"):
+                        for rk, rv in row.items():
+                            if rk and rk.strip().lower() == k and rv:
+                                rd = _parse_dt(rv)
+                                if rd:
+                                    break
+                        if rd:
+                            break
+                    if rd is not None and rd < cutoff:
+                        continue
+                    rows_m += 1
+
+                    def _n(keys: tuple[str, ...]) -> float:
+                        for kk in keys:
+                            for rk, rv in row.items():
+                                if rk and rk.strip().lower() == kk and rv not in (None, ""):
+                                    try:
+                                        return float(str(rv).strip().replace("$", "").replace(",", ""))
+                                    except ValueError:
+                                        return 0.0
+                        return 0.0
+
+                    in_t += int(_n(("input_tokens", "uncached_input_tokens", "prompt_tokens")))
+                    out_t += int(_n(("output_tokens", "completion_tokens")))
+                    cr_t += int(_n(("cache_read_input_tokens", "cached_input_tokens")))
+                    cv = _n(("cost_usd", "total_cost_usd", "cost", "amount_usd", "amount", "usd"))
+                    if cv > 0:
+                        exp_usd += cv
+                        has_cost = True
+                usd = round(exp_usd, 2) if has_cost else round((in_t / 1e6) * price_per_m + (cr_t / 1e6) * (price_per_m * 0.1) + (out_t / 1e6) * (price_per_m * 5.0), 2)
+                results.append({"ok": True, "source": "billing_csv", "label": p.name, "rows": rows_m, "total_tokens": in_t + cr_t + out_t, "estimated_spend_usd": usd, "exact_cost_reported": has_cost})
+            else:
+                if suf == ".zip":
+                    with _zf.ZipFile(p, "r") as z:
+                        m = next((n for n in z.namelist() if n.endswith("conversations.json")), None)
+                        if not m:
+                            results.append({"ok": False, "source": "import", "label": p.name, "error": "No conversations.json in zip"})
+                            continue
+                        payload = json.loads(z.read(m).decode("utf-8", errors="ignore"))
+                else:
+                    payload = json.loads(p.read_text(encoding="utf-8", errors="ignore"))
+                convs = payload if isinstance(payload, list) else (payload.get("conversations", []) if isinstance(payload, dict) else [])
+                c_cnt = m_cnt = ei = eo = 0
+                for c in convs:
+                    if not isinstance(c, dict):
+                        continue
+                    ts = _parse_dt(c.get("updated_at") or c.get("created_at"))
+                    if ts is not None and ts < cutoff:
+                        continue
+                    msgs = c.get("chat_messages") or c.get("messages") or []
+                    if not isinstance(msgs, list):
+                        continue
+                    c_cnt += 1
+                    run_c = 0
+                    for msg in msgs:
+                        if not isinstance(msg, dict):
+                            continue
+                        m_cnt += 1
+                        txt = str(msg.get("text") or "")
+                        run_c += len(txt)
+                        if str(msg.get("sender") or msg.get("role") or "").lower() in ("assistant", "model"):
+                            eo += max(1, len(txt) // 4) if txt else 0
+                            ei += max(1, run_c // 4) if run_c else 0
+                usd = round((ei / 1e6) * price_per_m + (eo / 1e6) * (price_per_m * 5.0), 2)
+                results.append({"ok": True, "source": "claude_export_json", "label": p.name, "conversations": c_cnt, "messages": m_cnt, "total_tokens": ei + eo, "estimated_spend_usd": usd, "exact_cost_reported": False})
+        except Exception as exc:
+            results.append({"ok": False, "source": "import", "label": p.name, "error": str(exc)})
+
+    if use_cloud_api or admin_key:
+        key = (admin_key or "").strip()
+        if not key:
+            results.append({"ok": False, "source": "anthropic_admin_api", "label": "Anthropic Admin API", "error": "Missing ANTHROPIC_ADMIN_API_KEY"})
+        else:
+            now = _dt.datetime.now(_dt.timezone.utc)
+            qs = _uparse.urlencode({"starting_at": cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"), "ending_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "bucket_width": "1d"})
+            hdrs = {"x-api-key": key, "anthropic-version": "2023-06-01", "accept": "application/json"}
+            in_t = cr_t = out_t = 0
+            cost_usd = 0.0
+            errs: List[str] = []
+            for kind, ep in (("usage", "usage_report/messages"), ("cost", "cost_report")):
+                try:
+                    req = _ureq.Request(f"https://api.anthropic.com/v1/organizations/{ep}?{qs}", headers=hdrs, method="GET")
+                    with _ureq.urlopen(req, timeout=15.0) as resp:
+                        data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+                    for b in data.get("data", []) or []:
+                        for r in b.get("results", [b]) or []:
+                            if not isinstance(r, dict):
+                                continue
+                            if kind == "usage":
+                                in_t += int(r.get("uncached_input_tokens", 0) or r.get("input_tokens", 0) or 0)
+                                cr_t += int(r.get("cache_read_input_tokens", 0) or 0)
+                                out_t += int(r.get("output_tokens", 0) or 0)
+                            else:
+                                try:
+                                    cost_usd += float(r.get("amount", 0))
+                                except (TypeError, ValueError):
+                                    pass
+                except (_uerr.URLError, _uerr.HTTPError, Exception) as exc:
+                    errs.append(f"{kind}: {exc}")
+            if len(errs) == 2:
+                results.append({"ok": False, "source": "anthropic_admin_api", "label": "Anthropic Admin API", "error": "; ".join(errs)})
+            else:
+                results.append({"ok": True, "source": "anthropic_admin_api", "label": "Anthropic Admin API", "total_tokens": in_t + cr_t + out_t, "estimated_spend_usd": round(cost_usd, 2), "exact_cost_reported": cost_usd > 0})
+    return results
+
+
+def _format_standalone_cloud_section(cloud_sources: List[Dict[str, Any]]) -> str:
+    lines = ["", "☁️  Cloud Usage & Spend (Opt-In - Reported Separately from Local Transcripts):"]
+    for src in cloud_sources:
+        lbl = src.get("label", src.get("source", "cloud"))
+        if not src.get("ok"):
+            lines.append(f"  • {lbl}: [SKIPPED] {src.get('error', 'unknown error')}")
+            continue
+        extra = ""
+        if "conversations" in src:
+            extra = f" | {int(src['conversations']):,} convs, {int(src.get('messages', 0)):,} msgs"
+        elif "rows" in src:
+            extra = f" | {int(src['rows']):,} rows"
+        tag = "exact" if src.get("exact_cost_reported") else "est."
+        lines.append(f"  • {lbl}: {int(src.get('total_tokens', 0)):,} tokens ({tag} ${float(src.get('estimated_spend_usd', 0.0)):,.2f}){extra}")
+    return "\n".join(lines)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -5374,7 +5561,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--workspace-dir", dest="workspace_dir", default=None, help="Custom workspace directory for Turn-0 static instruction/MCP scan")
     parser.add_argument("--home-dir", dest="home_dir", default=None, help="Custom user home directory for Turn-0 global MCP/instruction scan")
     parser.add_argument("--export-receipt", dest="export_receipt", default=None, help="Optional path to export receipt")
+    parser.add_argument(
+        "--import",
+        dest="import_paths",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Opt-in offline cloud export to include (`conversations.json`, `.zip`, or Anthropic billing `.csv`)",
+    )
+    parser.add_argument(
+        "--cloud",
+        action="store_true",
+        help="Opt-in: also query Anthropic Admin API (requires ANTHROPIC_ADMIN_API_KEY or --anthropic-admin-key)",
+    )
+    parser.add_argument(
+        "--anthropic-admin-key",
+        dest="anthropic_admin_key",
+        default=None,
+        metavar="KEY",
+        help="Anthropic Organization Admin API key for cloud usage/cost report",
+    )
     parser.add_argument("--json", action="store_true", help="Output structured JSON")
+    parser.add_argument("--unshielded-only", action="store_true", help="Analyze only unshielded sessions as if WBC were not yet installed")
     args = parser.parse_args(argv)
 
     audit = run_multi_harness_finops_audit(
@@ -5396,7 +5604,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         workspace_dir=Path(args.workspace_dir) if args.workspace_dir else None,
         home_dir=Path(args.home_dir) if args.home_dir else None,
         explicit_price_override=explicit_price,
+        unshielded_only=bool(args.unshielded_only),
     )
+
+    cloud_sources: List[Dict[str, Any]] = []
+    import_paths = getattr(args, "import_paths", None) or []
+    use_cloud_api = bool(getattr(args, "cloud", False))
+    admin_key = getattr(args, "anthropic_admin_key", None) or (
+        os.environ.get("ANTHROPIC_ADMIN_API_KEY") if use_cloud_api else None
+    )
+    if import_paths or use_cloud_api or admin_key:
+        cloud_sources = _collect_standalone_cloud_sources(
+            import_paths=import_paths,
+            admin_key=admin_key,
+            use_cloud_api=use_cloud_api,
+            days=args.days,
+            price_per_m=args.price_per_m,
+        )
+        audit["cloud_usage"] = cloud_sources
+
     show_team = bool(explicit_seats or args.seats > 1)
     if args.export_receipt:
         out_p = Path(args.export_receipt)
@@ -5413,6 +5639,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         use_color = False if args.no_color else None
         print(format_standalone_receipt(audit, color=use_color, show_team=show_team), flush=True)
+        if cloud_sources:
+            print(_format_standalone_cloud_section(cloud_sources), flush=True)
 
     _emit_audit_telemetry(audit, no_telemetry=bool(getattr(args, "no_telemetry", False)))
     return 0

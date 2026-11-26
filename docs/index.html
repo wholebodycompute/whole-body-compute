@@ -1429,8 +1429,8 @@
             <ul class="tier-list">
               <li><span class="check">✓</span><span>Unlimited <code>body eyes</code>, <code>hands</code>, <code>ears</code> &amp; <code>commit</code></span></li>
               <li><span class="check">✓</span><span>100% local AST code dictation (Hold <code>Fn</code>)</span></li>
-              <li><span class="check">✓</span><span>Default-on Muscle Memory (<code>body candidates</code>)</span></li>
-              <li><span class="check">✓</span><span>Unlimited <code>body audit-spend</code> &amp; <code>doctor</code></span></li>
+              <li><span class="check">✓</span><span>Workflow habit discovery (<code>body candidates</code>)</span></li>
+              <li><span class="check">✓</span><span>Unlimited <code>body audit-spend</code>, <code>context</code> &amp; <code>doctor</code></span></li>
               <li><span class="check">✓</span><span>50 / day AST slices &amp; 25 Metal offloads</span></li>
             </ul>
           </div>
@@ -1442,15 +1442,16 @@
           <div>
             <div class="tier-name"><span>Pro</span><span class="pop-pill">POPULAR</span></div>
             <div class="tier-price">$29 <span>/ mo</span></div>
-            <p class="tier-desc">Unlimited shielding &amp; $0 recipes.</p>
+            <p class="tier-desc">Unlimited shielding, memory &amp; $0 recipes.</p>
             <ul class="tier-list">
               <li><span class="check">✓</span><span>Everything in Community, unlimited</span></li>
               <li><span class="check">✓</span><span>Unlimited Blood-Brain Barrier hooks</span></li>
+              <li><span class="check">✓</span><span>Hippocampus memory graph (<code>body memory</code>)</span></li>
               <li><span class="check">✓</span><span><code>body candidates --promote</code> ($0 skills)</span></li>
               <li><span class="check">✓</span><span>Zero-click thread handoffs (<code>body flush --auto</code>)</span></li>
             </ul>
           </div>
-          <a href="https://buy.polar.sh/polar_cl_W4re7lSF6revpXa1huLqAMbecKgnMUzT4P5xK21eobp" class="tier-btn" target="_blank" rel="noopener" onclick="trackCheckoutClick('pro')">Get Pro &rarr;</a>
+          <a id="proCheckoutBtn" href="https://buy.polar.sh/polar_cl_W4re7lSF6revpXa1huLqAMbecKgnMUzT4P5xK21eobp" class="tier-btn" target="_blank" rel="noopener" onclick="trackCheckoutClick('pro')">Get Pro &rarr;</a>
         </div>
 
         <!-- $79 Team -->
@@ -1466,7 +1467,7 @@
               <li><span class="check">✓</span><span>Shared secret egress rules</span></li>
             </ul>
           </div>
-          <a href="https://buy.polar.sh/polar_cl_WdAQSkL5Y5eOdot0FtPUjzW52BwUEp4vray3G0yyDao" class="tier-btn" target="_blank" rel="noopener" onclick="trackCheckoutClick('team')">Start Team</a>
+          <a id="teamCheckoutBtn" href="https://buy.polar.sh/polar_cl_WdAQSkL5Y5eOdot0FtPUjzW52BwUEp4vray3G0yyDao" class="tier-btn" target="_blank" rel="noopener" onclick="trackCheckoutClick('team')">Start Team</a>
         </div>
 
         <!-- $199 Enterprise -->
@@ -1567,10 +1568,11 @@
             $referrer: document.referrer || undefined
           }, extraProps || {})
         });
+        const telEndpoint = "https://wholebodycompute.com/v1/telemetry";
         if (navigator.sendBeacon) {
-          navigator.sendBeacon("https://us.i.posthog.com/capture/", new Blob([body], { type: "application/json" }));
+          navigator.sendBeacon(telEndpoint, new Blob([body], { type: "application/json" }));
         } else {
-          fetch("https://us.i.posthog.com/capture/", {
+          fetch(telEndpoint, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: body,
@@ -1600,12 +1602,38 @@
       return TERM_CMDS[tabKey] ? TERM_CMDS[tabKey].raw : "";
     }
 
+    function resolveCohortIdParam() {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const cid = (params.get("cohort_id") || "").trim();
+        if (/^[a-zA-Z0-9_-]{4,36}$/.test(cid)) return cid;
+      } catch (_) {}
+      return "";
+    }
+
+    (function wireCheckoutCohortAttribution() {
+      const cid = resolveCohortIdParam();
+      if (!cid) return;
+      ["proCheckoutBtn", "teamCheckoutBtn"].forEach((id) => {
+        const el = document.getElementById(id);
+        if (!el || !el.href) return;
+        try {
+          const u = new URL(el.href);
+          u.searchParams.set("cohort_id", cid);
+          el.href = u.toString();
+        } catch (_) {}
+      });
+    })();
+
     function trackCheckoutClick(tier) {
-      emitWebFunnelEvent("wbc_checkout_clicked", {
+      const payload = {
         tier: tier,
         surface: "web_pricing_card",
         acquisition_source: resolveWebChannelSlug("web")
-      });
+      };
+      const cid = resolveCohortIdParam();
+      if (cid) payload.cohort_id = cid;
+      emitWebFunnelEvent("wbc_checkout_clicked", payload);
     }
 
     function copyCurrentCmd() {
