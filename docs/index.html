@@ -481,6 +481,36 @@
       color: var(--cta-red);
     }
 
+    /* Security Trust Strip beneath Hero CTAs */
+    .hero-trust-strip {
+      margin-top: 16px;
+      display: inline-flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 7px;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: var(--ink-muted);
+      line-height: 1.5;
+    }
+    .hero-trust-strip .trust-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--stage-local);
+      box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
+      flex-shrink: 0;
+    }
+    .hero-trust-strip a {
+      color: var(--ink-secondary);
+      font-weight: 700;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+    .hero-trust-strip a:hover {
+      color: var(--cta-red);
+    }
+
     /* Hero Mascot Lockup (Sized proportionally with H1 via em units) */
     .hero-mascot-wrap {
       /* 4 lines × 1.08 + 0.34em gap ≈ 4.66em H1 text height; 6.4em box maps SVG internal bounds cleanly to H1 top & bottom */
@@ -1121,6 +1151,8 @@
         <a href="#compare">Benchmarks</a>
         <a href="#how-it-works">Anatomy</a>
         <a href="#live-reflexes">Live Reflexes</a>
+        <a href="/security">Security</a>
+        <a href="/docs">Docs &amp; Tips</a>
         <a href="#pricing">Pricing</a>
       </nav>
 
@@ -1145,7 +1177,7 @@
         </div>
       </div>
 
-      <p class="hero-sub"><span class="sub-lead"><br>Cut AI bills and extend session limits without dumbing down the model.</span>Give <strong>Claude Code</strong> and <strong>Google Antigravity</strong> fast local reflexes on your Mac, handling file reads, UI clicks, git commits, and repeated chores for <strong>$0</strong>.</p>
+      <p class="hero-sub"><span class="sub-lead">Cut AI bills and extend session limits without dumbing down the model.</span>Give <strong>Claude Code</strong>, <strong>Cursor</strong>, and <strong>Google Antigravity</strong> fast local reflexes on your Mac - handling file reads, UI clicks, code dictation, git commits, and repeated chores for <strong>$0</strong>.</p>
 
       <!-- Multi-Tab Terminal Hub (voicefi.org style) -->
       <div class="terminal-window" id="installBox">
@@ -1157,12 +1189,10 @@
           </div>
           <div class="term-tabs">
             <button type="button" class="term-tab active" id="tab-begin" onclick="setTab('begin')">install</button>
-            <button type="button" class="term-tab" id="tab-audit" onclick="setTab('audit')">audit spend</button>
+            <button type="button" class="term-tab" id="tab-brew" onclick="setTab('brew')">homebrew</button>
+            <button type="button" class="term-tab" id="tab-cask" onclick="setTab('cask')">mac app</button>
             <button type="button" class="term-tab" id="tab-uv" onclick="setTab('uv')">uv / pipx</button>
-            <button type="button" class="term-tab" id="tab-commit" onclick="setTab('commit')">$0 commit</button>
-            <button type="button" class="term-tab" id="tab-ears" onclick="setTab('ears')">local dictate</button>
-            <button type="button" class="term-tab" id="tab-handoff" onclick="setTab('handoff')">fresh chat</button>
-            <button type="button" class="term-tab" id="tab-candidates" onclick="setTab('candidates')">muscle memory</button>
+            <button type="button" class="term-tab" id="tab-audit" onclick="setTab('audit')">audit spend</button>
           </div>
         </div>
         <div class="terminal-body">
@@ -1186,12 +1216,18 @@
       </p>
 
       <div class="hero-actions">
-        <a href="#pricing" class="btn-primary">
-          <span>Get Pro</span>
+        <a href="#compare" class="btn-primary">
+          <span>See SWE-bench Results &darr;</span>
         </a>
         <a href="open_core.html" class="btn-secondary">
           <span>Open-Core Spec &amp; CLI &rarr;</span>
         </a>
+      </div>
+
+      <div class="hero-trust-strip">
+        <span class="trust-dot" aria-hidden="true"></span>
+        <span>Apple-Notarized macOS App &bull; Zero Terminal TCC &bull; 1-Click Kill Switch &bull;</span>
+        <a href="/security">Security &amp; Threat Model &rarr;</a>
       </div>
     </section>
 
@@ -1431,7 +1467,7 @@
               <li><span class="check">✓</span><span>100% local AST code dictation (Hold <code>Fn</code>)</span></li>
               <li><span class="check">✓</span><span>Workflow habit discovery (<code>body candidates</code>)</span></li>
               <li><span class="check">✓</span><span>Unlimited <code>body audit-spend</code>, <code>context</code> &amp; <code>doctor</code></span></li>
-              <li><span class="check">✓</span><span>50 / day AST slices &amp; 25 Metal offloads</span></li>
+              <li><span class="check">✓</span><span>100 / day AST slices &amp; Unlimited Metal offloads</span></li>
             </ul>
           </div>
           <a href="#installBox" class="tier-btn">Install Free</a>
@@ -1497,6 +1533,8 @@
         <span>&copy; 2026 Whole Body Compute &bull; Open-Core</span>
       </div>
       <div class="footer-links">
+        <a href="/docs">Docs &amp; Pro Tips</a>
+        <a href="/security">Security</a>
         <a href="https://github.com/wholebodycompute/whole-body-compute" target="_blank" rel="noopener">GitHub</a>
         <!-- POST-LAUNCH REVISIT: Re-evaluate voicefi.org, /telemetry, /roi, /hal, /patents, /begin footer links -->
         <a href="mailto:hello@wholebodycompute.com">hello@wholebodycompute.com</a>
@@ -1510,6 +1548,14 @@
         raw: "curl -fsSL https://wholebodycompute.com/begin | sh",
         html: 'curl -fsSL <span class="cmd-hl">https://wholebodycompute.com/begin</span> | sh'
       },
+      brew: {
+        raw: "brew tap wholebodycompute/tap && brew trust wholebodycompute/tap && brew install wholebodycompute/tap/whole-body-compute && body begin",
+        html: 'brew tap <span class="cmd-hl">wholebodycompute/tap</span> &amp;&amp; brew trust wholebodycompute/tap &amp;&amp; brew install <span class="cmd-hl">wholebodycompute/tap/whole-body-compute</span> &amp;&amp; body begin'
+      },
+      cask: {
+        raw: "brew tap wholebodycompute/tap && brew trust wholebodycompute/tap && brew install --cask wholebodycompute/tap/whole-body-compute",
+        html: 'brew install --cask <span class="cmd-hl">wholebodycompute/tap/whole-body-compute</span> <span style="color:var(--term-muted)"># or: body eyes --install-app</span>'
+      },
       uv: {
         raw: "uv tool install whole-body-compute && body begin",
         html: 'uv tool install <span class="cmd-hl">whole-body-compute</span> &amp;&amp; body begin <span style="color:var(--term-muted)"># or: pipx install whole-body-compute</span>'
@@ -1517,22 +1563,6 @@
       audit: {
         raw: "curl -sSL https://wholebodycompute.com/audit.py | python3",
         html: 'curl -sSL <span class="cmd-hl">https://wholebodycompute.com/audit.py</span> | python3'
-      },
-      commit: {
-        raw: "body commit",
-        html: '<span class="cmd-hl">body commit</span> <span style="color:var(--term-muted)"># &lt;20ms AST-guided $0 git commit + secret guard</span>'
-      },
-      ears: {
-        raw: "body ears",
-        html: '<span class="cmd-hl">body ears</span> <span style="color:var(--term-muted)"># Hold Fn / Fn+Space 100% local AST code dictation ($0 forever)</span>'
-      },
-      handoff: {
-        raw: "body flush --auto",
-        html: '<span class="cmd-hl">body flush --auto</span> <span style="color:var(--term-muted)"># opens fresh chat + carries state over</span>'
-      },
-      candidates: {
-        raw: "body candidates --promote <id> --as-skill",
-        html: '<span class="cmd-hl">body candidates</span> --promote &lt;id&gt; --as-skill'
       }
     };
     let activeKey = "begin";

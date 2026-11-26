@@ -35,7 +35,7 @@ class WholeBodyCompute < Formula
         brew install --cask wholebodycompute/tap/whole-body-compute
         body daemon install
 
-      Upgrade to Whole Body Compute Pro ($20/mo) or Team ($49/seat/mo):
+      Upgrade to Whole Body Compute Pro ($29/mo) or Team ($79/seat/mo):
         body license --activate <POLAR_KEY>
         https://wholebodycompute.com/#pricing
     EOS
