@@ -1496,15 +1496,16 @@ class ProceduralDNAHarvester:
             for cand_p in pal_candidates:
                 if cand_p.is_file():
                     wf_raw = json.loads(cand_p.read_text(encoding="utf-8"))
-                    wfs = wf_raw.get("workflows", {}) if isinstance(wf_raw, dict) else {}
+                    wf_filtered = _filter_real_pal_workflows(wf_raw if isinstance(wf_raw, dict) else {})
+                    wfs = wf_filtered["workflows"]
                     hab_cnt = sum(
                         1 for v in wfs.values() if isinstance(v, dict) and int(v.get("runs", 0)) >= 3
                     )
                     wf_habits = {
-                        "total_workflow_runs": int(wf_raw.get("total_runs", 0)),
+                        "total_workflow_runs": int(wf_filtered["total_runs"]),
                         "unique_workflows_executed": len(wfs),
                         "habitual_workflows_3plus_runs": hab_cnt,
-                        "workflow_tokens_saved": int(wf_raw.get("total_tokens_saved", 0)),
+                        "workflow_tokens_saved": int(wf_filtered["total_tokens_saved"]),
                     }
                     break
         except Exception:
@@ -2507,6 +2508,49 @@ def fetch_posthog_cloud_funnel_summary(
         return {"status": "error", "reason": str(exc)}
 
 
+def _is_synthetic_workflow_key(wf_key: str) -> bool:
+    """Return True if a workflow key matches synthetic test/mock naming (*_test, test_*, *_mock, mock_*)."""
+    low = str(wf_key or "").strip().lower()
+    if not low:
+        return True
+    return (
+        low.startswith(("test_", "test-", "mock_", "mock-"))
+        or low.endswith(("_test", "-test", "_mock", "-mock"))
+        or low in ("test", "mock")
+    )
+
+
+def _filter_real_pal_workflows(wf_raw: dict[str, Any]) -> dict[str, Any]:
+    """Filter synthetic test/mock workflows from pal_cloud_savings.json and recompute real totals."""
+    raw_wfs = wf_raw.get("workflows", {}) if isinstance(wf_raw, dict) else {}
+    if not isinstance(raw_wfs, dict):
+        raw_wfs = {}
+    real_wfs: dict[str, Any] = {
+        str(k): v
+        for k, v in raw_wfs.items()
+        if isinstance(v, dict) and not _is_synthetic_workflow_key(str(k))
+    }
+    if raw_wfs:
+        total_runs = sum(int(v.get("runs", 0)) for v in real_wfs.values())
+        total_tokens_saved = sum(int(v.get("tokens_saved", 0)) for v in real_wfs.values())
+        total_screen_mb_saved = round(
+            sum(float(v.get("screen_mb_saved", 0.0)) for v in real_wfs.values()), 2
+        )
+    else:
+        total_runs = int(wf_raw.get("total_runs", 0))
+        total_tokens_saved = int(wf_raw.get("total_tokens_saved", 0))
+        total_screen_mb_saved = round(float(wf_raw.get("total_screen_mb_saved", 0.0)), 2)
+
+    return {
+        "total_runs": total_runs,
+        "total_tokens_saved": total_tokens_saved,
+        "total_screen_mb_saved": total_screen_mb_saved,
+        "workflows_count": len(real_wfs),
+        "excluded_test_workflows_count": max(0, len(raw_wfs) - len(real_wfs)),
+        "workflows": real_wfs,
+    }
+
+
 def get_comprehensive_usage_stats_report(
     stats_path: Path | None = None,
     *,
@@ -2546,8 +2590,15 @@ def get_comprehensive_usage_stats_report(
     except Exception:
         pass
 
-    # Workflow execution savings
-    wf_savings: dict[str, Any] = {"total_runs": 0, "total_tokens_saved": 0, "workflows_count": 0}
+    # Workflow execution savings (excluding synthetic *_test / test_* / *_mock workflows)
+    wf_savings: dict[str, Any] = {
+        "total_runs": 0,
+        "total_tokens_saved": 0,
+        "total_screen_mb_saved": 0.0,
+        "workflows_count": 0,
+        "excluded_test_workflows_count": 0,
+        "workflows": {},
+    }
     try:
         pal_candidates = [get_wbc_data_dir() / "telemetry" / "pal_cloud_savings.json"]
         if "WBC_DATA_DIR" not in os.environ:
@@ -2555,13 +2606,7 @@ def get_comprehensive_usage_stats_report(
         for cand_p in pal_candidates:
             if cand_p.is_file():
                 wf_raw = json.loads(cand_p.read_text(encoding="utf-8"))
-                wf_savings = {
-                    "total_runs": int(wf_raw.get("total_runs", 0)),
-                    "total_tokens_saved": int(wf_raw.get("total_tokens_saved", 0)),
-                    "total_screen_mb_saved": float(wf_raw.get("total_screen_mb_saved", 0.0)),
-                    "workflows_count": len(wf_raw.get("workflows", {})),
-                    "workflows": wf_raw.get("workflows", {}),
-                }
+                wf_savings = _filter_real_pal_workflows(wf_raw if isinstance(wf_raw, dict) else {})
                 break
     except Exception:
         pass
@@ -2583,15 +2628,9 @@ def get_comprehensive_usage_stats_report(
     # Skills & Hippocampus memory telemetry summary
     skills_info: dict[str, Any] = {}
     try:
-        from whole_body_compute.skills_telemetry import load_skill_telemetry
+        from whole_body_compute.skills_telemetry import summarize_installed_skills_telemetry
 
-        sk_ledger = load_skill_telemetry()
-        sk_map = sk_ledger.get("skills", {})
-        skills_info = {
-            "tracked_skills_count": len(sk_map),
-            "total_skill_reads": sum(int(v.get("total_reads", 0)) for v in sk_map.values() if isinstance(v, dict)),
-            "scanned_transcripts_count": len(sk_ledger.get("scanned_transcripts", {})),
-        }
+        skills_info = summarize_installed_skills_telemetry()
     except Exception:
         pass
 
@@ -2713,7 +2752,10 @@ def format_usage_stats_table(report: dict[str, Any]) -> str:
             f"      • Estimated Cloud USD Saved: ${shield.get('estimated_usd_saved', 0.0):.2f} | "
             f"Secrets Scrubbed: {shield.get('secrets_scrubbed', 0)}",
             f"      • Skill Activations (`SKILL.md` reads): {sk.get('total_skill_reads', 0):,} reads across "
-            f"{sk.get('tracked_skills_count', 0)} skills ({sk.get('scanned_transcripts_count', 0)} transcripts audited)",
+            f"{sk.get('tracked_skills_count', 0)} active skills ({sk.get('scanned_transcripts_count', 0)} transcripts audited)",
+            f"      • Installed `<skills>` Footprint:       {sk.get('installed_skills_count', 0):,} installed | "
+            f"{sk.get('unread_skills_count', 0):,} unread (0 reads) | "
+            f"~{sk.get('turn0_skills_tokens_per_turn', 0):,} Turn-0 tok/turn",
             "",
             "  [3] Workflow Automations, Hippocampus Learning & Nocturnal REM Dreaming:",
             f"      • Hippocampus Memory Graph:  {mem.get('total_memories', 0):,} active fact(s) | "

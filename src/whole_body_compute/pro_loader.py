@@ -48,6 +48,7 @@ PRO_MODULE_KEYS: tuple[str, ...] = (
     "cognitive_capsules",
     "cognitive_glymphatic",
     "telemetry_server",
+    "chore_router",
 )
 
 OPEN_CORE_MODULE_PATHS: dict[str, str] = {
@@ -59,6 +60,7 @@ OPEN_CORE_MODULE_PATHS: dict[str, str] = {
     "cognitive_capsules": "whole_body_compute.organs.cognitive_capsules",
     "cognitive_glymphatic": "whole_body_compute.organs.cognitive_glymphatic",
     "telemetry_server": "whole_body_compute.telemetry_server",
+    "chore_router": "whole_body_compute.proxy.chore_router",
 }
 
 ACTIVE_PRO_TIERS = ("pro", "team", "enterprise")

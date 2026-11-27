@@ -82,23 +82,34 @@ def _parse_skill_frontmatter(skill_md_path: Path) -> Tuple[str, str, int]:
 
     full_doc_tokens = max(1, len(text) // 4)
     name = fallback_name
-    description = ""
+    description_parts: List[str] = []
+    in_desc = False
 
     if text.startswith("---"):
         parts = text.split("---", 2)
         if len(parts) >= 3:
             fm = parts[1]
             for line in fm.splitlines():
+                if not line.strip():
+                    continue
+                is_indented = line.startswith((" ", "\t"))
                 s = line.strip()
-                if s.startswith("name:"):
+                if s.startswith("name:") and not is_indented:
+                    in_desc = False
                     val = s[len("name:") :].strip().strip("'\"")
                     if val:
                         name = val
-                elif s.startswith("description:"):
+                elif s.startswith("description:") and not is_indented:
+                    in_desc = True
                     val = s[len("description:") :].strip().strip("'\"")
-                    if val:
-                        description = val
+                    if val and val not in ("|", ">", "|-", ">-"):
+                        description_parts.append(val)
+                elif in_desc and (is_indented or ":" not in s):
+                    description_parts.append(s)
+                else:
+                    in_desc = False
 
+    description = " ".join(description_parts).strip()
     return (name, description, full_doc_tokens)
 
 
@@ -333,48 +344,98 @@ def discover_installed_skills(
     workspace_root: Optional[Path] = None,
     gemini_config_dir: Optional[Path] = None,
     builtin_skills_dir: Optional[Path] = None,
+    user_skills_dir: Optional[Path] = None,
 ) -> List[Dict[str, Any]]:
     """
     Discover all currently installed skills across:
       1. Workspace `.agents/skills/`
-      2. Enabled plugins in `~/.gemini/config/plugins/*/skills/`
-      3. Built-in skills in `~/.gemini/antigravity/builtin/skills/`
+      2. User global `~/.agents/skills/`
+      3. Enabled plugins in `~/.gemini/config/plugins/*/skills/`
+      4. Built-in skills in `~/.gemini/antigravity/builtin/skills/`
     """
     ws_root = (workspace_root or Path.cwd()).resolve()
-    cfg_dir = gemini_config_dir or (Path.home() / ".gemini" / "config")
+    home_base = Path(os.environ.get("WBC_AUDIT_HOME_DIR") or Path.home()).expanduser()
+    cfg_dir = gemini_config_dir or (home_base / ".gemini" / "config")
     b_dir = builtin_skills_dir or (
-        Path.home() / ".gemini" / "antigravity" / "builtin" / "skills"
+        home_base / ".gemini" / "antigravity" / "builtin" / "skills"
     )
+    if user_skills_dir is not None:
+        u_dir: Optional[Path] = Path(user_skills_dir).expanduser()
+    elif os.environ.get("WBC_USER_SKILLS_DIR"):
+        u_dir = Path(os.environ["WBC_USER_SKILLS_DIR"]).expanduser()
+    elif gemini_config_dir is None and builtin_skills_dir is None:
+        u_dir = home_base / ".agents" / "skills"
+    else:
+        u_dir = None
+
     disabled_plugins = _load_disabled_plugins(cfg_dir)
 
     discovered: List[Dict[str, Any]] = []
+    seen_realpaths: set[str] = set()
+
+    def _add_skill_dir(
+        s_dir: Path,
+        *,
+        source: str,
+        source_label: str,
+        plugin_dir: Optional[str],
+        is_builtin: bool,
+        use_fm_name_for_tokens: bool = False,
+    ) -> None:
+        s_md = s_dir / "SKILL.md"
+        if not (s_dir.is_dir() and s_md.is_file()):
+            return
+        try:
+            rp = os.path.realpath(s_md)
+        except OSError:
+            return
+        if rp in seen_realpaths:
+            return
+        seen_realpaths.add(rp)
+        fm_name, desc, doc_tokens = _parse_skill_frontmatter(s_md)
+        tok_name = fm_name if use_fm_name_for_tokens else s_dir.name
+        prompt_tokens = estimate_prompt_entry_tokens(tok_name, str(s_md), desc)
+        discovered.append(
+            {
+                "name": s_dir.name,
+                "frontmatter_name": fm_name,
+                "source": source,
+                "source_label": source_label,
+                "plugin_dir": plugin_dir,
+                "path": str(s_md),
+                "skill_dir": str(s_dir),
+                "description": desc,
+                "prompt_tokens_per_turn": prompt_tokens,
+                "full_doc_tokens": doc_tokens,
+                "is_builtin": is_builtin,
+                "is_protected": True if is_builtin else (s_dir.name in PROTECTED_CORE_SKILLS),
+            }
+        )
 
     # 1. Workspace skills
     ws_skills_dir = ws_root / ".agents" / "skills"
     if ws_skills_dir.is_dir():
         for s_dir in sorted(ws_skills_dir.iterdir()):
-            s_md = s_dir / "SKILL.md"
-            if s_dir.is_dir() and s_md.is_file():
-                fm_name, desc, doc_tokens = _parse_skill_frontmatter(s_md)
-                prompt_tokens = estimate_prompt_entry_tokens(s_dir.name, str(s_md), desc)
-                discovered.append(
-                    {
-                        "name": s_dir.name,
-                        "frontmatter_name": fm_name,
-                        "source": "workspace",
-                        "source_label": "workspace (.agents/skills)",
-                        "plugin_dir": None,
-                        "path": str(s_md),
-                        "skill_dir": str(s_dir),
-                        "description": desc,
-                        "prompt_tokens_per_turn": prompt_tokens,
-                        "full_doc_tokens": doc_tokens,
-                        "is_builtin": False,
-                        "is_protected": s_dir.name in PROTECTED_CORE_SKILLS,
-                    }
-                )
+            _add_skill_dir(
+                s_dir,
+                source="workspace",
+                source_label="workspace (.agents/skills)",
+                plugin_dir=None,
+                is_builtin=False,
+            )
 
-    # 2. Plugin skills
+    # 2. User-global ~/.agents/skills
+    if u_dir is not None and u_dir.is_dir():
+        for s_dir in sorted(u_dir.iterdir()):
+            _add_skill_dir(
+                s_dir,
+                source="user_global",
+                source_label="user_global (~/.agents/skills)",
+                plugin_dir=None,
+                is_builtin=False,
+            )
+
+    # 3. Plugin skills
     plugins_root = cfg_dir / "plugins"
     if plugins_root.is_dir():
         for p_dir in sorted(plugins_root.iterdir()):
@@ -392,52 +453,72 @@ def discover_installed_skills(
             if not p_skills.is_dir():
                 continue
             for s_dir in sorted(p_skills.iterdir()):
-                s_md = s_dir / "SKILL.md"
-                if s_dir.is_dir() and s_md.is_file():
-                    fm_name, desc, doc_tokens = _parse_skill_frontmatter(s_md)
-                    prompt_tokens = estimate_prompt_entry_tokens(s_dir.name, str(s_md), desc)
-                    discovered.append(
-                        {
-                            "name": s_dir.name,
-                            "frontmatter_name": fm_name,
-                            "source": f"plugin:{p_dir.name}",
-                            "source_label": p_dir.name,
-                            "plugin_dir": p_dir.name,
-                            "path": str(s_md),
-                            "skill_dir": str(s_dir),
-                            "description": desc,
-                            "prompt_tokens_per_turn": prompt_tokens,
-                            "full_doc_tokens": doc_tokens,
-                            "is_builtin": False,
-                            "is_protected": s_dir.name in PROTECTED_CORE_SKILLS,
-                        }
-                    )
-
-    # 3. Built-in skills
-    if b_dir.is_dir():
-        for s_dir in sorted(b_dir.iterdir()):
-            s_md = s_dir / "SKILL.md"
-            if s_dir.is_dir() and s_md.is_file():
-                fm_name, desc, doc_tokens = _parse_skill_frontmatter(s_md)
-                prompt_tokens = estimate_prompt_entry_tokens(fm_name, str(s_md), desc)
-                discovered.append(
-                    {
-                        "name": s_dir.name,
-                        "frontmatter_name": fm_name,
-                        "source": "builtin",
-                        "source_label": "builtin (antigravity)",
-                        "plugin_dir": None,
-                        "path": str(s_md),
-                        "skill_dir": str(s_dir),
-                        "description": desc,
-                        "prompt_tokens_per_turn": prompt_tokens,
-                        "full_doc_tokens": doc_tokens,
-                        "is_builtin": True,
-                        "is_protected": True,
-                    }
+                _add_skill_dir(
+                    s_dir,
+                    source=f"plugin:{p_dir.name}",
+                    source_label=p_dir.name,
+                    plugin_dir=p_dir.name,
+                    is_builtin=False,
                 )
 
+    # 4. Built-in skills
+    if b_dir.is_dir():
+        for s_dir in sorted(b_dir.iterdir()):
+            _add_skill_dir(
+                s_dir,
+                source="builtin",
+                source_label="builtin (antigravity)",
+                plugin_dir=None,
+                is_builtin=True,
+                use_fm_name_for_tokens=True,
+            )
+
     return discovered
+
+
+def summarize_installed_skills_telemetry(
+    workspace_root: Optional[Path] = None,
+    gemini_config_dir: Optional[Path] = None,
+    builtin_skills_dir: Optional[Path] = None,
+    user_skills_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """
+    Compute installed vs unread (`0`-read) skill counts and estimated Turn-0 `<skills>`
+    description token overhead by cross-referencing `discover_installed_skills()` with `skill_telemetry.json`.
+    """
+    sk_ledger = load_skill_telemetry()
+    sk_map = sk_ledger.get("skills", {}) if isinstance(sk_ledger, dict) else {}
+    installed = discover_installed_skills(
+        workspace_root=workspace_root,
+        gemini_config_dir=gemini_config_dir,
+        builtin_skills_dir=builtin_skills_dir,
+        user_skills_dir=user_skills_dir,
+    )
+    unread_items: List[Dict[str, Any]] = []
+    for item in installed:
+        s_name = str(item.get("name") or "")
+        fm_name = str(item.get("frontmatter_name") or "")
+        entry = sk_map.get(s_name) or (sk_map.get(fm_name) if fm_name else None) or {}
+        reads = int(entry.get("total_reads", 0)) if isinstance(entry, dict) else 0
+        if reads <= 0:
+            unread_items.append(item)
+
+    unread_names = sorted({str(x["name"]) for x in unread_items if x.get("name")})
+    turn0_tokens = sum(int(x.get("prompt_tokens_per_turn", 0)) for x in installed)
+    unread_turn0_tokens = sum(int(x.get("prompt_tokens_per_turn", 0)) for x in unread_items)
+
+    return {
+        "tracked_skills_count": len(sk_map),
+        "total_skill_reads": sum(
+            int(v.get("total_reads", 0)) for v in sk_map.values() if isinstance(v, dict)
+        ),
+        "scanned_transcripts_count": len(sk_ledger.get("scanned_transcripts", {})),
+        "installed_skills_count": len(installed),
+        "unread_skills_count": len(unread_items),
+        "unread_skill_names": unread_names,
+        "turn0_skills_tokens_per_turn": turn0_tokens,
+        "unread_turn0_tokens_per_turn": unread_turn0_tokens,
+    }
 
 
 def list_archived_skills(archive_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
@@ -776,6 +857,9 @@ def prune_mcp_servers(
         h_dir / ".claude.json",
         h_dir / ".claude" / "mcp.json",
         h_dir / ".claude" / "claude_desktop_config.json",
+        h_dir / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
+        h_dir / "AppData" / "Roaming" / "Claude" / "claude_desktop_config.json",
+        h_dir / ".config" / "Claude" / "claude_desktop_config.json",
         h_dir / ".cursor" / "mcp.json",
         h_dir / ".gemini" / "antigravity" / "mcp_config.json",
         h_dir / ".gemini" / "settings.json",

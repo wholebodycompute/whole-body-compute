@@ -63,8 +63,68 @@ def get_default_models_dir() -> Path:
     return Path(os.path.expanduser("~/.litert-lm/models"))
 
 
+def resolve_litert_cache_dir(preferred_path: Optional[str] = None) -> str:
+    """
+    Resolve a writable LiteRT engine/shader cache directory that stays 100% safe when unplugged.
+
+    When `~/.litert-lm/cache` is symlinked to `/Volumes/Local Models/litert-lm/cache` and the
+    external NVMe drive is unmounted, preserves the symlink untouched and falls back cleanly
+    to internal SSD (`~/.litert-lm/cache_internal`, then `~/.whole_body_compute/cache/litert-lm`).
+    """
+    import tempfile
+
+    raw_pref = (
+        preferred_path
+        or os.environ.get("WBC_LITERT_CACHE_DIR")
+        or "~/.litert-lm/cache"
+    )
+    primary = os.path.expanduser(raw_pref)
+
+    def _is_usable_primary(path_str: str) -> bool:
+        try:
+            if os.path.islink(path_str):
+                if os.path.isdir(path_str) and os.access(path_str, os.W_OK):
+                    return True
+                link_target = os.readlink(path_str)
+                if not os.path.isabs(link_target):
+                    link_target = os.path.normpath(
+                        os.path.join(os.path.dirname(path_str), link_target)
+                    )
+                if link_target.startswith("/Volumes/"):
+                    parts = Path(link_target).parts
+                    if len(parts) >= 3:
+                        vol_root = os.path.join("/Volumes", parts[2])
+                        if not (os.path.isdir(vol_root) and os.access(vol_root, os.W_OK)):
+                            return False
+                os.makedirs(link_target, exist_ok=True)
+                return os.path.isdir(path_str) and os.access(path_str, os.W_OK)
+
+            os.makedirs(path_str, exist_ok=True)
+            return os.path.isdir(path_str) and os.access(path_str, os.W_OK)
+        except OSError:
+            return False
+
+    if _is_usable_primary(primary):
+        return primary
+
+    fallbacks = (
+        os.path.expanduser("~/.litert-lm/cache_internal"),
+        os.path.expanduser("~/.whole_body_compute/cache/litert-lm"),
+        os.path.join(tempfile.gettempdir(), "litert-lm-cache"),
+    )
+    for fb in fallbacks:
+        try:
+            if not os.path.islink(fb):
+                os.makedirs(fb, exist_ok=True)
+            if os.path.isdir(fb) and os.access(fb, os.W_OK):
+                return fb
+        except OSError:
+            continue
+    return fallbacks[-1]
+
+
 def list_imported_models() -> List[Dict[str, Any]]:
-    """List all models currently imported into ~/.litert-lm/models."""
+    """List all models currently imported into ~/.litert-lm/models (unplugged-safe across broken symlinks)."""
     models_dir = get_default_models_dir()
     if not models_dir.exists():
         return []
@@ -72,25 +132,28 @@ def list_imported_models() -> List[Dict[str, Any]]:
     results = []
     try:
         for entry in models_dir.iterdir():
-            if entry.is_dir():
-                model_file = entry / "model.litertlm"
-                if not model_file.exists():
-                    # Check for any .litertlm file
-                    litertlm_files = list(entry.glob("*.litertlm"))
-                    model_file = litertlm_files[0] if litertlm_files else None
+            try:
+                if entry.is_dir():
+                    model_file = entry / "model.litertlm"
+                    if not model_file.exists():
+                        # Check for any .litertlm file
+                        litertlm_files = list(entry.glob("*.litertlm"))
+                        model_file = litertlm_files[0] if litertlm_files else None
 
-                if model_file and model_file.exists():
-                    stat = model_file.stat()
-                    results.append(
-                        {
-                            "name": entry.name,
-                            "path": str(model_file.resolve()),
-                            "size_bytes": stat.st_size,
-                            "size_mb": round(stat.st_size / (1024 * 1024), 1),
-                            "size_gb": round(stat.st_size / (1024 * 1024 * 1024), 2),
-                            "modified_at": stat.st_mtime,
-                        }
-                    )
+                    if model_file and model_file.exists():
+                        stat = model_file.stat()
+                        results.append(
+                            {
+                                "name": entry.name,
+                                "path": str(model_file.resolve()),
+                                "size_bytes": stat.st_size,
+                                "size_mb": round(stat.st_size / (1024 * 1024), 1),
+                                "size_gb": round(stat.st_size / (1024 * 1024 * 1024), 2),
+                                "modified_at": stat.st_mtime,
+                            }
+                        )
+            except OSError:
+                continue
     except Exception as e:
         logger.warning(f"Error scanning LiteRT models directory: {e}")
 
@@ -364,32 +427,36 @@ def list_all_local_models() -> List[Dict[str, Any]]:
     combined: List[Dict[str, Any]] = []
     seen = set()
 
-    # 1. Check Direct-on-Metal MLX fused VoiceFi-Coder weights
+    # 1. Check Direct-on-Metal MLX fused Body-Coder / VoiceFi-Coder weights
+    internal_body = Path.home() / ".whole_body_compute" / "models" / "body-coder-mlx" / "model.safetensors"
     mlx_fused = Path(
         os.environ.get(
             "WBC_FUSED_MODEL_WEIGHTS",
-            str(Path.home() / "Projects" / "Local Models" / "distillation" / "fused_model" / "model.safetensors"),
+            str(internal_body)
+            if internal_body.is_file()
+            else str(Path.home() / "Projects" / "Local Models" / "distillation" / "fused_model" / "model.safetensors"),
         )
     )
     if mlx_fused.is_file():
         sz = mlx_fused.stat().st_size
-        combined.append(
-            {
-                "name": "voicefi-coder-mlx",
-                "provider": "mlx",
-                "voicefi_tuned": True,
-                "size_bytes": sz,
-                "size_mb": round(sz / (1024 * 1024), 1),
-                "size_gb": round(sz / (1024 * 1024 * 1024), 2),
-                "family": "qwen2.5-mlx",
-                "parameter_size": "1.5B-LoRA",
-            }
-        )
-        seen.add("voicefi-coder-mlx")
+        for alias_name in ("body-coder-mlx", "voicefi-coder-mlx"):
+            combined.append(
+                {
+                    "name": alias_name,
+                    "provider": "mlx",
+                    "voicefi_tuned": True,
+                    "size_bytes": sz,
+                    "size_mb": round(sz / (1024 * 1024), 1),
+                    "size_gb": round(sz / (1024 * 1024 * 1024), 2),
+                    "family": "qwen2.5-mlx",
+                    "parameter_size": "1.5B-LoRA",
+                }
+            )
+            seen.add(alias_name)
 
     for om in list_ollama_models():
         entry = dict(om)
-        if any(k in entry["name"].lower() for k in ("voicefi", "tev1", "nimble")):
+        if any(k in entry["name"].lower() for k in ("body-coder", "voicefi", "tev1", "nimble")):
             entry["voicefi_tuned"] = True
         combined.append(entry)
         seen.add(entry["name"])
@@ -401,14 +468,16 @@ def list_all_local_models() -> List[Dict[str, Any]]:
             combined.append(entry)
             seen.add(lm["name"])
 
-    # Prioritize VoiceFi-tuned models at the top of the list
+    # Prioritize Whole Body Compute / VoiceFi-tuned models at the top of the list
     priority_order = {
-        "voicefi-coder:1.5b": 0,
-        "voicefi-coder-mlx": 1,
-        "tev1:0.8b": 2,
-        "tev1:latest": 3,
-        "nimble:latest": 4,
-        "qwen2.5-coder:1.5b": 5,
+        "body-coder-mlx": 0,
+        "body-coder:1.5b": 1,
+        "voicefi-coder:1.5b": 2,
+        "voicefi-coder-mlx": 3,
+        "tev1:0.8b": 4,
+        "tev1:latest": 5,
+        "nimble:latest": 6,
+        "qwen2.5-coder:1.5b": 7,
     }
     combined.sort(
         key=lambda m: (
@@ -430,8 +499,8 @@ def pull_ollama_model(
     """
     import urllib.request
 
-    clean_model = (model_name or "voicefi-coder:1.5b").replace("ollama/", "").strip()
-    is_voicefi_coder = clean_model in ("voicefi-coder:1.5b", "voicefi-coder")
+    clean_model = (model_name or "body-coder:1.5b").replace("ollama/", "").strip()
+    is_voicefi_coder = clean_model in ("body-coder:1.5b", "body-coder", "voicefi-coder:1.5b", "voicefi-coder")
     pull_target = "qwen2.5-coder:1.5b" if is_voicefi_coder else clean_model
 
     running, msg = ensure_ollama_running(auto_install=False)
@@ -817,10 +886,24 @@ class LocalModelEngine:
 
     @property
     def is_installed(self) -> bool:
+        if self.model_name in ("localbench-specialist-router", "specialist-router"):
+            return (
+                is_mlx_running(9380)
+                or is_mlx_running(9379)
+                or is_litert_available()
+            )
         return is_litert_available() or (_resolve_ollama_model(self.model_name) is not None)
 
     @property
     def model_exists(self) -> bool:
+        if self.model_name in ("localbench-specialist-router", "specialist-router"):
+            gemma_2b = os.path.expanduser("~/.litert-lm/models/gemma4-2b/model.litertlm")
+            body_mlx = os.path.expanduser("~/.whole_body_compute/models/body-coder-mlx/model.safetensors")
+            return (
+                (os.path.isfile(gemma_2b) and os.path.isfile(body_mlx))
+                or is_mlx_running(9380)
+                or is_mlx_running(9379)
+            )
         return os.path.exists(self.model_path) or (_resolve_ollama_model(self.model_name) is not None)
 
     def get_status(self) -> Dict[str, Any]:
@@ -959,8 +1042,18 @@ class LocalModelEngine:
             except Exception as e:
                 logger.debug(f"Antigravity Agent skipped/fell back ({e}), proceeding to native engine.")
 
-        # 2. If Direct-on-Metal MLX model requested, query warm :9379 Metal GPU bridge first
-        if not image_path and ("mlx" in self.model_name.lower() or self.model_name == "voicefi-coder-mlx"):
+        # 2. If Specialist Router (`localbench-specialist-router`) or Direct-on-Metal MLX model requested,
+        # query warm :9380 / :9379 Metal GPU bridge first
+        is_specialist_router = self.model_name.lower() in (
+            "localbench-specialist-router",
+            "specialist-router",
+            "localbench-router",
+        )
+        if not image_path and (
+            is_specialist_router
+            or "mlx" in self.model_name.lower()
+            or self.model_name in ("body-coder-mlx", "voicefi-coder-mlx")
+        ):
             import urllib.request
 
             si = system_instructions or self.system_instructions
@@ -968,28 +1061,43 @@ class LocalModelEngine:
             if si:
                 msgs.append({"role": "system", "content": si.strip()})
             msgs.append({"role": "user", "content": prompt.strip()})
+            target_wire_model = (
+                "localbench-specialist-router"
+                if is_specialist_router
+                else (
+                    "body-coder-mlx"
+                    if "body-coder" in self.model_name.lower()
+                    else self.model_name
+                )
+            )
             mlx_payload = {
-                "model": "voicefi-coder-mlx",
+                "model": target_wire_model,
                 "messages": msgs,
                 "stream": False,
                 "temperature": 0.1,
             }
+            candidate_ports = (9380, 9379) if is_specialist_router else (9379,)
 
             def _mlx_call() -> Optional[str]:
-                try:
-                    req = urllib.request.Request(
-                        "http://127.0.0.1:9379/v1/chat/completions",
-                        data=json.dumps(mlx_payload).encode("utf-8"),
-                        headers={"Content-Type": "application/json"},
-                        method="POST",
-                    )
-                    with urllib.request.urlopen(req, timeout=20.0) as resp:
-                        data = json.loads(resp.read().decode("utf-8"))
-                        choices = data.get("choices", [])
-                        if choices and "message" in choices[0]:
-                            return choices[0]["message"].get("content", "").strip()
-                except Exception as e:
-                    logger.debug(f"Direct-on-Metal MLX bridge unavailable ({e}), falling back to Ollama.")
+                for port in candidate_ports:
+                    try:
+                        req = urllib.request.Request(
+                            f"http://127.0.0.1:{port}/v1/chat/completions",
+                            data=json.dumps(mlx_payload).encode("utf-8"),
+                            headers={"Content-Type": "application/json"},
+                            method="POST",
+                        )
+                        with urllib.request.urlopen(req, timeout=25.0) as resp:
+                            data = json.loads(resp.read().decode("utf-8"))
+                            choices = data.get("choices", [])
+                            if choices and "message" in choices[0]:
+                                content = choices[0]["message"].get("content", "").strip()
+                                if content:
+                                    return content
+                    except Exception as e:
+                        logger.debug(
+                            f"Local Metal bridge :{port} unavailable for {target_wire_model} ({e})"
+                        )
                 return None
 
             mlx_out = await asyncio.to_thread(_mlx_call)
@@ -997,6 +1105,11 @@ class LocalModelEngine:
                 for word in re.findall(r"\S+\s*", mlx_out):
                     yield word
                 return
+            if is_specialist_router:
+                gemma_2b_path = os.path.expanduser("~/.litert-lm/models/gemma4-2b/model.litertlm")
+                if os.path.isfile(gemma_2b_path):
+                    self.model_path = gemma_2b_path
+                    self.model_name = "gemma4-2b"
 
         # 3. If LiteRT model file is absent, stream or fetch from Ollama fallback
         if not os.path.exists(self.model_path):
@@ -1105,8 +1218,7 @@ class LocalModelEngine:
         if cache_key not in _ENGINE_CACHE:
             with _ENGINE_LOCK:
                 if cache_key not in _ENGINE_CACHE:
-                    cache_dir = os.path.expanduser("~/.litert-lm/cache")
-                    os.makedirs(cache_dir, exist_ok=True)
+                    cache_dir = resolve_litert_cache_dir()
                     try:
                         backend_obj = GPU() if self.backend in ("gpu", "metal") else CPU()
                         _ENGINE_CACHE[cache_key] = litert_lm.Engine(
@@ -1572,8 +1684,7 @@ def prewarm_local_models() -> None:
             if cache_key not in _ENGINE_CACHE:
                 with _ENGINE_LOCK:
                     if cache_key not in _ENGINE_CACHE:
-                        cache_dir = os.path.expanduser("~/.litert-lm/cache")
-                        os.makedirs(cache_dir, exist_ok=True)
+                        cache_dir = resolve_litert_cache_dir()
                         eng = litert_lm.Engine(
                             model_path=gemma_path,
                             backend=GPU(),

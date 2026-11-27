@@ -768,57 +768,25 @@ def _is_tautological_assertion(test_node: ast.AST) -> bool:
 
 def _extract_ast_audit_summary(tree: ast.AST) -> Dict[str, Any]:
     """Extract assertions, test functions, public symbols, and unsafe call sites from an AST."""
-    assert_count = 0
-    tautological_asserts = 0
-    test_funcs: Set[str] = set()
-    public_symbols: Set[str] = set()
-    unsafe_calls: List[str] = []
+    from whole_body_compute.organs.immune_slicers import _fast_extract_ast_summary
 
+    fast = _fast_extract_ast_summary(tree)
+    public_symbols: Set[str] = set()
+    tautological_asserts = 0
     for node in getattr(tree, "body", []):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             if not node.name.startswith("_"):
                 public_symbols.add(node.name)
-
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assert):
-            assert_count += 1
-            if _is_tautological_assertion(node.test):
-                tautological_asserts += 1
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if node.name.startswith("test_"):
-                test_funcs.add(node.name)
-        elif isinstance(node, ast.Call):
-            # 1. Direct dangerous builtin calls
-            if isinstance(node.func, ast.Name) and node.func.id in ("eval", "exec", "compile", "__import__"):
-                unsafe_calls.append(node.func.id)
-            # 2. Dynamic attribute extraction: getattr(..., 'system' / 'popen' / 'exec' / 'eval')
-            elif isinstance(node.func, ast.Name) and node.func.id == "getattr":
-                if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
-                    if node.args[1].value in ("system", "popen", "exec", "eval", "Popen"):
-                        unsafe_calls.append(f"getattr(..., \"{node.args[1].value}\")")
-            # 3. Attribute calls like os.system, pty.spawn, or subprocess with shell=True
-            elif isinstance(node.func, ast.Attribute):
-                attr = node.func.attr
-                val = node.func.value
-                val_repr = val.id if isinstance(val, ast.Name) else ("call()" if isinstance(val, ast.Call) else "")
-                qual = f"{val_repr}.{attr}" if val_repr else attr
-                if qual in ("os.system", "os.popen", "pty.spawn") or attr in ("system", "popen", "spawn"):
-                    unsafe_calls.append(qual)
-                elif qual in ("subprocess.Popen", "subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output"):
-                    for kw in node.keywords:
-                        if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and bool(kw.value.value) is True:
-                            unsafe_calls.append(f"{qual}(shell=True)")
-                elif qual == "shutil.rmtree" and node.args:
-                    arg0 = node.args[0]
-                    if isinstance(arg0, ast.Constant) and str(arg0.value).strip() in ("/", "~", ".."):
-                        unsafe_calls.append("shutil.rmtree(root)")
+        if isinstance(node, ast.Assert) and _is_tautological_assertion(node.test):
+            tautological_asserts += 1
 
     return {
-        "assert_count": assert_count,
+        "assert_count": fast["assert_count"],
         "tautological_asserts": tautological_asserts,
-        "test_funcs": test_funcs,
+        "test_funcs": fast["test_funcs"],
         "public_symbols": public_symbols,
-        "unsafe_calls": unsafe_calls,
+        "unsafe_calls": fast["unsafe_calls"],
     }
 
 

@@ -422,11 +422,9 @@ def _trigger_walken_machine_mark_callout(
     record_antigen: bool = False,
 ) -> bool:
     """
-    Fire non-blocking (<1ms) Walken acoustic reflex with 2.0s debounce:
-    - walken_slop.wav: if 'delve' in snippet
-    - walken_machine_mark.wav: for lexical, invisible, smart-quote, CJK marks
-    - walken_em_dash.wav: for typography em/en dashes
-    Optionally logs an antigen in AntibodyRegistry.
+    Record optional antigen in AntibodyRegistry for machine-mark auto-heal.
+    Audio playback (Walken afplay SFX) is intentionally disabled; scrubbing/replacement
+    remains active.
     """
     if record_antigen:
         try:
@@ -439,35 +437,6 @@ def _trigger_walken_machine_mark_callout(
         except Exception:
             pass
 
-    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("VOICEFI_MOCK_AUDIO") == "1":
-        return False
-
-    if not _check_walken_audio_debounce():
-        return False
-
-    try:
-        s_lower = (snippet or "").lower()
-        if "delve" in s_lower or "delves" in s_lower or "delving" in s_lower:
-            sfx = WALKEN_SLOP_SFX if WALKEN_SLOP_SFX.is_file() else WALKEN_EM_DASH_SFX
-        elif vector in ("lexical_slop", "invisible_mark", "smart_quote", "cjk_token_leak"):
-            sfx = WALKEN_MACHINE_MARK_SFX if WALKEN_MACHINE_MARK_SFX.is_file() else WALKEN_EM_DASH_SFX
-        elif vector in ("typography_em_dash", "typography_dash"):
-            sfx = WALKEN_EM_DASH_SFX if WALKEN_EM_DASH_SFX.is_file() else WALKEN_MACHINE_MARK_SFX
-        else:
-            sfx = WALKEN_EM_DASH_SFX if WALKEN_EM_DASH_SFX.is_file() else WALKEN_MACHINE_MARK_SFX
-
-        if sfx.is_file():
-            import subprocess
-
-            subprocess.Popen(
-                ["afplay", str(sfx)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            return True
-    except Exception:
-        pass
     return False
 
 

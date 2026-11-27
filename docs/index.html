@@ -268,29 +268,39 @@
 
     /* macOS Window Chrome Terminal Box (voicefi.org style) */
     .terminal-window {
-      border-radius: 12px;
-      background: var(--term-bg);
-      border: 1px solid var(--term-border);
-      box-shadow: 0 20px 42px -14px rgba(15, 23, 42, 0.22);
+      border-radius: 14px;
+      background: linear-gradient(180deg, #1E1E24 0%, #16161B 100%);
+      border: 1px solid #2E2E38;
+      box-shadow:
+        0 22px 46px -14px rgba(15, 23, 42, 0.25),
+        0 4px 12px -2px rgba(15, 23, 42, 0.08),
+        inset 0 1px 0 rgba(255, 255, 255, 0.06);
       overflow: hidden;
       font-family: var(--mono);
       margin-bottom: 18px;
     }
     .terminal-bar {
-      background: var(--term-chrome);
+      background: linear-gradient(180deg, #282830 0%, #212127 100%);
       padding: 9px 14px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      border-bottom: 1px solid var(--term-border);
-      gap: 10px;
+      border-bottom: 1px solid #2F2F39;
+      gap: 12px;
     }
     .traffic-lights {
       display: flex;
       align-items: center;
       gap: 7px;
+      flex-shrink: 0;
     }
-    .tl { width: 11px; height: 11px; border-radius: 999px; display: inline-block; }
+    .tl {
+      width: 11px;
+      height: 11px;
+      border-radius: 999px;
+      display: inline-block;
+      box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18);
+    }
     .tl-r { background: #FF5F56; }
     .tl-y { background: #FFBD2E; }
     .tl-g { background: #27C93F; }
@@ -298,74 +308,148 @@
     .term-tabs {
       display: inline-flex;
       flex-wrap: wrap;
-      background: var(--term-bg);
-      padding: 2px;
-      border-radius: 8px;
-      border: 1px solid var(--term-border);
+      align-items: center;
+      background: #151519;
+      padding: 3px;
+      border-radius: 9px;
+      border: 1px solid #2E2E37;
       gap: 2px;
     }
     .term-tab {
-      border: none;
+      border: 1px solid transparent;
       background: transparent;
-      color: var(--term-muted);
+      color: #9CA3AF;
       font-family: var(--mono);
       font-size: 11px;
-      font-weight: 700;
-      padding: 5px 10px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      padding: 4px 10px;
       border-radius: 6px;
       cursor: pointer;
-      transition: background 0.15s ease, color 0.15s ease;
+      white-space: nowrap;
+      transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
     }
-    .term-tab:hover { color: #FFFFFF; }
+    .term-tab:hover {
+      color: #F4F4F5;
+      background: rgba(255, 255, 255, 0.04);
+    }
     .term-tab.active {
-      background: #383840;
+      background: #2F2F39;
+      border-color: rgba(255, 255, 255, 0.10);
       color: #FFFFFF;
+      font-weight: 700;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
     }
 
     .terminal-body {
-      padding: 14px 16px;
-      display: flex;
+      padding: 15px 18px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
       align-items: center;
-      justify-content: space-between;
-      gap: 12px;
+      gap: 16px;
       color: var(--term-text);
       font-size: 12.5px;
+      min-height: 58px;
     }
     .terminal-cmd-wrap {
       display: flex;
-      align-items: center;
-      gap: 9px;
-      overflow-x: auto;
-      white-space: nowrap;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 0;
       cursor: pointer;
-      flex: 1;
-      padding: 2px 0;
+      padding: 1px 0;
+    }
+    .term-line {
+      display: flex;
+      align-items: baseline;
+      gap: 9px;
+      min-width: 0;
+      line-height: 1.55;
     }
     .terminal-prompt {
       color: var(--term-prompt);
       font-weight: 700;
       user-select: none;
+      flex-shrink: 0;
     }
-    .cmd-hl { color: var(--term-cyan); font-weight: 700; }
+    .term-code {
+      min-width: 0;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: normal;
+      color: #F4F4F5;
+    }
+    .cmd-hl { color: var(--term-cyan); font-weight: 600; }
+    .cmd-op { color: #71717A; font-weight: 500; margin: 0 2px; }
 
     .copy-btn {
       flex-shrink: 0;
-      background: #2C2C34;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      background: #2A2A34;
       color: #F4F4F5;
-      border: 1px solid #3E3E48;
+      border: 1px solid #3E3E4C;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.05);
       border-radius: 8px;
       padding: 7px 13px;
       font-family: var(--mono);
       font-size: 11.5px;
       font-weight: 700;
       cursor: pointer;
-      transition: background 0.15s ease, border-color 0.15s ease;
+      transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
     }
-    .copy-btn:hover { background: #383842; }
+    .copy-btn:hover {
+      background: #353542;
+      border-color: #525264;
+    }
+    .copy-btn:active { transform: scale(0.97); }
     .copy-btn.copied {
-      background: var(--cta-red);
-      border-color: var(--cta-red);
+      background: #059669;
+      border-color: #10B981;
       color: #FFFFFF;
+    }
+
+    .terminal-sub {
+      padding: 8px 18px 9px;
+      background: rgba(0, 0, 0, 0.22);
+      border-top: 1px solid #272730;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px 14px;
+      font-size: 11px;
+      line-height: 1.45;
+      color: #9CA3AF;
+    }
+    .terminal-sub code {
+      font-family: inherit;
+      font-size: 11px;
+      color: #E4E4E7;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      padding: 1px 6px;
+      border-radius: 5px;
+    }
+    .terminal-sub code.alt-cmd-chip {
+      color: var(--term-cyan);
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    }
+    .terminal-sub code.alt-cmd-chip:hover {
+      background: rgba(34, 211, 238, 0.12);
+      border-color: rgba(34, 211, 238, 0.40);
+      color: #FFFFFF;
+    }
+    .term-sub-badge {
+      color: var(--term-prompt);
+      font-weight: 700;
+      font-size: 10.5px;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+      flex-shrink: 0;
     }
 
     /* Hero Action Buttons */
@@ -1125,6 +1209,41 @@
         margin: -0.6em -0.35em -0.3em 0;
       }
       .nav-links { display: none; }
+      .terminal-bar {
+        padding: 8px 10px;
+        gap: 8px;
+      }
+      .traffic-lights { display: none; }
+      .term-tabs {
+        width: 100%;
+        justify-content: space-between;
+      }
+      .term-tab {
+        flex: 1 1 auto;
+        text-align: center;
+        padding: 5px 6px;
+        font-size: 10.5px;
+      }
+      .terminal-body {
+        grid-template-columns: 1fr;
+        gap: 12px;
+        padding: 13px 14px;
+        font-size: 11.5px;
+      }
+      .copy-btn {
+        width: 100%;
+        padding: 8px 12px;
+      }
+      .terminal-sub {
+        padding: 8px 14px;
+        font-size: 10.5px;
+      }
+      .zero-audit-pill {
+        max-width: 100%;
+        flex-wrap: wrap;
+        text-align: left;
+        overflow-wrap: anywhere;
+      }
       .pricing-grid { grid-template-columns: 1fr; }
       .bench-stats { grid-template-columns: 1fr; }
       .bench-table th:nth-child(4), .bench-table td:nth-child(4) { display: none; }
@@ -1196,13 +1315,20 @@
           </div>
         </div>
         <div class="terminal-body">
-          <div class="terminal-cmd-wrap" onclick="copyCurrentCmd()" title="Click to copy command">
-            <span class="terminal-prompt">$</span>
-            <span id="termCmdDisplay">curl -fsSL <span class="cmd-hl">https://wholebodycompute.com/begin</span> | sh</span>
+          <div class="terminal-cmd-wrap" id="termCmdDisplay" onclick="copyCurrentCmd()" title="Click to copy command">
+            <div class="term-line">
+              <span class="terminal-prompt">$</span>
+              <span class="term-code">curl -fsSL <span class="cmd-hl">https://wholebodycompute.com/begin</span> <span class="cmd-op">|</span> sh</span>
+            </div>
           </div>
           <button type="button" class="copy-btn" id="copyBtn" onclick="copyCurrentCmd()">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
             <span id="copyText">Copy</span>
           </button>
+        </div>
+        <div class="terminal-sub" id="termSubDisplay">
+          <span>Installs <code>body</code> CLI &amp; wires Claude Code, Cursor &amp; Antigravity</span>
+          <span class="term-sub-badge">Apple Silicon &bull; $0</span>
         </div>
       </div>
 
@@ -1216,17 +1342,20 @@
       </p>
 
       <div class="hero-actions">
-        <a href="#compare" class="btn-primary">
-          <span>See SWE-bench Results &darr;</span>
+        <a href="#pricing" class="btn-primary">
+          <span>Get Pro &rarr;</span>
+        </a>
+        <a href="/docs" class="btn-secondary">
+          <span>Docs &amp; Quickstart &rarr;</span>
         </a>
         <a href="open_core.html" class="btn-secondary">
-          <span>Open-Core Spec &amp; CLI &rarr;</span>
+          <span>Open-Core Spec &rarr;</span>
         </a>
       </div>
 
       <div class="hero-trust-strip">
         <span class="trust-dot" aria-hidden="true"></span>
-        <span>Apple-Notarized macOS App &bull; Zero Terminal TCC &bull; 1-Click Kill Switch &bull;</span>
+        <span>Apple-Notarized macOS App &bull; Zero Terminal TCC &bull; <code>0.0% ASR</code> across 7,600+ Security Evals &bull;</span>
         <a href="/security">Security &amp; Threat Model &rarr;</a>
       </div>
     </section>
@@ -1363,8 +1492,8 @@
       <div class="anatomy-grid">
         <div class="anatomy-card">
           <span class="anatomy-tag">Blood-Brain Barrier</span>
-          <h3>Slice noise in 3ms.</h3>
-          <p>Extracts exact AST symbols and crash stack traces locally before cloud egress, while also scrubbing <code>.env</code> secrets and API keys automatically.</p>
+          <h3>Slice noise &amp; block attacks in &lt;3ms.</h3>
+          <p>Extracts exact AST symbols and crash stack traces locally before cloud egress, scrubs 23+ secret formats, and enforces <code>0.0% ASR</code> across live <code>AgentDojo</code>, <code>InjecAgent</code> &amp; <code>OS-Harm</code> (<code>0.0% FPR</code> on <code>2,197</code> benign controls).</p>
         </div>
 
         <div class="anatomy-card">
@@ -1546,23 +1675,40 @@
     const TERM_CMDS = {
       begin: {
         raw: "curl -fsSL https://wholebodycompute.com/begin | sh",
-        html: 'curl -fsSL <span class="cmd-hl">https://wholebodycompute.com/begin</span> | sh'
+        html:
+          '<div class="term-line"><span class="terminal-prompt">$</span><span class="term-code">curl -fsSL <span class="cmd-hl">https://wholebodycompute.com/begin</span> <span class="cmd-op">|</span> sh</span></div>',
+        sub:
+          '<span>Installs <code>body</code> CLI &amp; wires Claude Code, Cursor &amp; Antigravity</span><span class="term-sub-badge">Apple Silicon &bull; $0</span>'
       },
       brew: {
         raw: "brew tap wholebodycompute/tap && brew trust wholebodycompute/tap && brew install wholebodycompute/tap/whole-body-compute && body begin",
-        html: 'brew tap <span class="cmd-hl">wholebodycompute/tap</span> &amp;&amp; brew trust wholebodycompute/tap &amp;&amp; brew install <span class="cmd-hl">wholebodycompute/tap/whole-body-compute</span> &amp;&amp; body begin'
+        html:
+          '<div class="term-line"><span class="terminal-prompt">$</span><span class="term-code">brew tap <span class="cmd-hl">wholebodycompute/tap</span> <span class="cmd-op">&amp;&amp;</span> brew trust wholebodycompute/tap</span></div>' +
+          '<div class="term-line"><span class="terminal-prompt">$</span><span class="term-code">brew install <span class="cmd-hl">wholebodycompute/tap/whole-body-compute</span> <span class="cmd-op">&amp;&amp;</span> body begin</span></div>',
+        sub:
+          '<span>Verified Homebrew tap formula &bull; Copy grabs full one-liner</span><span class="term-sub-badge">macOS arm64</span>'
       },
       cask: {
         raw: "brew tap wholebodycompute/tap && brew trust wholebodycompute/tap && brew install --cask wholebodycompute/tap/whole-body-compute",
-        html: 'brew install --cask <span class="cmd-hl">wholebodycompute/tap/whole-body-compute</span> <span style="color:var(--term-muted)"># or: body eyes --install-app</span>'
+        html:
+          '<div class="term-line"><span class="terminal-prompt">$</span><span class="term-code">brew tap <span class="cmd-hl">wholebodycompute/tap</span> <span class="cmd-op">&amp;&amp;</span> brew trust wholebodycompute/tap</span></div>' +
+          '<div class="term-line"><span class="terminal-prompt">$</span><span class="term-code">brew install --cask <span class="cmd-hl">wholebodycompute/tap/whole-body-compute</span></span></div>',
+        sub:
+          '<span>Already have the CLI? Run <code class="alt-cmd-chip" onclick="copyAltCmd(event, \'body eyes --install-app\')" title="Click to copy">body eyes --install-app</code></span><span class="term-sub-badge">Notarized .app</span>'
       },
       uv: {
         raw: "uv tool install whole-body-compute && body begin",
-        html: 'uv tool install <span class="cmd-hl">whole-body-compute</span> &amp;&amp; body begin <span style="color:var(--term-muted)"># or: pipx install whole-body-compute</span>'
+        html:
+          '<div class="term-line"><span class="terminal-prompt">$</span><span class="term-code">uv tool install <span class="cmd-hl">whole-body-compute</span> <span class="cmd-op">&amp;&amp;</span> body begin</span></div>',
+        sub:
+          '<span>Or with pipx: <code class="alt-cmd-chip" onclick="copyAltCmd(event, \'pipx install whole-body-compute && body begin\')" title="Click to copy">pipx install whole-body-compute &amp;&amp; body begin</code></span><span class="term-sub-badge">PyPI Isolated</span>'
       },
       audit: {
         raw: "curl -sSL https://wholebodycompute.com/audit.py | python3",
-        html: 'curl -sSL <span class="cmd-hl">https://wholebodycompute.com/audit.py</span> | python3'
+        html:
+          '<div class="term-line"><span class="terminal-prompt">$</span><span class="term-code">curl -sSL <span class="cmd-hl">https://wholebodycompute.com/audit.py</span> <span class="cmd-op">|</span> python3</span></div>',
+        sub:
+          '<span>100% Python 3 stdlib &bull; Zero pip installs or disk writes</span><span class="term-sub-badge">Read-Only &bull; &lt;1s</span>'
       }
     };
     let activeKey = "begin";
@@ -1575,6 +1721,30 @@
       if (btn) btn.classList.add("active");
       const display = document.getElementById("termCmdDisplay");
       if (display) display.innerHTML = TERM_CMDS[key].html;
+      const subDisplay = document.getElementById("termSubDisplay");
+      if (subDisplay) subDisplay.innerHTML = TERM_CMDS[key].sub || "";
+    }
+
+    function flashCopyBtn() {
+      const btn = document.getElementById("copyBtn");
+      const copyText = document.getElementById("copyText");
+      if (btn) btn.classList.add("copied");
+      if (copyText) copyText.textContent = "Copied ✓";
+      setTimeout(() => {
+        if (btn) btn.classList.remove("copied");
+        if (copyText) copyText.textContent = "Copy";
+      }, 2000);
+    }
+
+    function copyAltCmd(evt, cmdText) {
+      if (evt) evt.stopPropagation();
+      const slug = resolveWebChannelSlug("web");
+      emitWebFunnelEvent("wbc_web_install_copied", {
+        command_tab: activeKey + "_alt",
+        surface: "web_hero_terminal_sub",
+        acquisition_source: slug
+      });
+      navigator.clipboard.writeText(cmdText).then(flashCopyBtn);
     }
 
     function emitWebFunnelEvent(eventName, extraProps) {
@@ -1674,16 +1844,7 @@
         acquisition_source: slug
       });
       const cmdToCopy = buildAttributedCmd(activeKey, "web");
-      navigator.clipboard.writeText(cmdToCopy).then(() => {
-        const btn = document.getElementById("copyBtn");
-        const copyText = document.getElementById("copyText");
-        if (btn) btn.classList.add("copied");
-        if (copyText) copyText.textContent = "Copied ✓";
-        setTimeout(() => {
-          if (btn) btn.classList.remove("copied");
-          if (copyText) copyText.textContent = "Copy";
-        }, 2000);
-      });
+      navigator.clipboard.writeText(cmdToCopy).then(flashCopyBtn);
     }
 
     function copyZeroInstallAudit() {

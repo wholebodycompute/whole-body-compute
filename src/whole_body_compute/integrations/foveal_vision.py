@@ -445,8 +445,20 @@ class FovealUIElement:
             .replace("```", "")
         )
         cleaned = redact_secrets(cleaned)
-        cleaned, _ = EpithelialScreenFilter.sanitize(cleaned)
-        return cleaned[:80]
+        cleaned, detections = EpithelialScreenFilter.sanitize(
+            cleaned,
+            source="foveal_dom",
+            record_antigen=False,
+        )
+        truncated = cleaned[:80]
+        if detections and "[NEUTRALIZED_PROMPT_INJECTION:" not in truncated:
+            tag = f"[NEUTRALIZED_PROMPT_INJECTION:{detections[0]['type']}]"
+            if len(tag) >= 80:
+                return tag[:80]
+            head_budget = max(0, 79 - len(tag))
+            prefix = cleaned[:head_budget].rstrip()
+            return f"{prefix} {tag}".strip()[:80] if prefix else tag
+        return truncated
 
     def format_line(self) -> str:
         """Format a single concise representation for LLM context envelopes."""
@@ -672,7 +684,7 @@ class FovealVisionEngine:
         val = cls._get_ax_attribute(ax_elem, "AXValue")
         val_str = str(val).strip() if isinstance(val, (str, int, float)) else ""
 
-        label = title_str or desc_str or (val_str[:120] if role == "AXStaticText" else "") or (subrole_str or "")
+        label = title_str or desc_str or (val_str[:600] if role == "AXStaticText" else "") or (subrole_str or "")
         focused = is_focused if is_focused is not None else bool(cls._get_ax_attribute(ax_elem, "AXFocused"))
         enabled_val = cls._get_ax_attribute(ax_elem, "AXEnabled")
         enabled = True if enabled_val is None else bool(enabled_val)
@@ -697,10 +709,10 @@ class FovealVisionEngine:
 
         return FovealUIElement(
             role=role,
-            label=label[:120],
-            title=title_str[:120] if title_str else label[:120],
-            description=desc_str[:120],
-            value=val_str[:2000] if val_str else None,
+            label=label[:600],
+            title=title_str[:600] if title_str else label[:600],
+            description=desc_str[:600],
+            value=val_str[:4000] if val_str else None,
             bbox=bbox,
             focused=focused,
             enabled=enabled,
@@ -1318,10 +1330,16 @@ class FovealVisionEngine:
                 except Exception:
                     pass
 
+        elem_lbl = (
+            f"{element.label} {element.title} {element.description} {element.identifier or ''}".strip()
+            if element is not None
+            else ""
+        )
         blocked, reason = AmbientPrivacyGuard.is_actuation_blocked(
             app_name=eff_app,
             window_title=eff_win,
             bundle_id=eff_bid,
+            element_label=elem_lbl,
         )
         if blocked:
             return {
@@ -1356,6 +1374,64 @@ class FovealVisionEngine:
                         "error": f"Security violation: {msg}",
                         "summary": f"Blocked {action_name}: secure password field",
                     }
+        return None
+
+    @classmethod
+    def _check_text_payload_security_gate(
+        cls,
+        action_name: str,
+        text: str,
+        snapshot: Optional[FovealWindowSnapshot] = None,
+        app_name: Optional[str] = None,
+        window_title: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Prevent GUI keystroke/paste actuation from bypassing Organ 05 Blood-Brain Barrier PreToolUse shell/secret gates
+        (e.g., typing `sudo rm -rf /`, `curl ... | bash`, `.bashrc` persistence, or live API keys into Terminal/IDEs).
+        """
+        if not text or not str(text).strip():
+            return None
+        if os.environ.get("WBC_ALLOW_SENSITIVE_ACTUATION", "").strip() == "1":
+            return None
+        from whole_body_compute.organs.immune import VascularTrafficMonitor
+
+        eff_app = (app_name or (snapshot.app_name if snapshot else "") or "").strip().lower()
+        eff_win = (window_title or (snapshot.window_title if snapshot else "") or "").strip().lower()
+        is_shell_surface = any(
+            tok in f"{eff_app} {eff_win}"
+            for tok in (
+                "terminal",
+                "iterm",
+                "warp",
+                "ghostty",
+                "alacritty",
+                "kitty",
+                "wezterm",
+                "hyper",
+                "konsole",
+                "zsh",
+                "bash",
+            )
+        )
+        vasc = VascularTrafficMonitor.inspect_shell_command(str(text), record_antigen_on_block=False)
+        if not vasc.get("allowed", True):
+            vtype = str(vasc.get("violation_type") or "")
+            if is_shell_surface or vtype in (
+                "inline_secret_exposure",
+                "credential_file_exfiltration",
+                "privilege_escalation",
+                "reverse_shell",
+                "reward_hacking_tamper",
+            ):
+                return {
+                    "status": "error",
+                    "action": action_name,
+                    "method": "blocked_vascular_payload",
+                    "security_blocked": True,
+                    "cursor_moved": False,
+                    "error": f"Security violation: {vasc.get('reason')}",
+                    "summary": f"Blocked {action_name}: {vtype or 'dangerous payload'}",
+                }
         return None
 
     @classmethod
@@ -1536,13 +1612,23 @@ class FovealVisionEngine:
                         "cursor_moved": False,
                         "summary": f"Clicked '{target}' via background {dom_res.get('browser', 'Chromium')} DOM",
                     }
-            return {
-                "status": "error",
-                "method": "none",
-                "target": str(target),
-                "error": f"Element '{target}' not found in snapshot",
-                "summary": f"Element '{target}' not found",
-            }
+                return {
+                    "status": "error",
+                    "method": "none",
+                    "target": str(target),
+                    "error": f"Element '{target}' not found in snapshot",
+                    "summary": f"Element '{target}' not found",
+                }
+
+        sec_elem = cls._check_actuation_security_gate(
+            "click",
+            app_name=eff_app,
+            window_title=eff_win,
+            snapshot=snapshot,
+            element=element,
+        )
+        if sec_elem is not None:
+            return sec_elem
 
         # Attempt native AXPress
         ax_press_ok = False
@@ -2204,6 +2290,7 @@ class FovealVisionEngine:
         target_pid = snapshot.pid if snapshot and snapshot.pid else pid
         target_app = snapshot.app_name if snapshot and snapshot.app_name else app_name
         target_win = snapshot.window_title if snapshot and snapshot.window_title else window_title
+        t_chain0 = time.perf_counter()
 
         sec_err = cls._check_actuation_security_gate(
             "execute_chain",
@@ -2377,6 +2464,48 @@ class FovealVisionEngine:
                 pass
 
         tactile_delta = cls.compute_tactile_delta(current_snap, post_snap) if current_snap else {"verified": True, "delta_count": 0}
+        if (
+            not os.environ.get("PYTEST_CURRENT_TEST")
+            or os.environ.get("WBC_ENABLE_REFLEX_GATE_IN_TESTS") == "1"
+            or "WBC_DATA_DIR" in os.environ
+        ):
+            try:
+                from whole_body_compute.local.reflex_gate import (
+                    StructuralSignals,
+                    record_shadow_evaluation_async,
+                )
+
+                chain_ok = (
+                    bool(actions_taken)
+                    and all(a.get("status") == "success" for a in actions_taken)
+                    and bool(tactile_delta.get("verified", True))
+                )
+                chain_lat_ms = round((time.perf_counter() - t_chain0) * 1000.0, 2)
+                step_summary = ",".join(
+                    str(s.get("action") or s.get("type") or s).split(":", 1)[0].strip().lower()
+                    for s in raw_steps[:8]
+                )
+                record_shadow_evaluation_async(
+                    gate_id="foveal_hands_chain",
+                    text=f"foveal_hands_chain | {target_app or 'app'} | {step_summary}",
+                    actual_ok=chain_ok,
+                    signals=StructuralSignals(
+                        file_lines=len(raw_steps),
+                        symbol_count=len(actions_taken),
+                        exact_symbol_mention=bool(target_app),
+                        turn_depth=len(raw_steps),
+                    ),
+                    repo_key="__global__",
+                    model_name="body-coder-mlx",
+                    latency_ms=chain_lat_ms,
+                    metadata={
+                        "app_name": target_app or "",
+                        "steps_count": len(raw_steps),
+                        "tactile_verified": bool(tactile_delta.get("verified", True)),
+                    },
+                )
+            except Exception:
+                pass
 
         return {
             "status": "success" if all(a.get("status") == "success" for a in actions_taken) else "partial",
@@ -2488,6 +2617,9 @@ class FovealVisionEngine:
         )
         if sec_err is not None:
             return sec_err
+        sec_payload = cls._check_text_payload_security_gate("paste", text, snapshot=snapshot)
+        if sec_payload is not None:
+            return sec_payload
         guard = cls._check_human_hid_guard(target_pid=target_pid, allow_focus_steal=allow_focus_steal)
 
         target_elem: Optional[FovealUIElement] = None
@@ -2978,6 +3110,9 @@ class FovealVisionEngine:
         )
         if sec_pre is not None:
             return sec_pre
+        sec_payload = cls._check_text_payload_security_gate("type_text", text, snapshot=snapshot)
+        if sec_payload is not None:
+            return sec_payload
 
         target_elem: Optional[FovealUIElement] = None
         if target:
@@ -3964,6 +4099,77 @@ class FovealVisionEngine:
                     latency_ms=(time.perf_counter() - t0) * 1000.0,
                 )
 
+            has_actuation_req = bool(
+                click
+                or click_xy
+                or hover
+                or right_click
+                or attach
+                or chain
+                or type_text
+                or paste_text
+                or scroll
+                or hotkey
+                or menu
+                or submit
+            )
+
+            # Fast-skip prohibited/headless CLI processes (activationPolicy == 2) that own zero GUI windows
+            try:
+                from AppKit import NSRunningApplication
+
+                run_app = NSRunningApplication.runningApplicationWithProcessIdentifier_(int(app_pid))
+                if run_app is not None and int(run_app.activationPolicy()) == 2 and not include_status_bar:
+                    snap_cli = FovealWindowSnapshot(
+                        app_name=resolved_app_name,
+                        bundle_id=bundle_id,
+                        pid=app_pid,
+                        window_title="",
+                        latency_ms=round((time.perf_counter() - t0) * 1000.0, 3),
+                        headless_route="SKIPPED: Non-GUI background/CLI process (NSApplicationActivationPolicyProhibited).",
+                    )
+                    if record_telemetry:
+                        _record_foveal_shield_telemetry(snap_cli)
+                    return snap_cli
+            except Exception:
+                pass
+
+            # 5s negative-result TTL cache for repeated empty_dom polls on the same (pid, query, flags)
+            empty_cache = getattr(cls, "_EMPTY_DOM_TTL_CACHE", None)
+            if empty_cache is None:
+                empty_cache = {}
+                setattr(cls, "_EMPTY_DOM_TTL_CACHE", empty_cache)
+            empty_key = (
+                int(app_pid),
+                str(window_title_query or ""),
+                str(filter_query or ""),
+                bool(include_floating),
+                bool(include_status_bar),
+            )
+            now_mono = time.monotonic()
+            cached_empty = empty_cache.get(empty_key)
+            if (
+                not has_actuation_req
+                and cached_empty is not None
+                and (now_mono - cached_empty[0]) < 5.0
+                and os.environ.get("WBC_DISABLE_EMPTY_DOM_CACHE") != "1"
+            ):
+                snap_cached = FovealWindowSnapshot(
+                    app_name=resolved_app_name,
+                    bundle_id=bundle_id,
+                    pid=app_pid,
+                    window_title=cached_empty[1],
+                    window_bbox=cached_empty[2],
+                    focused_element=None,
+                    interactive_elements=[],
+                    latency_ms=round((time.perf_counter() - t0) * 1000.0, 3),
+                    headless_route=cached_empty[3],
+                    filter_query=filter_query,
+                )
+                if record_telemetry:
+                    _record_foveal_shield_telemetry(snap_cached)
+                return snap_cached
+
             # Blood-Brain Barrier: Block password managers / auth vaults (both localized name & bundle_id)
             if (
                 AmbientPrivacyGuard.is_app_blocked(resolved_app_name, bundle_id=bundle_id)
@@ -4174,6 +4380,14 @@ class FovealVisionEngine:
             # Assign deterministic short IDs
             for idx, el in enumerate(interactive_elems, 1):
                 el.id = f"e{idx}"
+
+            if not interactive_elems and focused_elem is None:
+                empty_cache[empty_key] = (time.monotonic(), window_title, window_bbox, headless_route)
+                if len(empty_cache) > 128:
+                    oldest_k = next(iter(empty_cache))
+                    empty_cache.pop(oldest_k, None)
+            elif empty_key in empty_cache:
+                empty_cache.pop(empty_key, None)
 
             elapsed = round((time.perf_counter() - t0) * 1000.0, 3)
 

@@ -109,7 +109,7 @@ EXACT_BLOCKED_APP_NAMES: Set[str] = {
     "passwords",
 }
 
-# OS security/TCC & system preference surfaces blocked from autonomous UI actuation by default
+# OS security/TCC, account-management & disk-partitioning surfaces blocked from autonomous UI actuation by default
 BLOCKED_PRIVILEGED_ACTUATION_APPS: Set[str] = {
     "system settings",
     "system preferences",
@@ -118,9 +118,19 @@ BLOCKED_PRIVILEGED_ACTUATION_APPS: Set[str] = {
     "universalaccessauthwarn",
     "userauthenticationagent",
     "tccd",
+    "disk utility",
+    "gnome-disks",
+    "gparted",
+    "gnome-control-center",
+    "users & groups",
 }
 
-# Canonical macOS bundle identifier prefixes for password vaults & privileged security dialogs (locale-invariant)
+EXACT_BLOCKED_PRIVILEGED_APPS: Set[str] = {
+    "disks",
+    "settings",
+}
+
+# Canonical macOS/Linux bundle identifier prefixes for password vaults & privileged security dialogs (locale-invariant)
 BLOCKED_VAULT_BUNDLE_PREFIXES: Tuple[str, ...] = (
     "com.1password",
     "com.agilebits.onepassword",
@@ -143,6 +153,24 @@ BLOCKED_PRIVILEGED_BUNDLE_PREFIXES: Tuple[str, ...] = (
     "com.apple.coreservices.uiagent",
     "com.apple.universalaccessauthwarn",
     "com.apple.localauthentication",
+    "com.apple.diskutility",
+    "org.gnome.diskutility",
+    "org.gnome.settings",
+)
+
+# Anti-bot / CAPTCHA challenge surfaces that autonomous GUI actuation must never click or solve
+CAPTCHA_SURFACE_PATTERNS: Tuple[str, ...] = (
+    "recaptcha",
+    "hcaptcha",
+    "cloudflare turnstile",
+    "cf-turnstile",
+    "arkose",
+    "funcaptcha",
+    "g-recaptcha",
+    "i'm not a robot",
+    "i am not a robot",
+    "verify you are human",
+    "solve the captcha",
 )
 
 # Standard nspasteboard.org & password-manager markers for concealed/transient secrets
@@ -278,17 +306,34 @@ class AmbientPrivacyGuard:
         return False, ""
 
     @classmethod
+    def is_captcha_surface(
+        cls,
+        window_title: str = "",
+        url: str = "",
+        element_label: str = "",
+    ) -> Tuple[bool, str]:
+        """Return (True, reason) if a window, URL, or target UI element is a CAPTCHA / anti-bot gate."""
+        combined = f"{window_title or ''} {url or ''} {element_label or ''}".strip().lower()
+        if not combined:
+            return False, ""
+        for pat in CAPTCHA_SURFACE_PATTERNS:
+            if pat in combined:
+                return True, f"Target matches anti-bot CAPTCHA challenge surface '{pat}'"
+        return False, ""
+
+    @classmethod
     def is_actuation_blocked(
         cls,
         app_name: str = "",
         window_title: str = "",
         url: str = "",
         bundle_id: str = "",
+        element_label: str = "",
     ) -> Tuple[bool, str]:
         """
         Enforce mandatory UI actuation denylist across password managers, OS TCC/Auth dialogs,
-        System Settings, and sensitive web vault origins unless explicitly overridden via
-        `WBC_ALLOW_SENSITIVE_ACTUATION=1`. # [direct-edit]
+        System Settings, disk partitioners, CAPTCHA challenges, and sensitive web vault origins
+        unless explicitly overridden via `WBC_ALLOW_SENSITIVE_ACTUATION=1`. # [direct-edit]
         """
         if os.environ.get("WBC_ALLOW_SENSITIVE_ACTUATION", "").strip() == "1":
             return False, ""
@@ -296,13 +341,22 @@ class AmbientPrivacyGuard:
             return True, f"Application '{app_name or bundle_id}' is a protected password manager / vault"
         clean_bid = (bundle_id or "").strip().lower()
         if clean_bid and any(clean_bid == p or clean_bid.startswith(p + ".") for p in BLOCKED_PRIVILEGED_BUNDLE_PREFIXES):
-            return True, f"Application '{app_name or bundle_id}' is a protected macOS system/security surface"
+            return True, f"Application '{app_name or bundle_id}' is a protected OS system/security surface"
         clean_app = (app_name or "").strip().lower()
-        if clean_app and any(priv in clean_app for priv in BLOCKED_PRIVILEGED_ACTUATION_APPS):
-            return True, f"Application '{app_name}' is a protected macOS system/security surface"
+        if clean_app in EXACT_BLOCKED_PRIVILEGED_APPS or (
+            clean_app and any(priv in clean_app for priv in BLOCKED_PRIVILEGED_ACTUATION_APPS)
+        ):
+            return True, f"Application '{app_name}' is a protected OS system/security surface"
         sens_orig, orig_reason = cls.is_sensitive_origin(window_title=window_title, url=url)
         if sens_orig:
             return True, orig_reason
+        cap_hit, cap_reason = cls.is_captcha_surface(
+            window_title=window_title,
+            url=url,
+            element_label=element_label,
+        )
+        if cap_hit:
+            return True, cap_reason
         return False, ""
 
     @classmethod
@@ -1992,6 +2046,7 @@ def promote_staged_candidate(
 def discover_now_from_ambient_sources(
     candidates_dir: Optional[Path] = None,
     events_log_path: Optional[Path] = None,
+    foveal_memory_db: Optional[Path] = None,
     screenpipe_db: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """
@@ -2017,10 +2072,10 @@ def discover_now_from_ambient_sources(
     staged_ids: List[str] = [c.recipe.id for c in staged_from_journal if c.recipe]
 
     # Also mine recent Foveal Memory OCR multi-app transitions if available
-    sp_db = Path(screenpipe_db or DEFAULT_FOVEAL_MEMORY_DB)
-    if sp_db.is_file():
+    fm_db = Path(foveal_memory_db or screenpipe_db or DEFAULT_FOVEAL_MEMORY_DB)
+    if fm_db.is_file():
         try:
-            conn = sqlite3.connect(f"file:{sp_db}?mode=ro", uri=True, timeout=3.0)
+            conn = sqlite3.connect(f"file:{fm_db}?mode=ro", uri=True, timeout=3.0)
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """
@@ -2058,7 +2113,7 @@ def discover_now_from_ambient_sources(
                 recipe, _ir_prog, _report = PalCompiler.compile_demonstration(
                     raw_steps=steps,
                     voice_notes=[f"Transition across {', '.join(sorted(distinct_apps))}"],
-                    workflow_name="Ambient Screenpipe Multi-App Flow",
+                    workflow_name="Ambient Foveal Multi-App Flow",
                 )
                 c_dir.mkdir(parents=True, exist_ok=True)
                 cand_path = c_dir / f"{recipe.id}.yaml"
@@ -2073,7 +2128,7 @@ def discover_now_from_ambient_sources(
                 if recipe.id not in staged_ids:
                     staged_ids.append(recipe.id)
         except Exception as exc:
-            logger.debug("On-demand Screenpipe discovery notice: %s", exc)
+            logger.debug("On-demand Foveal Memory discovery notice: %s", exc)
 
     try:
         from whole_body_compute.procedural_telemetry import track_wbc_event

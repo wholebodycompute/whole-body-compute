@@ -1226,22 +1226,63 @@ class LocalVaultSynthesizer:
         chunks: List[VaultChunk],
         mode: str = "qa",
     ) -> Tuple[Optional[str], str, bool]:
-        """Route synthesis through HybridRouter to local Ollama (or Cloud fallback)."""
+        """Route prose/Q&A synthesis through HybridRouter -> `localbench-specialist-router` (:9380/:9379) or Ollama."""
         from whole_body_compute.local.router import default_router
 
-        task_role = "coder" if mode == "socratic" else "scout"
-        decision = default_router.resolve_model(task_type=task_role)
+        task_role = "prose"
+        decision = default_router.resolve_model(task_type=task_role, prefer_warm_reflex=False)
 
         context_block = "\n\n".join(
             f"[{c.citation} | Heading: {c.heading}]\n{c.content[:500]}" for c in chunks
         )
-        sys_prompt = self.SOCRATIC_SYSTEM_PROMPT if mode == "socratic" else self.QA_SYSTEM_PROMPT
+        base_sys = self.SOCRATIC_SYSTEM_PROMPT if mode == "socratic" else self.QA_SYSTEM_PROMPT
+        sys_prompt = f"You are an executive business writing and knowledge-base synthesizer.\n{base_sys}"
         user_prompt = f"Query: {query}\n\nVault & Git Excerpts:\n{context_block}"
 
         if decision.is_local:
+            # 1. Try warm SpecialistRouter / LiteRT / MLX Metal bridges (:9380 -> :9379) first (100% unplugged-safe)
+            selected = decision.selected_model or "localbench-specialist-router"
+            if selected in ("localbench-specialist-router", "specialist-router", "gemma4-2b", "body-coder-mlx"):
+                for port, wire_model in (
+                    (9380, selected),
+                    (9379, selected),
+                    (9379, "gemma4-2b"),
+                ):
+                    try:
+                        req = urllib.request.Request(
+                            f"http://127.0.0.1:{port}/v1/chat/completions",
+                            data=json.dumps(
+                                {
+                                    "model": wire_model,
+                                    "messages": [
+                                        {"role": "system", "content": sys_prompt},
+                                        {"role": "user", "content": user_prompt},
+                                    ],
+                                    "stream": False,
+                                    "temperature": 0.3 if mode == "socratic" else 0.1,
+                                    "max_tokens": 180,
+                                }
+                            ).encode("utf-8"),
+                            headers={"Content-Type": "application/json"},
+                            method="POST",
+                        )
+                        with urllib.request.urlopen(req, timeout=4.5) as resp:
+                            data = json.loads(resp.read().decode("utf-8"))
+                            choices = data.get("choices") or []
+                            text = str((choices[0].get("message") or {}).get("content", "")).strip() if choices else ""
+                            if text:
+                                clean = re.sub(r"[*_#`>]", "", text).strip()
+                                return clean, f"metal/{data.get('model', wire_model)}", True
+                    except Exception:
+                        continue
+
+            # 2. Fallback to local Ollama (:11434)
             base_url = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-            # For fast interactive response (<2.5s), prefer fast local tier if 26b isn't warm
-            candidate_models = [decision.selected_model, "qwen2.5-coder:1.5b", "gemma2:2b"]
+            candidate_models = [
+                m
+                for m in (decision.selected_model, "gemma2:2b", "qwen2.5-coder:1.5b")
+                if m and m not in ("localbench-specialist-router", "specialist-router", "gemma4-2b", "body-coder-mlx")
+            ]
             seen = set()
             for mdl in candidate_models:
                 if not mdl or mdl in seen or mdl.startswith("cloud:"):

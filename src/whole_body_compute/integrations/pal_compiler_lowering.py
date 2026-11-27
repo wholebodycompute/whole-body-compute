@@ -202,8 +202,8 @@ class UniversalAPILoweringResolver:
           Stage 1 (<1ms): Deterministic sieve drops 90%+ static assets, fonts, preflight OPTIONS,
                           and analytics/telemetry beacons from a noisy browser HAR dump.
           Stage 2 (<150ms): Taint-scores remaining JSON/REST/GraphQL candidates against UI literals
-                            and uses local `tev1:0.8b` (:11434) when multiple
-                            business endpoints compete.
+                            and uses local `body-coder-mlx` (:9379) / `:9380` / Ollama fallback
+                            when multiple business endpoints compete.
         """
         import urllib.request
 
@@ -258,7 +258,7 @@ class UniversalAPILoweringResolver:
         if len(candidates) == 1 or not use_local_llm or (candidates[0][0] - candidates[1][0]) >= 25.0:
             return candidates[0][1]
 
-        # Stage 2: Ask `tev1:0.8b` (:11434) Traffic Cop to disambiguate top candidates
+        # Stage 2: Ask `body-coder-mlx` (:9379) -> `:9380` -> Ollama fallback Traffic Cop to disambiguate
         top_slice = [c[1] for c in candidates[:5]]
         summary_lines = [
             f"[{i}] {c['method']} {c['url']} | body={str(c.get('body'))[:140]}"
@@ -271,7 +271,42 @@ class UniversalAPILoweringResolver:
             f"UI Values: {clean_lits}\n"
             "Candidates:\n" + "\n".join(summary_lines)
         )
-        for model_name in ("tev1:0.8b", "qwen2.5-coder:1.5b"):
+        for endpoint, model_name in (
+            ("http://127.0.0.1:9379/v1/chat/completions", "body-coder-mlx"),
+            ("http://127.0.0.1:9380/v1/chat/completions", "gemma4-26b"),
+        ):
+            try:
+                payload = json.dumps(
+                    {
+                        "model": model_name,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.0,
+                        "max_tokens": 40,
+                    }
+                ).encode("utf-8")
+                req = urllib.request.Request(
+                    endpoint,
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=1.5) as resp:
+                    if resp.status == 200:
+                        raw = (
+                            json.loads(resp.read().decode("utf-8"))
+                            .get("choices", [{}])[0]
+                            .get("message", {})
+                            .get("content", "")
+                        )
+                        m = re.search(r'"selected_index"\s*:\s*(\d+)', raw)
+                        if m:
+                            idx_val = int(m.group(1))
+                            if 0 <= idx_val < len(top_slice):
+                                return top_slice[idx_val]
+            except Exception:
+                continue
+
+        for model_name in ("body-coder:1.5b", "tev1:0.8b", "qwen2.5-coder:1.5b"):
             try:
                 payload = json.dumps(
                     {

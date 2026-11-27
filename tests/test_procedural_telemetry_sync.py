@@ -1017,6 +1017,74 @@ def test_pro_conversion_friction_fixes_doctor_paywall_and_free_csi(
     assert sent_urls == ["https://wholebodycompute.com/v1/telemetry"]
 
 
+def test_usage_stats_excludes_test_workflows_and_surfaces_unread_skills(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify synthetic *_test/test_*/*_mock workflows are excluded and 0-read installed skills are surfaced."""
+    from whole_body_compute.skills_telemetry import record_skill_activation
+
+    wbc_dir = tmp_path / "wbc_data"
+    tel_dir = wbc_dir / "telemetry"
+    tel_dir.mkdir(parents=True, exist_ok=True)
+    fake_home = tmp_path / "home"
+    ws_dir = tmp_path / "workspace"
+    (fake_home / ".agents" / "skills" / "unread-alpha").mkdir(parents=True)
+    (fake_home / ".agents" / "skills" / "unread-alpha" / "SKILL.md").write_text(
+        "---\nname: unread-alpha\ndescription: Unread alpha skill.\n---\nBody\n",
+        encoding="utf-8",
+    )
+    (ws_dir / ".agents" / "skills" / "read-beta").mkdir(parents=True)
+    (ws_dir / ".agents" / "skills" / "read-beta" / "SKILL.md").write_text(
+        "---\nname: read-beta\ndescription: Read beta skill.\n---\nBody\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("WBC_DATA_DIR", str(wbc_dir))
+    monkeypatch.setenv("WBC_AUDIT_HOME_DIR", str(fake_home))
+    monkeypatch.setenv("WBC_SKILL_TELEMETRY_PATH", str(wbc_dir / "skill_telemetry.json"))
+    monkeypatch.setenv("WBC_USAGE_STATS_PATH", str(wbc_dir / "usage_stats.json"))
+    monkeypatch.setenv("WBC_TELEMETRY_CONFIG_PATH", str(wbc_dir / "telemetry_consent.json"))
+    monkeypatch.chdir(ws_dir)
+
+    record_skill_activation(
+        str(ws_dir / ".agents" / "skills" / "read-beta" / "SKILL.md"),
+        conversation_id="conv-real-1",
+    )
+
+    pal_savings = {
+        "total_runs": 105,
+        "total_tokens_saved": 999_000,
+        "total_screen_mb_saved": 88.5,
+        "workflows": {
+            "hotkey_test": {"runs": 50, "tokens_saved": 500_000, "screen_mb_saved": 40.0},
+            "type_test": {"runs": 30, "tokens_saved": 300_000, "screen_mb_saved": 25.0},
+            "test_synthetic": {"runs": 10, "tokens_saved": 100_000, "screen_mb_saved": 10.0},
+            "browser_mock": {"runs": 10, "tokens_saved": 50_000, "screen_mb_saved": 8.5},
+            "daily_pr_triage": {"runs": 5, "tokens_saved": 49_000, "screen_mb_saved": 5.0},
+        },
+    }
+    (tel_dir / "pal_cloud_savings.json").write_text(json.dumps(pal_savings), encoding="utf-8")
+
+    rep = get_comprehensive_usage_stats_report(stats_path=wbc_dir / "usage_stats.json")
+    wf = rep["workflow_automations"]
+    assert wf["workflows_count"] == 1
+    assert list(wf["workflows"].keys()) == ["daily_pr_triage"]
+    assert wf["total_runs"] == 5
+    assert wf["total_tokens_saved"] == 49_000
+    assert wf["total_screen_mb_saved"] == 5.0
+    assert wf["excluded_test_workflows_count"] == 4
+
+    sk = rep["skills_telemetry"]
+    assert sk["installed_skills_count"] == 2
+    assert sk["unread_skills_count"] == 1
+    assert sk["unread_skill_names"] == ["unread-alpha"]
+    assert sk["turn0_skills_tokens_per_turn"] > 0
+
+    rendered = format_usage_stats_table(rep)
+    assert "2 installed | 1 unread (0 reads)" in rendered
+    assert "5 run(s) across 1 recipes (49,000 cloud tokens saved" in rendered
+
+
 
 
 

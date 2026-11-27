@@ -547,40 +547,42 @@ def capture_apple_vision_ocr(fast_level: int = 1) -> Optional[Tuple[str, str, st
         return None
 
     try:
+        import objc
         from Foundation import NSURL
 
         VNRecognizeTextRequest, VNImageRequestHandler = _get_vision_classes()
         if VNRecognizeTextRequest is None or VNImageRequestHandler is None:
             return None
 
-        app_name, win_name = get_frontmost_window_metadata()
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as tmp:
-            subprocess.run(
-                ["screencapture", "-x", "-m", tmp.name],
-                check=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2.0,
-            )
-            url = NSURL.fileURLWithPath_(tmp.name)
-            handler = VNImageRequestHandler.alloc().initWithURL_options_(url, None)
-            req = VNRecognizeTextRequest.alloc().init()
-            req.setRecognitionLevel_(int(fast_level))  # 1 = Fast (~350ms), 0 = Accurate
-            ok = handler.performRequests_error_([req], None)
-            if not ok:
-                return None
-            obs = req.results() or []
-            lines: List[str] = []
-            for o in obs:
-                cand = o.topCandidates_(1)
-                if cand and len(cand) > 0:
-                    s = str(cand[0].string()).strip()
-                    if s:
-                        lines.append(s)
-            full_text = strip_ui_chrome_from_ocr("\n".join(lines).strip())
-            if full_text:
-                return (app_name, win_name, full_text)
+        with objc.autorelease_pool():
+            app_name, win_name = get_frontmost_window_metadata()
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as tmp:
+                subprocess.run(
+                    ["screencapture", "-x", "-m", tmp.name],
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2.0,
+                )
+                url = NSURL.fileURLWithPath_(tmp.name)
+                handler = VNImageRequestHandler.alloc().initWithURL_options_(url, None)
+                req = VNRecognizeTextRequest.alloc().init()
+                req.setRecognitionLevel_(int(fast_level))  # 1 = Fast (~350ms), 0 = Accurate
+                ok = handler.performRequests_error_([req], None)
+                if not ok:
+                    return None
+                obs = req.results() or []
+                lines: List[str] = []
+                for o in obs:
+                    cand = o.topCandidates_(1)
+                    if cand and len(cand) > 0:
+                        s = str(cand[0].string()).strip()
+                        if s:
+                            lines.append(s)
+                full_text = strip_ui_chrome_from_ocr("\n".join(lines).strip())
+                if full_text:
+                    return (app_name, win_name, full_text)
     except Exception:
         pass
     return None
@@ -1679,8 +1681,48 @@ class FovealVisionMCPServer:
             },
         ]
 
+    @staticmethod
+    def _is_local_port_open(host: str, port: int, timeout: float = 0.025) -> bool:
+        import socket
+
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_valid_screen_summary(ans: str) -> bool:
+        """Validate that a local screen summary is substantive and not a refusal/placeholder."""
+        if not ans:
+            return False
+        ans_clean = ans.strip()
+        ans_low = ans_clean.lower().strip(" .!?:;")
+        return bool(
+            len(ans_clean) >= 10
+            and ans_low not in ("none", "n/a", "null", "unknown")
+            and "cannot answer this question" not in ans_low
+            and "do not have access" not in ans_low
+        )
+
     def _query_local_screen_summary(self, question: str, context_block: str) -> str:
-        """Route to local model via HybridRouter (:9380 / :9379 / Ollama)."""
+        """Route to local model via HybridRouter (:9380 / :9379 / Ollama) with <300-token fast bypass."""
+        from whole_body_compute.redaction import redact_secrets
+
+        if (
+            len(context_block) < 1200
+            and os.environ.get("WBC_FORCE_SCREEN_LLM_DIGEST") != "1"
+        ):
+            clean_ctx = redact_secrets(context_block.strip())
+            return f"Local Screen Context (Direct <1ms Pass-Through):\n{clean_ctx}"
+
+        from whole_body_compute.local.shadow_ledger import (
+            is_external_models_drive_mounted,
+            is_infra_error,
+            record_shadow_eval,
+            strip_llm_fences_and_thoughts,
+        )
+
         prompt = (
             f"You are the Whole Body Compute Local Screen Analyst running on Apple Silicon.\n"
             f"Based strictly on the following recent screen/audio context, answer the user's question concisely in 1-3 sentences without leaking secrets.\n\n"
@@ -1698,75 +1740,151 @@ class FovealVisionMCPServer:
         except Exception:
             pass
 
-        # 1. Try :9380 SpecialistRouter
-        try:
-            body = json.dumps({
-                "model": "gemma4-26b",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 160,
-                "temperature": 0.1,
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                "http://127.0.0.1:9380/v1/chat/completions",
-                data=body,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=1.5) as resp:
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    ans = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                    if ans:
-                        return f"Local Screen Summary: {ans}"
-        except Exception:
-            pass
+        shadow_enabled = os.environ.get("WBC_ROUTER_SHADOW") == "1"
+        tokens_est = max(0, len(context_block) // 4)
 
-        # 2. Try :9379 MLX
-        try:
-            body = json.dumps({
-                "model": "voicefi-coder-mlx",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 160,
-                "temperature": 0.1,
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                "http://127.0.0.1:9379/v1/chat/completions",
-                data=body,
-                headers={"Content-Type": "application/json"},
-                method="POST",
+        def _record_foveal_shadow(
+            *,
+            engine: str,
+            model: str,
+            latency_ms: float,
+            valid_guardrail: bool,
+            infra_skip: bool = False,
+            extra: dict | None = None,
+        ) -> None:
+            if not shadow_enabled:
+                return
+            record_shadow_eval(
+                task_type="foveal_screen_summary",
+                engine=engine,
+                model=model,
+                latency_ms=latency_ms,
+                valid_guardrail=valid_guardrail,
+                baseline_used="live_foveal",
+                sla_ms=1800.0,
+                tokens_saved_est=tokens_est,
+                infra_skip=infra_skip,
+                extra=extra,
             )
-            with urllib.request.urlopen(req, timeout=1.5) as resp:
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    ans = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                    if ans:
-                        return f"Local Screen Summary: {ans}"
-        except Exception:
-            pass
 
-        # 3. Try Ollama :11434
-        for cand_model in (selected_model, "tev1:0.8b", "qwen2.5-coder:1.5b"):
-            try:
-                body = json.dumps({
-                    "model": cand_model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"num_predict": 120, "temperature": 0.1},
-                }).encode("utf-8")
-                req = urllib.request.Request(
-                    "http://127.0.0.1:11434/api/generate",
-                    data=body,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=2.0) as resp:
-                    if resp.status == 200:
-                        data = json.loads(resp.read().decode("utf-8"))
-                        ans = data.get("response", "").strip()
-                        if ans:
-                            return f"Local Screen Summary: {ans}"
-            except Exception:
-                continue
+        # 1 & 2. Try :9380 SpecialistRouter then :9379 MLX (fast 25ms TCP check first)
+        openai_targets: list[tuple[int, str, tuple[str, ...]]] = []
+        if self._is_local_port_open("127.0.0.1", 9380, timeout=0.025):
+            if not is_external_models_drive_mounted() or len(context_block) < 4000:
+                models_9380: tuple[str, ...] = ("localbench-specialist-router",)
+            else:
+                models_9380 = ("gemma4-26b", "localbench-specialist-router")
+            openai_targets.append((9380, "specialist_router_9380", models_9380))
+        if self._is_local_port_open("127.0.0.1", 9379, timeout=0.025):
+            openai_targets.append((9379, "mlx_metal_9379", ("body-coder-mlx", "voicefi-coder-mlx")))
+
+        for port, engine_name, cand_models in openai_targets:
+            for cand_model in cand_models:
+                t_start = time.perf_counter()
+                try:
+                    body = json.dumps({
+                        "model": cand_model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 160,
+                        "temperature": 0.1,
+                    }).encode("utf-8")
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:{port}/v1/chat/completions",
+                        data=body,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=1.5) as resp:
+                        lat_ms = (time.perf_counter() - t_start) * 1000.0
+                        if resp.status == 200:
+                            data = json.loads(resp.read().decode("utf-8"))
+                            raw_ans = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                            ans = redact_secrets(strip_llm_fences_and_thoughts(str(raw_ans))).strip()
+                            is_valid_ans = self._is_valid_screen_summary(ans)
+                            _record_foveal_shadow(
+                                engine=engine_name,
+                                model=str(data.get("model") or cand_model),
+                                latency_ms=lat_ms,
+                                valid_guardrail=is_valid_ans,
+                            )
+                            if is_valid_ans:
+                                return f"Local Screen Summary: {ans}"
+                        elif is_infra_error(status_code=resp.status):
+                            _record_foveal_shadow(
+                                engine=engine_name,
+                                model=cand_model,
+                                latency_ms=lat_ms,
+                                valid_guardrail=False,
+                                infra_skip=True,
+                                extra={"status_code": resp.status},
+                            )
+                except Exception as exc:
+                    if is_infra_error(exc=exc):
+                        _record_foveal_shadow(
+                            engine=engine_name,
+                            model=cand_model,
+                            latency_ms=(time.perf_counter() - t_start) * 1000.0,
+                            valid_guardrail=False,
+                            infra_skip=True,
+                            extra={"error": type(exc).__name__},
+                        )
+                    continue
+
+        # 3. Try Ollama :11434 (fast 25ms TCP check + /api/chat think=False for tev1)
+        if self._is_local_port_open("127.0.0.1", 11434, timeout=0.025):
+            for cand_model in (selected_model, "tev1:0.8b", "qwen2.5-coder:1.5b"):
+                t_start = time.perf_counter()
+                try:
+                    chat_payload: Dict[str, Any] = {
+                        "model": cand_model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "stream": False,
+                        "options": {"num_predict": 120, "temperature": 0.1},
+                    }
+                    if "tev1" in cand_model.lower() or "qwen3" in cand_model.lower():
+                        chat_payload["think"] = False
+                    body = json.dumps(chat_payload).encode("utf-8")
+                    req = urllib.request.Request(
+                        "http://127.0.0.1:11434/api/chat",
+                        data=body,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=2.0) as resp:
+                        lat_ms = (time.perf_counter() - t_start) * 1000.0
+                        if resp.status == 200:
+                            data = json.loads(resp.read().decode("utf-8"))
+                            raw_ans = (data.get("message", {}) or {}).get("content", "")
+                            ans = redact_secrets(strip_llm_fences_and_thoughts(str(raw_ans))).strip()
+                            is_valid_ans = self._is_valid_screen_summary(ans)
+                            _record_foveal_shadow(
+                                engine="ollama_11434",
+                                model=cand_model,
+                                latency_ms=lat_ms,
+                                valid_guardrail=is_valid_ans,
+                            )
+                            if is_valid_ans:
+                                return f"Local Screen Summary: {ans}"
+                        elif is_infra_error(status_code=resp.status):
+                            _record_foveal_shadow(
+                                engine="ollama_11434",
+                                model=cand_model,
+                                latency_ms=lat_ms,
+                                valid_guardrail=False,
+                                infra_skip=True,
+                                extra={"status_code": resp.status},
+                            )
+                except Exception as exc:
+                    if is_infra_error(exc=exc):
+                        _record_foveal_shadow(
+                            engine="ollama_11434",
+                            model=cand_model,
+                            latency_ms=(time.perf_counter() - t_start) * 1000.0,
+                            valid_guardrail=False,
+                            infra_skip=True,
+                            extra={"error": type(exc).__name__},
+                        )
+                    continue
 
         # 4. Fallback keyword heuristic
         q_words = [w.lower() for w in re.findall(r"[A-Za-z0-9_]+", question) if len(w) > 2]
@@ -2000,15 +2118,16 @@ class FovealVisionMCPServer:
 
                 raw_scr_tok = max(1, len(context_block) // 4)
                 comp_scr_tok = max(1, len(summary) // 4)
-                record_shield_event(
-                    event_type="screen_local_digest",
-                    target=f"ask_screen_local:{app_filter or 'all'}",
-                    raw_tokens_est=raw_scr_tok,
-                    compressed_tokens_est=comp_scr_tok,
-                    tokens_saved=max(0, raw_scr_tok - comp_scr_tok),
-                    secrets_blocked=0,
-                    latency_ms=round((time.perf_counter() - t_screen0) * 1000.0, 2),
-                )
+                if raw_scr_tok > comp_scr_tok:
+                    record_shield_event(
+                        event_type="screen_local_digest",
+                        target=f"ask_screen_local:{app_filter or 'all'}",
+                        raw_tokens_est=raw_scr_tok,
+                        compressed_tokens_est=comp_scr_tok,
+                        tokens_saved=raw_scr_tok - comp_scr_tok,
+                        secrets_blocked=0,
+                        latency_ms=round((time.perf_counter() - t_screen0) * 1000.0, 2),
+                    )
             except Exception:
                 pass
             return {

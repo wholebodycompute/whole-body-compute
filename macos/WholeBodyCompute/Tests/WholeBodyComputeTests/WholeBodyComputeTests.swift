@@ -1,9 +1,9 @@
 import Darwin
 import Foundation
 import XCTest
-@testable import WBCEyesCore
+@testable import WholeBodyComputeCore
 
-final class WBCEyesTests: XCTestCase {
+final class WholeBodyComputeTests: XCTestCase {
 
     func testKillSwitchTogglesAndCountsAtomically() {
         let ks = KillSwitch(initiallyPaused: false, initiallyEarsPaused: false)

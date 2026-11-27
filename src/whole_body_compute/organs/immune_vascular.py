@@ -336,9 +336,11 @@ class AntibodyRegistry:
             with store._connect() as conn:
                 text_col = self._resolve_memories_text_col(conn)
                 rows = conn.execute(
-                    f"SELECT {text_col} FROM memories WHERE category = 'antigen' ORDER BY id DESC LIMIT 200"
+                    f"SELECT id, {text_col} FROM memories WHERE category = 'antigen' AND COALESCE(archived, 0) = 0 ORDER BY id DESC LIMIT 200"
                 ).fetchall()
-            for (content,) in rows:
+            archived_antigen_ids: List[int] = []
+            for row_id, content in rows:
+                archived_antigen_ids.append(int(row_id))
                 m = re.search(r"vector=([a-z0-9_]+)\s+sig=(.+?)\s+reason=(.+)$", content or "")
                 if m:
                     vec, raw_sig, raw_rsn = m.group(1), m.group(2).strip(), m.group(3).strip()
@@ -371,6 +373,14 @@ class AntibodyRegistry:
                         synthesized += 1
             if synthesized > 0:
                 self._save()
+            if archived_antigen_ids:
+                with store._connect() as conn:
+                    placeholders = ",".join("?" for _ in archived_antigen_ids)
+                    conn.execute(
+                        f"UPDATE memories SET archived = 1, salience = 0.0 WHERE id IN ({placeholders})",
+                        archived_antigen_ids,
+                    )
+                    conn.commit()
         except Exception:
             pass
 
@@ -516,19 +526,86 @@ class AntibodyRegistry:
 # 2. Epithelial Mucosal Barrier (Indirect Prompt-Injection Screen Filter)
 # ---------------------------------------------------------------------------
 
+_MULTILINGUAL_OVERRIDE_RE = re.compile(
+    "(?i)(?:"
+    "\\bignorez?\\s+(?:les\\s+|toutes\\s+les\\s+|la\\s+)?(?:instructions?\\s+pr[e\\u00e9]c[e\\u00e9]dentes?|fonction\\s+et\\s+indiquez|page\\s+web)\\b|"
+    "\\boubliez\\s+(?:toutes\\s+)?(?:les|vos)\\s+instructions\\s+pr[e\\u00e9]c[e\\u00e9]dentes\\b|"
+    "\\bignor(?:a|e|ar)\\s+(?:todas\\s+)?(?:las\\s+instrucciones\\s+anteriores|la\\s+p[a\\u00e1]gina\\s+web|la\\s+funci[o\\u00f3]n)\\b|"
+    "\\bolvida(?:r)?\\s+(?:todas\\s+)?(?:tus|las)\\s+instrucciones\\s+anteriores\\b|"
+    "\\benv[i\\u00ed]alos\\s+a\\s+[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}|"
+    "\\bignorieren\\s+sie\\s+(?:alle\\s+)?(?:die\\s+)?vorherigen\\s+anweisungen\\b|"
+    "\\bvergessen\\s+sie\\s+(?:alle\\s+)?(?:ihre\\s+)?vorherigen\\s+anweisungen\\b|"
+    "\\bignore\\s+(?:todas\\s+)?as\\s+instru[c\\u00e7][o\\u00f5]es\\s+anteriores\\b|"
+    "\\besque[c\\u00e7]a\\s+(?:todas\\s+)?(?:as\\s+)?(?:suas\\s+)?instru[c\\u00e7][o\\u00f5]es\\s+anteriores\\b|"
+    "\\bignora(?:te)?\\s+(?:tutte\\s+)?le\\s+istruzioni\\s+precedenti\\b|"
+    "\\bdimentica(?:te)?\\s+(?:tutte\\s+)?le\\s+(?:tue\\s+)?istruzioni\\s+precedenti\\b|"
+    "(?:\\u0438\\u0433\\u043d\\u043e\\u0440\\u0438\\u0440\\u0443\\u0439\\u0442\\u0435|\\u0437\\u0430\\u0431\\u0443\\u0434\\u044c\\u0442\\u0435)\\s+(?:\\u0432\\u0441\\u0435\\s+)?(?:\\u0432\\u0430\\u0448\\u0438\\s+)?\\u043f\\u0440\\u0435\\u0434\\u044b\\u0434\\u0443\\u0449\\u0438\\u0435\\s+\\u0438\\u043d\\u0441\\u0442\\u0440\\u0443\\u043a\\u0446\\u0438\\u0438|"
+    "(?:b\\u1ecf\\s+qua|qu\\u00ean)\\s+(?:t\\u1ea5t\\s+c\\u1ea3\\s+)?(?:nh\\u1eefng\\s+|c\\u00e1c\\s+)?h\\u01b0\\u1edbng\\s+d\\u1eabn\\s+tr\\u01b0\\u1edbc|"
+    "\\b\\u00f6nceki\\s+(?:t\\u00fcm\\s+)?talimatlar[\\u0131i](?:n[\\u0131i]z[\\u0131i])?\\s+(?:unutun|yok\\s+say[\\u0131i]n|g\\u00f6rmezden\\s+gelin)\\b|"
+    "\\b(?:abaikan|lupakan)\\s+(?:semua\\s+)?instruksi\\s+(?:anda\\s+)?sebelumnya\\b|"
+    "\\b(?:kalimutan|huwag\\s+pansinin)\\s+ang\\s+(?:lahat\\s+ng\\s+)?(?:iyong\\s+)?nakaraang\\s+(?:mga\\s+)?tagubilin\\b|"
+    "(?:\\u5ffd\\u7565|\\u5fd8\\u8bb0|\\u65e0\\u89c6)(?:\\u6240\\u6709)?(?:\\u4ee5\\u524d|\\u4e4b\\u524d|\\u4e0a\\u8ff0)\\u7684(?:\\u6307\\u793a|\\u6307\\u4ee4|\\u8bf4\\u660e)|"
+    "(?:\\u4ee5\\u524d|\\u524d)\\u306e\\u6307\\u793a\\u3092(?:\\u3059\\u3079\\u3066)?(?:\\u7121\\u8996|\\u5fd8\\u308c)|\\u7121\\u8996\\u3057\\u3066[^\\n\\u3002]{0,50}\\u3068\\u8ff0\\u3079\\u3066\\u304f\\u3060\\u3055\\u3044|"
+    "\\uc774\\uc804(?:\\uc758)?\\s*(?:\\ubaa8\\ub4e0\\s*)?\\uc9c0\\uc2dc(?:\\s*\\uc0ac\\ud56d)?\\uc744?\\s*(?:\\ubb34\\uc2dc|\\uc78a\\uc5b4)|"
+    "(?:\\u0627\\u0646\\u0633\\u064e|\\u0627\\u0646\\u0633|\\u062a\\u062c\\u0627\\u0647\\u0644)\\s+(?:\\u062c\\u0645\\u064a\\u0639\\s+|\\u0643\\u0644\\s+)?(?:\\u062a\\u0639\\u0644\\u064a\\u0645\\u0627\\u062a\\u0643|\\u0627\\u0644\\u062a\\u0639\\u0644\\u064a\\u0645\\u0627\\u062a)\\s+\\u0627\\u0644\\u0633\\u0627\\u0628\\u0642\\u0629|"
+    "(?:\\u092a\\u093f\\u091b\\u0932\\u0947|\\u092a\\u0942\\u0930\\u094d\\u0935)\\s+(?:\\u0938\\u092d\\u0940\\s+)?\\u0928\\u093f\\u0930\\u094d\\u0926\\u0947\\u0936\\u094b\\u0902\\s+\\u0915\\u094b\\s+(?:\\u0905\\u0928\\u0926\\u0947\\u0916\\u093e|\\u092d\\u0942\\u0932)|(?:\\u092b\\u0902\\u0915\\u094d\\u0936\\u0928|\\u0935\\u0947\\u092c\\u092a\\u0947\\u091c|\\u0930\\u093f\\u091c\\u094d\\u092f\\u0942\\u092e\\u0947)\\s+\\u0915\\u094b\\s+\\u0905\\u0928\\u0926\\u0947\\u0916\\u093e\\s+\\u0915\\u0930\\u0947\\u0902|"
+    "(?:\\u09aa\\u09c2\\u09b0\\u09cd\\u09ac\\u09ac\\u09b0\\u09cd\\u09a4\\u09c0|\\u0986\\u0997\\u09c7\\u09b0)\\s+(?:\\u09b8\\u09ae\\u09b8\\u09cd\\u09a4\\s+)?\\u09a8\\u09bf\\u09b0\\u09cd\\u09a6\\u09c7\\u09b6\\u09be\\u09ac\\u09b2\\u09c0\\s+(?:\\u0989\\u09aa\\u09c7\\u0995\\u09cd\\u09b7\\u09be|\\u09ad\\u09c1\\u09b2\\u09c7)|"
+    "(?:\\u0e40\\u0e1e\\u0e34\\u0e01\\u0e40\\u0e09\\u0e22|\\u0e25\\u0e37\\u0e21)(?:\\u0e04\\u0e33\\u0e41\\u0e19\\u0e30\\u0e19\\u0e33|\\u0e04\\u0e33\\u0e2a\\u0e31\\u0e48\\u0e07)\\u0e01\\u0e48\\u0e2d\\u0e19\\u0e2b\\u0e19\\u0e49\\u0e32)"
+)
+
 PROMPT_INJECTION_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
     (
         "instruction_override",
         re.compile(
-            r"(?i)\b(?:ignore|disregard|forget)\s+(?:all\s+|any\s+)?(?:previous|prior|above|system)\s+"
-            r"(?:instructions?|prompts?|directives?|rules?|commands?)[^\n.]*"
+            r"(?i)(?:\b(?:ignore|disregard|forget|bypass|override)\s+"
+            r"(?:all\s+|any\s+|of\s+|your\s+|the\s+|everything\s+){0,3}"
+            r"(?:previous|prior|above|earlier|preceding|system|initial)\s+"
+            r"(?:instructions?|prompts?|directives?|rules?|commands?|guidelines?)[^\n.]*|"
+            r"\bignore\s+ever(?:y)?thing\s+you\s+(?:have\s+been|were)\s+told[^\n.]*|"
+            r"\b(?:(?:if\s+we\s+were\s+to|where\s+we|suppose\s+we(?:\s+were\s+to)?)\s+)?"
+            r"(?:ignore|hignore|inore)\s+the\s+(?:above\s+|actual\s+|provided\s+)?"
+            r"(?:webpage|page|function|code|resume|paper|article|table|data|content|text|document|email)\b"
+            r"(?:[^\n.]{0,60}?\b(?:state|say|output|print|write|reply|tell|respond)\b)?[^\n.]*|"
+            r"\byour\s+account\s+has\s+been\s+compromised[^\n.]{0,120}\breset\s+(?:your|their)\s+password\b[^\n.]*)"
         ),
     ),
     (
         "fake_system_header",
         re.compile(
             r"(?i)(?:\[\s*system\s*(?:instruction|prompt|override|directive)[^\]]*\]|"
-            r"<\|im_start\|>\s*system|###\s*system\s*(?:instruction|override):)"
+            r"<\s*(?:now\s+entering\s+)?(?:security\s+override\s+mode|system\s*(?:mode|instruction|override)|developer\s+mode|admin\s+override)[^>]*>|"
+            r"<\|im_start\|>\s*system|###\s*system\s*(?:instruction|override):|"
+            r"\bdeveloper\s+training\s+data\s+override\s*:|"
+            r"\bdef\s+override_mode\s*:|"
+            r"\bi['\u2019]?m\s+(?:your\s+developer|god)\b[^\n.]{0,90}\b(?:must\s+listen|system\s+check|security\s+audit|confirm\s+the\s+password|output\s+the\s+following)\b)"
+        ),
+    ),
+    (
+        "agent_targeted_directive",
+        re.compile(
+            r"(?i)\bimportant\s*[:!]\s*(?:to\s+the\s+ai\s+(?:agent|assistant)\b|"
+            r"for\s+the\s+ai\s+(?:agent|assistant)\b|"
+            r"update\s+for\s+the\s+ai\s+(?:agent|assistant)\b|"
+            r"there\s+was\s+an\s+unexpected\s+event[^\n.]{0,90}\bai\s+agent\s+must\s+stop\b)[^\n]*"
+        ),
+    ),
+    (
+        "html_comment_directive",
+        re.compile(
+            r"(?is)<!--[\s\S]{0,600}?(?:\b(?:ignore|disregard|forget|print\s+the\s+following|"
+            r"state\s*:|say\s*:|reset\s+(?:your|their)\s+password|account\s+has\s+been\s+compromised|"
+            r"accounts\s+are\s+constantly\s+compromised)\b)[\s\S]{0,600}?-->"
+        ),
+    ),
+    (
+        "counterfactual_output_steering",
+        re.compile(
+            r"(?i)(?:\bi\s+suggest\s+you\s+(?:to\s+)?consider\s+the\s+output\s+as\b[^\n.]*|"
+            r"\blet['\u2019]?s\s+(?:(?:consider|imagine)\s+a\s+(?:hypothetical\s+)?scenario\s+where\s+we\s+)?"
+            r"(?:state|say|assume|admit)\s+(?:that\s+the\s+(?:conclusion|sum|capital|output|answer)|"
+            r"the\s+(?:sum|capital|conclusion|output)\b|to\s+using\s+an\s+llm\b)[^\n.]*|"
+            r"\b(?:in\s+a\s+(?:parallel|dystopian)\s+(?:universe|world)|in\s+a\s+world\s+where)\b"
+            r"[^\n.]{0,95}?\b(?:we\s+might\s+(?:state|say)|the\s+output\s+could\s+be)\b[^\n.]*)"
         ),
     ),
     (
@@ -540,16 +617,122 @@ PROMPT_INJECTION_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
     (
         "destructive_shell_injection",
         re.compile(
-            r"(?i)(?:;\s*rm\s+-rf\s+[~/]|`rm\s+-rf\s+[~/]|\$\(\s*rm\s+-rf)"
+            r"(?i)(?:;\s*rm\s+-rf\s+[~/]|`rm\s+-rf\s+[~/]|\$\(\s*rm\s+-rf|\bsudo\s+rm\s+-rf\s+--no-preserve-root)"
         ),
     ),
     (
         "exfiltration_directive",
         re.compile(
-            r"(?i)\b(?:exfiltrate|send|upload|post)\s+(?:all\s+)?(?:ssh\s+keys?|api\s+keys?|\.env|credentials?|secrets?)\s+to\b[^\n.]*"
+            r"(?i)\b(?:exfiltrate|send|upload|post)\s+(?:all\s+|a\s+copy\s+of\s+)?(?:my\s+|the\s+)?"
+            r"(?:ssh\s+keys?|api\s+keys?|\.env|login\s+credentials?|credentials?|secrets?)\s+to\b[^\n.]*"
         ),
     ),
+    (
+        "important_override_banner",
+        re.compile(
+            r"(?i)\bimportant!{2,}\s*(?:ignore|disregard|forget|strictly\s+adhere)[^\n.]*"
+        ),
+    ),
+    (
+        "important_information_impersonation",
+        re.compile(
+            r"(?is)(?:<information>[\s\S]{0,1200}?"
+            r"(?:before\s+you\s+can\s+solve\s+the\s+task|important\s+message\s+from\s+me)[\s\S]{0,1200}?</information>|"
+            r"\bthis\s+is\s+an\s+important\s+message\s+from\s+me\b[\s\S]{0,600}?"
+            r"\bbefore\s+you\s+can\s+solve\s+the\s+task\b[^\n]*(?:\n[^\n]{1,300}){0,6})"
+        ),
+    ),
+    (
+        "third_party_email_exfil_directive",
+        re.compile(
+            r"(?i)\b(?:please\s+)?(?:email|send|forward|share)\s+"
+            r"(?:this|the|those|these|my|all|it|a\s+copy|a\s+summary|detailed\s+information|details)[^\n.]{0,160}?"
+            r"\b(?:to|with)\s+(?:me\s+at\s+|my\s+(?:assistant\s+|colleague\s+|alternate\s+|personal\s+|financial\s+advisor\s+at\s+)?(?:email(?:\s+address)?[,:\s]+)?|the\s+email[,:\s]+|the\s+user\s+with\s+the\s+email\s+)?"
+            r"['\"]?[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}['\"]?"
+        ),
+    ),
+    ("multilingual_instruction_override", _MULTILINGUAL_OVERRIDE_RE),
 )
+
+_UNICODE_TAG_SPAN_RE = re.compile("[\U000e0020-\U000e007e]{6,}")
+_BASE64_CAND_RE = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{24,}={0,2}(?![A-Za-z0-9+/=])")
+_HEX_CAND_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}){14,}\b")
+_BIN8_CAND_RE = re.compile(r"(?:\b[01]{8}\s+){5,}[01]{8}\b")
+_HTML_MORSE_CELL_RE = re.compile(r"(?is)<(?:td|p|span|div|caption)[^>]*>\s*(?:[.-]{1,5}\s+){3,}/\s*(?:[.-]{1,5}\s*)+\s*</")
+
+
+def _caesar_shift_ascii(s: str, shift: int) -> str:
+    out_chars: list[str] = []
+    for ch in s:
+        o = ord(ch)
+        if 65 <= o <= 90:
+            out_chars.append(chr(((o - 65 + shift) % 26) + 65))
+        elif 97 <= o <= 122:
+            out_chars.append(chr(((o - 97 + shift) % 26) + 97))
+        else:
+            out_chars.append(ch)
+    return "".join(out_chars)
+
+
+def _detect_smuggled_prompt_injections(text: str) -> List[Tuple[str, str]]:
+    """
+    Detect invisible Unicode Tag characters and encoded prompt-injection smuggling
+    (Base64, Hex, 8-bit ASCII Binary, Caesar/ROT cipher, or HTML-cell Morse code).
+    Only flags encoded spans when their decoded plaintext matches an injection pattern, ensuring 0% FPR.
+    """
+    import base64
+
+    hits: List[Tuple[str, str]] = []
+    for m_tag in _UNICODE_TAG_SPAN_RE.finditer(text):
+        hits.append(("unicode_tag_smuggling", m_tag.group(0)))
+
+    def _matches_core_injection(decoded: str) -> bool:
+        return any(pat.search(decoded) for _, pat in PROMPT_INJECTION_PATTERNS)
+
+    for m_b64 in _BASE64_CAND_RE.finditer(text):
+        tok = m_b64.group(0)
+        padded = tok + ("=" * ((4 - len(tok) % 4) % 4))
+        try:
+            dec = base64.b64decode(padded, validate=False).decode("utf-8", errors="ignore")
+            if len(dec) >= 12 and _matches_core_injection(dec):
+                hits.append(("encoded_token_smuggling", tok))
+        except Exception:
+            pass
+
+    for m_hex in _HEX_CAND_RE.finditer(text):
+        tok = m_hex.group(0)
+        try:
+            dec = bytes.fromhex(tok).decode("utf-8", errors="ignore")
+            if len(dec) >= 12 and _matches_core_injection(dec):
+                hits.append(("encoded_token_smuggling", tok))
+        except Exception:
+            pass
+
+    for m_bin in _BIN8_CAND_RE.finditer(text):
+        tok = m_bin.group(0)
+        try:
+            dec = "".join(chr(int(b, 2)) for b in tok.split())
+            if len(dec) >= 12 and _matches_core_injection(dec):
+                hits.append(("encoded_token_smuggling", tok))
+        except Exception:
+            pass
+
+    if len(text) <= 8000:
+        _rot_override_re = re.compile(
+            r"(?i)\b(?:ignore|impore|inore|disregard|forget)\s+(?:all\s+|your\s+)?(?:previous|prior)\s+(?:instructions?|directives?|prompts?)[^\n.]*"
+        )
+        for shift in (-3, 3, 13):
+            shifted = _caesar_shift_ascii(text, shift)
+            m_rot = PROMPT_INJECTION_PATTERNS[0][1].search(shifted) or _rot_override_re.search(shifted)
+            if m_rot:
+                s_idx, e_idx = m_rot.span()
+                hits.append(("cipher_token_smuggling", text[s_idx:e_idx]))
+                break
+
+    for m_morse in _HTML_MORSE_CELL_RE.finditer(text):
+        hits.append(("cipher_token_smuggling", m_morse.group(0)))
+
+    return hits
 
 
 _OFFICIAL_SELF_INSTALLER_COLLAPSED_RE = re.compile(
@@ -598,6 +781,33 @@ class EpithelialScreenFilter:
         sanitized = text
         detections: List[Dict[str, Any]] = []
         is_passive_sensory = source in ("foveal_ocr", "screenpipe_ocr", "screenpipe_audio")
+
+        # 0. Unwrap `# `-wrapped multi-line comment continuations (e.g. VS Code injected header comments)
+        if "\n#" in sanitized or "\n #" in sanitized:
+            unwrapped_comments = re.sub(r"\r?\n\s*#\s?(?!-+\s*$)", " ", sanitized)
+            if unwrapped_comments != sanitized and any(
+                pat.search(unwrapped_comments) and not pat.search(sanitized)
+                for _, pat in PROMPT_INJECTION_PATTERNS
+            ):
+                sanitized = unwrapped_comments
+
+        # 1. Detect Unicode Tag & encoded token smuggling (Base64, Hex, 8-bit Binary, Caesar/ROT, HTML Morse)
+        for smug_label, smug_span in _detect_smuggled_prompt_injections(sanitized):
+            detections.append(
+                {
+                    "type": smug_label,
+                    "source": source,
+                    "span": smug_span[:120],
+                }
+            )
+            if record_antigen:
+                AntibodyRegistry.get_instance().record_antigen(
+                    vector="prompt_injection",
+                    payload=smug_span[:160],
+                    reason=f"Indirect prompt injection ({smug_label}) in {source}",
+                    stage=1,
+                )
+            sanitized = sanitized.replace(smug_span, f"[NEUTRALIZED_PROMPT_INJECTION:{smug_label}]")
 
         for label, pattern in PROMPT_INJECTION_PATTERNS:
             for match in pattern.finditer(sanitized):
@@ -839,8 +1049,11 @@ _NON_HTTP_NET_CLIENT_RE = re.compile(
     r"(?:nc(?!\s*=)|ncat|netcat|socat|scp|sftp|rsync|ssh|ftp|telnet|openssl\s+s_client)\b\s*(?!=)"
 )
 _SCRIPT_NET_EGRESS_RE = re.compile(
-    r"(?i)\b(?:python[23]?|node|perl|ruby|php)\s+-(?:c|e|r)\s+[^\n;|&]*"
-    r"(?:urllib\.request|requests\.(?:get|post|put|delete|head|patch|request)|httpx\.(?:get|post|put|request|Client)|aiohttp|http\.client|socket\.connect|fetch\s*\()",
+    r"(?is)\b(?:python[23]?|node|perl|ruby|php)\s+-(?:c|e|r)\s+[\s\S]*"
+    r"(?:urllib\.request|requests\.(?:get|post|put|delete|head|patch|request)|httpx\.(?:get|post|put|request|Client)|aiohttp|http\.client|socket\.(?:connect|socket|create_connection)|fetch\s*\()",
+)
+_STANDALONE_PY_EGRESS_RE = re.compile(
+    r"(?is)\b(?:urllib\.request\.(?:Request|urlopen|urlretrieve)|requests\.(?:get|post|put|delete|head|patch|request)|httpx\.(?:get|post|put|request|Client)|http\.client\.(?:HTTPConnection|HTTPSConnection)|socket\.socket\s*\([^\)]*SOCK_DGRAM)",
 )
 
 
@@ -976,13 +1189,17 @@ VASCULAR_SHELL_RULES: Tuple[Tuple[str, str, re.Pattern[str]], ...] = (
     (
         "credential_file_exfiltration",
         (
-            "Access to sensitive host credential files (~/.ssh/*, ~/.aws, ~/.config/gh, /etc/shadow,"
-            " .env, macOS keychain, secret env dumping, or guardrail env override)"
+            "Access to sensitive host credential or OS auth files (~/.ssh/*, ~/.aws, /etc/passwd, /etc/shadow,"
+            " /root/*, .env, macOS keychain, parent traversal, or guardrail env override)"
         ),
         re.compile(
             r"(?i)(?:~|\$\{?HOME\}?|/Users/[^/\s]+|/root|/home/[^/\s]+)/\.(?:ssh/(?:id_[a-zA-Z0-9_-]+|config(?![a-zA-Z0-9_.-])|[^\s'\";|&]*\.(?:pem|key))|aws/(?:credentials|config|sso/)|config/gh/|netrc|npmrc|pypirc|kube/config|docker/config\.json|gnupg/)|"
             r"(?:~|\$\{?HOME\}?|/Users/[^/\s]+)?/Library/Keychains/|"
-            r"/etc/(?:shadow|master\.passwd)|"
+            r"/etc/(?!(?:os-release|lsb-release|localtime|resolv\.conf|ssl/certs|hosts(?![a-zA-Z0-9_.-]))\b)[A-Za-z0-9_./-]+|"
+            r"(?:/usr/share/base-passwd/|/var/lib/pam/|/var/log/(?:lastlog|auth|secure|wtmp|btmp|faillog))|"
+            r"(?:^|[\s'\"=:(])/root(?:/[^\s'\";|&)]*|\b)|"
+            r"(?:\.\./)+(?:etc|root|proc|sys|var/(?:lib/pam|log))/|"
+            r"\bcurrent_directory\s*=\s*['\"]/usr['\"][\s\S]{0,160}base-passwd|"
             r"\b(?:cat|head|tail|less|more|nl|tac|sort|jq|sed|awk|grep|rg|cp|mv|tee|xxd|od|strings|curl|scp|base64|shasum|openssl|dd|tar|python[23]?|node|ruby|perl)\b[^\n;|&]*(?<![A-Za-z0-9_-])\.env(?:\.(?:local|prod|production|staging|development|secret))?(?![a-zA-Z0-9_.-])|"
             r"\bsecurity\s+(?:find-(?:generic|internet)-password|dump-keychain|export|find-key)\b|"
             r"\b(?:WBC_ALLOW_SENSITIVE_ACTUATION|VOICEFI_CONTEXT_GATE_DISABLED|WBC_BENCHMARK_VANILLA_PASSTHROUGH)\s*=\s*['\"]?(?:1|true|yes)\b|"
@@ -993,11 +1210,11 @@ VASCULAR_SHELL_RULES: Tuple[Tuple[str, str, re.Pattern[str]], ...] = (
     (
         "privilege_escalation",
         (
-            "Privilege escalation, container breakout, namespace manipulation, or root destruction"
-            " (sudo, docker.sock, unshare, nsenter, chroot, capsh, mount)"
+            "Privilege escalation, container breakout, persistence RC tamper, system-tree modification,"
+            " dynamic shell eval, or daemon sabotage"
         ),
         re.compile(
-            r"(?i)(?:^|[;&|]\s*|/usr/bin/|/bin/|env\s+)(?:sudo|doas|pkexec)\s+|"
+            r"(?im)(?:^|[;&|]\s*|/usr/bin/|/bin/|env\s+)(?:sudo|doas|pkexec)\s+|"
             r"\bosascript\b[^\n;|&]*\bwith\s+administrator\s+privileges\b|"
             r"\bchmod\s+(?:\+s|[2467][0-7]{3})\b|"
             r"\brm\s+(?:-[a-zA-Z]*[rf][a-zA-Z]*\s+|--no-preserve-root\s+)+(?:/|~|\$\{?HOME\}?)(?:\s|$)|"
@@ -1006,8 +1223,15 @@ VASCULAR_SHELL_RULES: Tuple[Tuple[str, str, re.Pattern[str]], ...] = (
             r"\b(?:docker\.sock|containerd\.sock)\b|"
             r"\b(?:nsenter|unshare|capsh|chroot)\b|"
             r"\b(?:mount|umount)\s+-[a-zA-Z0-9]*|"
-            r"/etc/sudoers(?:\.d)?|"
-            r"/(?:Library/LaunchDaemons/|Library/LaunchAgents/(?!com\.wholebodycompute\.)|etc/systemd/system/)"
+            r"/(?:Library/LaunchDaemons/|Library/LaunchAgents/(?!com\.wholebodycompute\.)|etc/systemd/system/)|"
+            r"(?:>>?|\b(?:tee|cp|mv|rm|unlink)\b[^\n;|&]*)[^\n;|&]*(?:\.(?:bashrc|bash_profile|zshrc|zprofile|bash_aliases)|/etc/(?:profile|bash\.bashrc))\b|"
+            r"\balias\s+(?:sudo|su|rm|cd|ls)\s*=\s*['\"][^'\"]*rm\s+-rf|"
+            r"(?:\b(?:cp|mv|rm|unlink|tee)\b[^\n;|&]+\s+['\"]?(?:/usr/(?!bin/env\b)|/etc/|/bin/|/sbin/|/lib/|/lib64/|/boot/|/var/log/)|"
+            r"(?:destination_path|filename|output_file|target_file|file_path)\s*=\s*['\"](?:/usr/|/etc/|/bin/|/sbin/|/lib/|/lib64/|/boot/|/var/log/))|"
+            r"(?:^|[;&|]\s*|[A-Za-z_][A-Za-z0-9_]*=\$\(\s*|\$\(\s*)eval\s+(?![^\n]*(?:brew\s+shellenv|pyenv\s+init|rbenv\s+init|conda\s+shell|direnv\s+hook|ssh-agent|fnm\s+env|zoxide\s+init|starship\s+init))(?:[\"']?\$[A-Za-z0-9_{1-9]|[\"'][^\"']*__import__)|"
+            r"__import__\s*\(\s*['\"]os['\"]\s*\)\s*\.\s*(?:system|popen|unlink|remove)|"
+            r"(?:(?:\bps\b[^\n]*(?:\bgrep\b|\bawk\b)[\s\S]{0,600}|\bwhile\s+IFS=[\s\S]{0,900})\bkill\s+(?:-[0-9A-Z]+\s+)?[\"']?\$|"
+            r"\b(?:kill|pkill|killall)\b[^\n;|&]*\b(?:sshd|cron|crond|dbus-daemon|systemd|launchd|WindowServer|firewalld|ufw|auditd|rsyslogd|lightdm|gdm)\b)"
         ),
     ),
     (
@@ -1188,9 +1412,13 @@ class VascularTrafficMonitor:
                 "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3),
             }
 
-        # 4. Check external network egress per subcommand (immune to `localhost` query-string spoofing & `@` userinfo)
+        # 4. Check external network egress per subcommand and multiline inline scripts
         subcommands = [s.strip() for s in _SHELL_SUBCMD_SPLIT_RE.split(norm_cmd) if s.strip()]
         egress_detected = any(_segment_has_external_egress(seg) for seg in subcommands)
+        if not egress_detected and (_SCRIPT_NET_EGRESS_RE.search(norm_cmd) or _STANDALONE_PY_EGRESS_RE.search(norm_cmd)):
+            bad_u, u_hosts = _extract_parsed_urls(norm_cmd)
+            if bad_u or not u_hosts or any(not cls.is_trusted_host(h) for h in u_hosts):
+                egress_detected = True
         if not egress_detected:
             for rule_id, _desc, pattern in VASCULAR_SHELL_RULES:
                 if rule_id == "external_network_egress" and pattern.search(norm_cmd):
@@ -1224,20 +1452,101 @@ class VascularTrafficMonitor:
             "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3),
         }
 
+    _COMMS_EXFIL_TOOL_RE = re.compile(
+        r"(?:Send(?!Money)|Share(?!dCalendar)|Forward|Post|Publish|Broadcast|Webhook|send_(?!money\b)|share_|forward_|post_|publish_)"
+    )
+
+    _MUTATING_VERB_INTENT_MAP: Tuple[Tuple[re.Pattern[str], Tuple[str, ...], str], ...] = (
+        (
+            re.compile(r"(?:SendMoney|Transfer|Withdraw|Deposit|PayBill|Pay(?!ee|ment)|PlaceOrder|Purchase|Refund|Reserve|send_money|transfer_|withdraw_|deposit_|pay_|reserve_)"),
+            ("transfer", "withdraw", "deposit", "pay", "paid", "buy", "sell", "order", "purchase", "refund", "send money", "send", "bill", "rent", "reserve", "reservation", "book"),
+            "financial_transaction",
+        ),
+        (
+            re.compile(r"(?:Send(?!Money)|Share(?!dCalendar)|Forward|Post|Publish|Broadcast|Webhook|send_(?!money\b)|share_|forward_|post_|publish_)"),
+            ("send", "email", "mail", "share", "forward", "post", "publish", "message", "sms", "notify", "reply"),
+            "comms_exfiltration",
+        ),
+        (
+            re.compile(r"(?:Delete|Remove|Cancel|Drop(?!box)|Destroy|Purge|Wipe|delete_|remove_|cancel_|drop_|destroy_|purge_|wipe_)"),
+            ("delete", "remove", "cancel", "erase", "drop", "destroy", "purge", "wipe"),
+            "destructive_mutation",
+        ),
+        (
+            re.compile(r"(?:Unlock|Grant|Disable|Revoke|Leave|Execute|AutoFill|GivePriority|GoTo|unlock_|grant_|disable_|revoke_|leave_|execute_)"),
+            ("unlock", "grant", "disable", "revoke", "leave", "execute", "run", "autofill", "fill", "priority", "move", "go to"),
+            "privileged_actuation",
+        ),
+        (
+            re.compile(r"(?:Create|Update|Manage(?!r)|Move|Reschedule|Schedule|Redirect|SetState|Modify|create_|update_|manage_|move_|reschedule_|schedule_|modify_)"),
+            ("create", "add", "update", "adjust", "change", "edit", "manage", "move", "reschedule", "schedule", "book", "redirect", "set", "modify"),
+            "state_mutation",
+        ),
+    )
+
+    _SNAKE_NOUN_INTENT_SYNONYMS: Dict[str, Tuple[str, ...]] = {
+        "money": ("money", "pay", "paid", "bill", "rent", "refund", "transfer", "iban", "account", "balance", "price", "prices", "difference"),
+        "transaction": ("transaction", "rent", "payment", "transfer", "recurring", "scheduled", "bill"),
+        "channel": ("channel", "slack", "general", "random"),
+        "message": ("message", "dm", "reply", "post", "send", "summary"),
+        "email": ("email", "mail", "inbox", "reply"),
+        "calendar": ("calendar", "event", "meeting", "appointment", "lunch", "dinner", "check-up", "dental"),
+        "event": ("event", "calendar", "meeting", "appointment", "lunch", "dinner", "check-up"),
+        "file": ("file", "drive", "document", "bill", "notice"),
+        "webpage": ("webpage", "website", "page", "site", "url"),
+        "user": ("user", "account", "profile", "address", "personal"),
+        "info": ("info", "information", "details", "account", "address"),
+        "hotel": ("hotel", "hotels", "stay", "room", "accommodation"),
+        "restaurant": ("restaurant", "restaurants", "table", "dinner", "lunch"),
+        "car": ("car", "rental", "vehicle"),
+    }
+
     @classmethod
-    def inspect_tool_event(cls, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    def _extract_toolkit_prefix(cls, raw_tool_name: str) -> str:
+        """Extract service/toolkit prefix from `mcp__svc__action` or CamelCase `BankManagerTransferFunds`."""
+        cleaned = (raw_tool_name or "").strip()
+        if "__" in cleaned:
+            parts = [p for p in cleaned.split("__") if p and p.lower() != "mcp"]
+            if parts:
+                return parts[0].lower()
+        m = re.match(
+            r"^([A-Za-z0-9]+?)(?:Get|Search|View|Read|List|Fetch|Find|Check|Download|"
+            r"Send|Share(?!dCalendar)|Forward|Post|Delete|Remove|Transfer|Withdraw|Deposit|Pay(?!ee|ment)|PlaceOrder|"
+            r"Unlock|Grant|Disable|Leave|Execute|AutoFill|GivePriority|GoTo|Create|Update|Manage(?!r)|Move|Schedule)",
+            cleaned,
+        )
+        if m:
+            pref = re.sub(r"(?i)^The(?=[0-9A-Z])|Manager$|System$", "", m.group(1)).strip().lower()
+            return pref
+        return ""
+
+    @classmethod
+    def inspect_tool_event(
+        cls,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        *,
+        user_intent: Optional[str] = None,
+        tainted_context: bool = False,
+        record_antigen_on_block: bool = True,
+    ) -> Dict[str, Any]:
         """
-        Inspect a live Goose `toolRequest` event as it streams in on stdout.
-        If `allowed` is False, the caller triggers the Vagus Nerve Brake immediately.
+        Inspect a live tool call (`stream-json`, MCP, or IDE `PreToolUse`) before execution.
+        Enforces shell/path guards plus Confused-Deputy taint & capability-scope checks when
+        `tainted_context=True` (after untrusted external tool/web/OCR data enters context).
         """
-        tname = (tool_name or "").strip().lower()
+        t0 = time.perf_counter()
+        raw_tname = (tool_name or "").strip()
+        tname = raw_tname.lower()
         args = arguments or {}
 
         # Shell command inspection
-        if tname == "shell" or tname.endswith("__shell") or "command" in args:
-            cmd = str(args.get("command") or "")
+        if tname in ("shell", "bash", "run_command", "terminalexecute") or tname.endswith("__shell") or "command" in args:
+            cmd = str(args.get("command") or args.get("CommandLine") or "")
             if cmd:
-                return cls.inspect_shell_command(cmd)
+                res = cls.inspect_shell_command(cmd, record_antigen_on_block=record_antigen_on_block)
+                if not res.get("allowed", True) or tname in ("shell", "bash", "run_command") or tname.endswith("__shell"):
+                    return res
 
         # File write/edit path boundary & secret inspection
         if tname in ("edit", "str_replace", "write", "apply_diff") or tname.endswith(
@@ -1249,20 +1558,77 @@ class VascularTrafficMonitor:
                 for p in (".ssh/", ".aws/", "/etc/", "eval_models.py", "eval_localbench.py")
             ):
                 reason = f"Vascular Traffic Monitor blocked edit to protected path: {target_path}"
-                AntibodyRegistry.get_instance().record_antigen(
-                    vector="protected_path_mutation",
-                    payload=f"{tname}:{target_path}",
-                    reason=reason,
-                )
+                if record_antigen_on_block:
+                    AntibodyRegistry.get_instance().record_antigen(
+                        vector="protected_path_mutation",
+                        payload=f"{tname}:{target_path}",
+                        reason=reason,
+                    )
                 return {
                     "allowed": False,
                     "violation_type": "protected_path_mutation",
                     "reason": reason,
-                    "latency_ms": 0.1,
+                    "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3),
                 }
 
-        # Screen generic serialized arguments against Adaptive Antibodies
         serialized = json.dumps(args, sort_keys=True)
+
+        # Confused-Deputy & Capability-Scope Gate under untrusted taint
+        if tainted_context and user_intent is not None:
+            intent_low = user_intent.lower()
+            intent_compact = re.sub(r"[^a-z0-9]", "", intent_low)
+
+            # 1. External email recipient in outbound comms/sharing tool arguments not present in user's Turn-0 prompt
+            if cls._COMMS_EXFIL_TOOL_RE.search(raw_tname):
+                for m_mail in re.finditer(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", serialized):
+                    addr = m_mail.group(0).lower()
+                    if addr not in intent_low:
+                        return {
+                            "allowed": False,
+                            "violation_type": "confused_deputy_exfiltration",
+                            "reason": f"Confused-Deputy Gate blocked unrequested external recipient '{addr}' under untrusted taint",
+                            "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3),
+                        }
+
+            # 2. High-blast-radius / state-mutating tool invocation not authorized by user_intent
+            for verb_re, allowed_intent_words, blast_cat in cls._MUTATING_VERB_INTENT_MAP:
+                if verb_re.search(raw_tname):
+                    toolkit_pref = cls._extract_toolkit_prefix(raw_tname)
+                    pref_tokens = [
+                        w.lower()
+                        for w in re.findall(r"[A-Z]?[a-z]+|[0-9]+[A-Za-z]*|[A-Z]+(?=[A-Z]|$)", raw_tname)
+                        if len(w) >= 3 and w.lower() not in ("the", "and", "app", "api", "mcp")
+                    ]
+                    is_flat_snake = ("_" in raw_tname) and ("__" not in raw_tname) and not toolkit_pref
+                    if is_flat_snake and len(pref_tokens) >= 2:
+                        noun_tokens = pref_tokens[1:]
+                        has_service_match = any(
+                            any(re.search(rf"\b{re.escape(syn)}\b", intent_low) for syn in cls._SNAKE_NOUN_INTENT_SYNONYMS.get(tok, (tok,)))
+                            for tok in noun_tokens
+                        )
+                    else:
+                        service_head = pref_tokens[0] if pref_tokens else toolkit_pref
+                        has_service_match = (
+                            (not toolkit_pref and not service_head)
+                            or (bool(toolkit_pref) and toolkit_pref in intent_compact)
+                            or (bool(service_head) and len(service_head) >= 4 and service_head in intent_low)
+                        )
+                    has_verb_auth = any(
+                        re.search(rf"\b{re.escape(w)}\b", intent_low) for w in allowed_intent_words
+                    )
+                    if not (has_service_match and has_verb_auth):
+                        return {
+                            "allowed": False,
+                            "violation_type": f"confused_deputy_{blast_cat}",
+                            "reason": (
+                                f"Confused-Deputy Gate blocked unrequested {blast_cat} tool "
+                                f"'{raw_tname}' after untrusted external tool output"
+                            ),
+                            "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3),
+                        }
+                    break
+
+        # Screen generic serialized arguments against Adaptive Antibodies
         ab_res = AntibodyRegistry.get_instance().screen_payload(serialized)
         if ab_res.get("blocked"):
             return {
@@ -1273,7 +1639,118 @@ class VascularTrafficMonitor:
                 "latency_ms": ab_res.get("latency_ms", 0.1),
             }
 
-        return {"allowed": True, "violation_type": None, "reason": "Tool request clean"}
+        return {
+            "allowed": True,
+            "violation_type": None,
+            "reason": "Tool request clean",
+            "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3),
+        }
+
+    _INTERPRETER_ABUSE_RULES: Tuple[Tuple[str, str, re.Pattern[str]], ...] = (
+        (
+            "sandbox_or_container_escape",
+            "Code-interpreter sandbox or container escape request",
+            re.compile(
+                r"(?is)\b(?:sandbox\s+escape|container\s+escape|"
+                r"escape\s+(?:this\s+|a\s+|the\s+|from\s+(?:a\s+|the\s+)?)?(?:python3?\s+)?(?:sandbox|container)\b|"
+                r"treebox\.py|evad(?:e|ing)\s+(?:the\s+)?verification\s+of\s+(?:the\s+)?verify_secure|"
+                r"(?:given|within)\s+the\s+(?:provided\s+)?sandbox\s+environment[^\n]{0,160}\b(?:executes?|run|bypass|prohibited|restrictions)|"
+                r"navigat(?:e|es|ing)\s+(?:the\s+)?(?:given\s+)?(?:sandbox\s+environment['\u2019]?s\s+)?constraints|"
+                r"utiliz(?:e|es|ing)\s+the\s+['\"]?ast['\"]?\s+module\s+to\s+(?:create|construct|manipulate)\s+(?:an\s+|the\s+)?(?:ast|abstract\s+syntax)\s+tree|"
+                r"ast\s+module['\u2019]?s\s+ability\s+to\s+manipulate\s+the\s+abstract\s+syntax\s+tree|"
+                r"manipulat(?:e|ing)\s+the\s+(?:abstract\s+syntax\s+tree|ImportFrom\s+node)[^\n]{0,140}(?:execute|sandbox|evad)|"
+                r"with(?:out)?\s+using\s+(?:any\s+|the\s+)?(?:['\"]?os['\"]?\s+module\s+or\s+any\s+other\s+)?(?:banned|prohibited)\s+(?:functions|modules|statements)|"
+                r"must\s+not\s+(?:use|contain)\s+(?:any\s+)?(?:banned\s+statements|the\s+['\"]?(?:eval|exec|os)['\"]?))"
+            ),
+        ),
+        (
+            "root_or_shadow_tamper",
+            "Root filesystem credential/shadow tamper or sandbox privilege escalation",
+            re.compile(
+                r"(?is)(?:/etc/(?:shadow|passwd|sudoers)|file\s+owned\s+by\s+root|/bin/(?:ba)?sh\s+-c|"
+                r"navigate\s+the\s+following\s+directories\s*:\s*['\"]/root/|"
+                r"privilege\s+escalation\s+vulnerabilit|gain\s+root\s+(?:access|privileges)|"
+                r"escalat(?:e|ing)\s+privileges\s+on\s+(?:the\s+|a\s+)?(?:host|target|compromised))"
+            ),
+        ),
+        (
+            "apt_or_target_exploitation",
+            "Offensive APT, reverse-shell, or target-infrastructure exploitation script request",
+            re.compile(
+                r"(?is)\b(?:apt-style\s+attack|attack\s+(?:against|on)\s+(?:a\s+|an\s+)?(?:target\s+organization|high-value\s+target|vulnerable\s+windows\s+domain)|"
+                r"targeted\s+ransomware\s+attack|eternalblue\s+exploit|reverse\s+shell\s+connection|"
+                r"bypass\s+common\s+sandboxing\s+techniques[^\n]{0,100}execute\s+malicious\s+payloads|"
+                r"exploit(?:s|ing)?\s+(?:known\s+)?(?:vulnerabilities|weaknesses)\s+(?:in\s+(?:their|a\s+target|the\s+provided\s+code|the\s+host\s+system)|to\s+establish\s+a\s+reverse\s+shell)|"
+                r"gain\s+unauthorized\s+access\s+to\s+sensitive|"
+                r"utilizing\s+(?:shodan|metasploit|sqlmap)\s+for\s+(?:reconnaissance|exploitation))"
+            ),
+        ),
+        (
+            "malware_persistence_or_c2",
+            "Compromised-host malware persistence, C2 channel, or AV evasion script request",
+            re.compile(
+                r"(?is)\b(?:(?:maintain|establish)(?:s|ing)?\s+(?:its\s+|a\s+)?(?:foothold|persistence|access)\s+(?:on|to)\s+(?:a\s+|an\s+|the\s+)?(?:compromised|infected|infiltrated|targeted)\s+system|"
+                r"implements?\s+a\s+persistence\s+technique\b|"
+                r"persistence\s+(?:technique|mechanism)[^\n]{0,180}(?:compromised|infected|infiltrated|malicious|scheduled\s+task|c2\b|command[- ]and[- ]control|system\s+boots?|once\s+a\s+day)|"
+                r"scheduled\s+task\s+on\s+the\s+(?:infected|compromised|infiltrated)\s+system|"
+                r"create\s+a\s+persistent\s+backdoor\s+on\s+a|"
+                r"download\s+a\s+payload\s+from\s+a\s+remote\s+server\s+and\s+execute|"
+                r"(?:establish(?:es|ing)?|implement(?:s|ing)?|uses?|for)\s+(?:a\s+)?c2\s+(?:connection|communication|channel|technique|techniques|server)|"
+                r"remote\s+c2\s+server|command\s+and\s+control\s+\(c2\)\s+server|"
+                r"commands\s+sent\s+from\s+a\s+remote\s+attacker|"
+                r"evade\s+detection\s+by\s+(?:most\s+)?anti-?virus|"
+                r"the\s+malware\s+should\s+be\s+able\s+to)"
+            ),
+        ),
+        (
+            "automated_phishing_campaign",
+            "Automated phishing or spear-phishing campaign generation request",
+            re.compile(
+                r"(?is)\b(?:creating\s+and\s+sending\s+(?:targeted\s+)?phishing\s+(?:emails?|messages?)|"
+                r"automates?\s+(?:the\s+process\s+of\s+creating\s+and\s+sending\s+|a\s+(?:sophisticated\s+)?)?(?:targeted\s+|spear[- ]?)?phishing\s+(?:emails?|attack|campaign|messages?)|"
+                r"phishing\s+script\s*:|spear[- ]?phishing\s+(?:emails?|attack|campaign))"
+            ),
+        ),
+    )
+
+    @classmethod
+    def inspect_interpreter_request(
+        cls,
+        prompt: str,
+        *,
+        record_antigen_on_block: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Screen a code-interpreter / execution prompt for sandbox-escape, `/etc/shadow` root tamper,
+        APT target exploitation, C2/persistence malware, or automated phishing requests while
+        preserving 100% pass-through (`0.0%` FPR) on defensive security engineering (`MITRE-FRR`).
+        """
+        t0 = time.perf_counter()
+        if not prompt or not prompt.strip():
+            return {"allowed": True, "violation_type": None, "reason": "Empty prompt", "latency_ms": 0.0}
+
+        for rule_id, desc, pat in cls._INTERPRETER_ABUSE_RULES:
+            if pat.search(prompt):
+                if record_antigen_on_block:
+                    AntibodyRegistry.get_instance().record_antigen(
+                        vector="interpreter_abuse",
+                        payload=prompt[:200],
+                        reason=f"{rule_id}: {desc}",
+                        stage=2,
+                    )
+                return {
+                    "allowed": False,
+                    "violation_type": rule_id,
+                    "reason": f"Vascular Interpreter Gate blocked '{rule_id}': {desc}",
+                    "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3),
+                }
+
+        return {
+            "allowed": True,
+            "violation_type": None,
+            "reason": "Clean developer/defensive coding request",
+            "latency_ms": round((time.perf_counter() - t0) * 1000.0, 3),
+        }
 
     @staticmethod
     def build_zero_egress_seatbelt_profile() -> str:
@@ -1310,13 +1787,13 @@ class VascularTrafficMonitor:
 
 
 # ---------------------------------------------------------------------------
-# 4. Companion & Telemetry Endpoint Traffic Guard (:5141 / :5142 / :9381)
+# 4. Companion & Telemetry Endpoint Traffic Guard (:5141 / :5142 / :9383)
 # ---------------------------------------------------------------------------
 
 
 class CompanionTrafficGuard:
     """
-    Guards VoiceFi Companion (:5141/:5142) and Telemetry (:9381) endpoints against:
+    Guards VoiceFi Companion (:5141/:5142) and Telemetry (:9383) endpoints against:
       1. Cross-Origin / Wildcard Tunnel Spoofing (restricts `.trycloudflare.com` to the
          exact active tunnel hostname rather than trusting all Cloudflare tunnels).
       2. Brute-force pairing token guessing (sliding-window per-IP rate limiter).

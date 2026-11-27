@@ -54,7 +54,7 @@ public final class SocketServer: @unchecked Sendable {
         let pathUTF8 = socketPath.utf8CString
         let maxSunLen = MemoryLayout.size(ofValue: addr.sun_path)
         guard pathUTF8.count <= maxSunLen else {
-            throw NSError(domain: "WBCEyes.SocketServer", code: 1, userInfo: [
+            throw NSError(domain: "WholeBodyCompute.SocketServer", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "Socket path exceeds sockaddr_un limit (\(maxSunLen) bytes): \(socketPath)"
             ])
         }
@@ -340,8 +340,24 @@ public final class SocketServer: @unchecked Sendable {
             return
         }
 
+        if op == "ears_highlight" {
+            let res = EarsHighlightOverlay.shared.handleSocketRequest(
+                effectiveReq,
+                killSwitch: killSwitch,
+                headlessTestMode: headlessTestMode
+            )
+            if (res["security_blocked"] as? Bool) == true || (res["kill_switch"] as? Bool) == true {
+                killSwitch.recordBlocked(callerSummary: caller.summary)
+            } else {
+                killSwitch.recordServed(callerSummary: caller.summary)
+            }
+            sendResponse(clientFD: clientFD, isJSONRPC: isJSONRPC, rpcID: rpcID, result: res)
+            return
+        }
+
         if op == "ears_type_diff" {
             if killSwitch.isEarsPaused {
+                EarsHighlightOverlay.shared.hide(isHeadless: headlessTestMode)
                 killSwitch.recordBlocked(callerSummary: caller.summary)
                 sendResponse(
                     clientFD: clientFD,
@@ -364,8 +380,10 @@ public final class SocketServer: @unchecked Sendable {
                 headlessTestMode: headlessTestMode
             )
             if (res["security_blocked"] as? Bool) == true {
+                EarsHighlightOverlay.shared.hide(isHeadless: headlessTestMode)
                 killSwitch.recordBlocked(callerSummary: caller.summary)
             } else {
+                EarsHighlightOverlay.shared.notifyTypingActivity(headlessTestMode: headlessTestMode)
                 killSwitch.recordServed(callerSummary: caller.summary)
             }
             sendResponse(clientFD: clientFD, isJSONRPC: isJSONRPC, rpcID: rpcID, result: res)

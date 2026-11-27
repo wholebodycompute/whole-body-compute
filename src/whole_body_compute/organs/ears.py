@@ -172,6 +172,78 @@ def _broker_ears_type_diff(backspaces: int, text: str) -> Optional[bool]:
     return None
 
 
+def _is_headless_env() -> bool:
+    return bool(
+        os.environ.get("WBC_HEADLESS") == "1"
+        or os.environ.get("WBC_TESTING") == "1"
+        or os.environ.get("VOICEFI_HEADLESS") == "1"
+        or os.environ.get("VOICEFI_TESTING") == "1"
+        or "PYTEST_CURRENT_TEST" in os.environ
+    )
+
+
+def broker_ears_highlight(
+    action: str = "show",
+    *,
+    mode: str = "ptt",
+    target: str = "auto",
+    max_duration_s: float = 95.0,
+) -> Optional[Dict[str, Any]]:
+    """
+    Show, update, or hide the click-through dictation highlight border around the
+    focused text box (with automatic focused-window fallback) via `Whole Body Compute.app`
+    (`foveal.sock`), falling back to `PalHighlightOverlay` when an in-process AppKit
+    runloop is active.
+    """
+    if os.environ.get("WBC_EARS_NO_HIGHLIGHT") == "1":
+        return None
+    if platform.system() != "Darwin" and not os.environ.get("WBC_FOVEAL_SOCKET_PATH"):
+        return None
+
+    # 1. Primary path: Native Swift AppKit overlay inside `Whole Body Compute.app` (`foveal.sock`)
+    try:
+        from whole_body_compute.integrations.foveal_vision import send_foveal_socket_request
+
+        resp = send_foveal_socket_request(
+            {
+                "op": "ears_highlight",
+                "action": str(action),
+                "mode": str(mode),
+                "target": str(target),
+                "max_duration_s": float(max_duration_s),
+            },
+            timeout_sec=0.35,
+        )
+        if isinstance(resp, dict):
+            return resp
+    except Exception:
+        pass
+
+    # 2. Fallback path: In-process PyObjC overlay (only when not headless and NSApp is running)
+    if _is_headless_env():
+        return None
+    try:
+        import AppKit
+
+        app = AppKit.NSApplication.sharedApplication()
+        if app is not None and app.isRunning():
+            from whole_body_compute.ui.screen_highlight import PalHighlightOverlay
+
+            overlay = PalHighlightOverlay.get_instance()
+            if action == "hide":
+                overlay.hide()
+                return {"status": "ok", "visible": False, "provider": "pyobjc"}
+            kind = overlay.show_for_ears_target(
+                mode=mode,
+                target=target,
+                max_duration_s=max_duration_s,
+            )
+            return {"status": "ok", "visible": True, "target_kind": kind, "provider": "pyobjc"}
+    except Exception:
+        pass
+    return None
+
+
 def _send_backspaces(count: int) -> None:
     """Send `count` Delete/Backspace keystrokes with flags=0 (ignores held Fn key)."""
     if count <= 0 or platform.system() != "Darwin":
@@ -182,7 +254,9 @@ def _send_backspaces(count: int) -> None:
     try:
         import Quartz
 
-        src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+        src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStatePrivate) or Quartz.CGEventSourceCreate(
+            Quartz.kCGEventSourceStateHIDSystemState
+        )
         for _ in range(count):
             down = Quartz.CGEventCreateKeyboardEvent(src, 51, True)   # kVK_Delete = 51
             up = Quartz.CGEventCreateKeyboardEvent(src, 51, False)
@@ -208,7 +282,9 @@ def type_unicode_direct(text: str) -> bool:
     try:
         import Quartz
 
-        src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+        src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStatePrivate) or Quartz.CGEventSourceCreate(
+            Quartz.kCGEventSourceStateHIDSystemState
+        )
         # Chunk at 16 UTF-16 code units per event (macOS CGEventKeyboardSetUnicodeString limit is ~20)
         chunk_size = 16
         for idx in range(0, len(text), chunk_size):
@@ -232,40 +308,151 @@ class LiveDifferentialTyper:
     Types streaming partial transcripts into the focused app in real time,
     computing the minimal backspace + suffix diff whenever Apple Speech revises
     earlier words or Stage-2 ASTSymbolSnapper snaps an identifier on finalization.
+
+    Includes built-in utterance-reset protection so if an on-device STT engine
+    clears or resets its partial buffer after a brief pause while `Fn` is still held,
+    previously spoken words are locked in rather than backspaced out of the box.
     """
 
-    def __init__(self, *, type_fn: Optional[Callable[[str], bool]] = None, backspace_fn: Optional[Callable[[int], None]] = None):
+    def __init__(
+        self,
+        *,
+        type_fn: Optional[Callable[[str], bool]] = None,
+        backspace_fn: Optional[Callable[[int], None]] = None,
+    ):
         self._emitted: str = ""
-        self._lock = threading.Lock()
+        self._committed_segments: list[str] = []
+        self._active_segment: str = ""
+        self._last_update_ts: float = 0.0
+        self._custom_io = type_fn is not None or backspace_fn is not None
         self._type_fn = type_fn or type_unicode_direct
         self._backspace_fn = backspace_fn or _send_backspaces
+        self._lock = threading.Lock()
+
+    @property
+    def committed_prefix(self) -> str:
+        return " ".join(self._committed_segments).strip()
+
+    @staticmethod
+    def _common_prefix_ci(a: str, b: str) -> int:
+        al = a.lower()
+        bl = b.lower()
+        lim = min(len(al), len(bl))
+        idx = 0
+        while idx < lim and al[idx] == bl[idx]:
+            idx += 1
+        return idx
+
+    def _merge_segments_locked(self, tail: str) -> str:
+        clean = tail.strip()
+        if not clean:
+            parts = list(self._committed_segments)
+            if self._active_segment:
+                parts.append(self._active_segment)
+            return " ".join(parts).strip()
+        if not self._committed_segments:
+            return clean
+        first = self._committed_segments[0]
+        if clean.lower().startswith(first[: min(8, len(first))].lower()):
+            return clean
+        last = self._committed_segments[-1]
+        if self._common_prefix_ci(last, clean) >= min(4, len(clean), len(last)):
+            return " ".join(self._committed_segments[:-1] + [clean]).strip()
+        return " ".join(self._committed_segments + [clean]).strip()
+
+    def merge_final_raw(self, raw_acoustic: str) -> str:
+        """Merge a finalized acoustic string with any earlier segments committed across ANE resets."""
+        with self._lock:
+            return self._merge_segments_locked(raw_acoustic)
+
+    def _apply_diff_locked(self, target_text: str) -> Tuple[int, str]:
+        old = self._emitted
+        if target_text == old:
+            return 0, ""
+        prefix_len = 0
+        limit = min(len(old), len(target_text))
+        while prefix_len < limit and old[prefix_len] == target_text[prefix_len]:
+            prefix_len += 1
+        backspaces = len(old) - prefix_len
+        suffix = target_text[prefix_len:]
+
+        # Atomic single-RPC diff when using default `foveal.sock` broker
+        if not self._custom_io and (backspaces > 0 or suffix):
+            brokered = _broker_ears_type_diff(backspaces, suffix)
+            if brokered is not None:
+                self._emitted = target_text
+                return backspaces, suffix
+
+        if backspaces > 0:
+            self._backspace_fn(backspaces)
+        if suffix:
+            self._type_fn(suffix)
+        self._emitted = target_text
+        return backspaces, suffix
 
     def update(self, new_text: str) -> Tuple[int, str]:
-        """Apply differential update to match `new_text`. Returns `(backspaces, appended)`."""
+        """Apply differential update for a live partial transcript. Returns `(backspaces, appended)`."""
+        now = time.monotonic()
         with self._lock:
-            old = self._emitted
-            if new_text == old:
+            incoming = new_text.strip()
+            if not incoming:
+                # Never backspace already-spoken words on an empty partial reset
+                if self._active_segment:
+                    self._committed_segments.append(self._active_segment)
+                    self._active_segment = ""
                 return 0, ""
-            # Compute longest common prefix
-            prefix_len = 0
-            limit = min(len(old), len(new_text))
-            while prefix_len < limit and old[prefix_len] == new_text[prefix_len]:
-                prefix_len += 1
-            backspaces = len(old) - prefix_len
-            suffix = new_text[prefix_len:]
-            if backspaces > 0:
-                self._backspace_fn(backspaces)
-            if suffix:
-                self._type_fn(suffix)
-            self._emitted = new_text
-            return backspaces, suffix
+
+            prefix_str = " ".join(self._committed_segments).strip()
+            # If incoming already includes our committed prefix (e.g. Swift accumulator handled it), sync cleanly
+            if prefix_str and incoming.lower().startswith(prefix_str.lower()):
+                remainder = incoming[len(prefix_str) :].strip()
+                self._active_segment = remainder
+                self._last_update_ts = now
+                full = f"{prefix_str} {remainder}".strip() if remainder else prefix_str
+                return self._apply_diff_locked(full)
+
+            # If SFSpeechRecognizer re-included the just-committed last segment after a transient empty partial
+            if (
+                not self._active_segment
+                and self._committed_segments
+                and incoming.lower().startswith(self._committed_segments[-1].lower())
+            ):
+                self._committed_segments.pop()
+                prefix_str = " ".join(self._committed_segments).strip()
+            elif self._active_segment:
+                cp = self._common_prefix_ci(self._active_segment, incoming)
+                collapsed = (
+                    len(self._active_segment) >= 10
+                    and cp < 3
+                    and len(incoming) < int(len(self._active_segment) * 0.60)
+                )
+                pause_replaced = (
+                    len(self._active_segment) >= 3
+                    and self._last_update_ts > 0
+                    and (now - self._last_update_ts) >= 0.65
+                    and cp < 2
+                    and len(incoming) <= len(self._active_segment) + 2
+                )
+                if collapsed or pause_replaced:
+                    self._committed_segments.append(self._active_segment)
+                    prefix_str = " ".join(self._committed_segments).strip()
+
+            self._active_segment = incoming
+            self._last_update_ts = now
+            full = f"{prefix_str} {self._active_segment}".strip() if prefix_str else self._active_segment
+            return self._apply_diff_locked(full)
 
     def finalize(self, final_text: str) -> Tuple[int, str]:
         """Apply final AST-snapped text with a trailing space so consecutive dictations don't glue together."""
-        clean = final_text.strip()
-        if not clean:
-            return self.update("")
-        return self.update(clean + " ")
+        with self._lock:
+            merged = self._merge_segments_locked(final_text)
+            if not merged:
+                if self._emitted:
+                    if not self._emitted.endswith(" "):
+                        return self._apply_diff_locked(self._emitted + " ")
+                    return 0, ""
+                return 0, ""
+            return self._apply_diff_locked(merged + " ")
 
 
 def paste_into_focused_app(text: str) -> bool:
@@ -305,17 +492,40 @@ class OrganEars:
         db_path: Optional[Path] = None,
         backend: str = "auto",
         hotkey: str = "fn",
+        highlight: bool = True,
+        highlight_target: str = "auto",
     ):
         self.engine = LocalEarsEngine(workspace=workspace, db_path=db_path, backend=backend)
         self.hotkey = (hotkey or "fn").strip().lower()
+        self.highlight = bool(highlight) and os.environ.get("WBC_EARS_NO_HIGHLIGHT") != "1"
+        self.highlight_target = (highlight_target or "auto").strip().lower()
+        if self.highlight_target not in ("auto", "text_box", "window"):
+            self.highlight_target = "auto"
         self._active_session: Optional[PTTSession] = None
         self._active_typer: Optional[LiveDifferentialTyper] = None
         self._session_lock = threading.Lock()
+
+    def _show_highlight(self, mode: str = "ptt", max_duration_s: float = 95.0) -> None:
+        if not self.highlight:
+            return
+        broker_ears_highlight(
+            "show",
+            mode=mode,
+            target=self.highlight_target,
+            max_duration_s=max_duration_s,
+        )
+
+    def _hide_highlight(self) -> None:
+        if not self.highlight:
+            return
+        broker_ears_highlight("hide", target=self.highlight_target)
 
     def status(self) -> Dict[str, Any]:
         info = self.engine.status()
         info["hotkey"] = self.hotkey
         info["hands_free_chord"] = "fn+space" if self.hotkey == "fn" else f"toggle {self.hotkey}"
+        info["highlight_enabled"] = bool(self.highlight)
+        info["highlight_target"] = self.highlight_target
         info["voicefi_active"] = is_voicefi_dictation_active()
         info["yielding_to_voicefi"] = bool(
             info["voicefi_active"] and os.environ.get("WBC_EARS_FORCE_OVER_VOICEFI") != "1"
@@ -351,17 +561,26 @@ class OrganEars:
     ) -> TranscriptionResult:
         if audio_path:
             res = self.engine.transcribe_file(audio_path, active_file=active_file)
-        else:
+            if res.text:
+                self._record_foveal_transcript(res)
+            if paste and res.text:
+                paste_into_focused_app(res.text)
+            return res
+
+        self._show_highlight(mode="ptt", max_duration_s=max(10.0, float(max_sec) + 5.0))
+        try:
             res = self.engine.transcribe_mic(
                 silence_sec=silence_sec,
                 max_sec=max_sec,
                 active_file=active_file,
             )
-        if res.text:
-            self._record_foveal_transcript(res)
-        if paste and res.text:
-            paste_into_focused_app(res.text)
-        return res
+            if res.text:
+                self._record_foveal_transcript(res)
+            if paste and res.text:
+                paste_into_focused_app(res.text)
+            return res
+        finally:
+            self._hide_highlight()
 
     def _on_ptt_start(self, mode: str) -> None:
         if is_voicefi_dictation_active() and os.environ.get("WBC_EARS_FORCE_OVER_VOICEFI") != "1":
@@ -370,6 +589,10 @@ class OrganEars:
         with self._session_lock:
             if self._active_session is not None:
                 return
+            self._show_highlight(
+                mode=mode,
+                max_duration_s=180.0 if mode in ("hands_free", "opt+space") else 95.0,
+            )
             # Live-type in BOTH Hold-Fn and Hands-Free modes using `type_unicode_direct` (flags=0)
             typer = LiveDifferentialTyper()
 
@@ -378,6 +601,7 @@ class OrganEars:
 
             session = self.engine.start_ptt_mic_session(on_partial=_on_partial)
             if session is None:
+                self._hide_highlight()
                 print("⚠️  Local ANE mic helper unavailable.", flush=True)
                 return
             self._active_session = session
@@ -392,11 +616,22 @@ class OrganEars:
             typer = self._active_typer
             self._active_session = None
             self._active_typer = None
+        self._hide_highlight()
         if session is None:
             return
 
         def _finalize() -> None:
             res = session.finish()
+            if typer is not None and typer.committed_prefix:
+                merged_raw = typer.merge_final_raw(res.raw_acoustic or "")
+                if merged_raw and merged_raw != (res.raw_acoustic or "").strip():
+                    res = self.engine.apply_vocab_fusion(
+                        merged_raw,
+                        bundle=res.vocab_bundle,
+                        backend=res.backend,
+                        latency_ms=res.latency_ms,
+                        error=res.error,
+                    )
             if res.error and not res.text:
                 print(f"⚠️  {res.error}", flush=True)
             elif res.text:
@@ -445,6 +680,7 @@ class OrganEars:
                     keycode = int(Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode))
                     action = sm.handle_key_down(keycode, int(flags))
                     if action == "lock_hands_free":
+                        self._show_highlight(mode="hands_free", max_duration_s=180.0)
                         print("🔒 Hands-Free locked (tap Fn or Fn+Space to stop)...", flush=True)
             except Exception as exc:
                 logger.debug("CGEventTap callback error: %s", exc)
@@ -477,6 +713,7 @@ class OrganEars:
         except KeyboardInterrupt:
             print("\n🛑 body ears stopped.")
         finally:
+            self._hide_highlight()
             try:
                 Quartz.CGEventTapEnable(tap, False)
             except Exception:
@@ -533,10 +770,12 @@ class OrganEars:
                 elif kind == "keydown":
                     action = sm.handle_key_down(int(ev.get("keycode", 0)), flags)
                     if action == "lock_hands_free":
+                        self._show_highlight(mode="hands_free", max_duration_s=180.0)
                         print("🔒 Hands-Free locked (tap Fn or Fn+Space to stop)...", flush=True)
         except KeyboardInterrupt:
             print("\n🛑 body ears stopped.")
         finally:
+            self._hide_highlight()
             proc.terminate()
             try:
                 proc.wait(timeout=2.0)

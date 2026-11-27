@@ -168,22 +168,163 @@ public enum EarsEngine {
         }
 
         let engine = AVAudioEngine()
-        let req = SFSpeechAudioBufferRecognitionRequest()
-        req.requiresOnDeviceRecognition = true
-        req.shouldReportPartialResults = true
-        if !contextStrings.isEmpty {
-            req.contextualStrings = Array(contextStrings.prefix(100))
+        let contextualList = Array(contextStrings.prefix(100))
+        let stateQueue = DispatchQueue(label: "com.wholebodycompute.ears.accum", qos: .userInteractive)
+
+        var activeReq: SFSpeechAudioBufferRecognitionRequest?
+        var activeTask: SFSpeechRecognitionTask?
+
+        // Accumulate spoken segments across on-device SFSpeechRecognizer mid-session resets
+        // (Apple's on-device recognizer clears `bestTranscription.formattedString` after brief pauses).
+        var committedSegments: [String] = []
+        var currentSegment = ""
+        var currentSegFirstTs: TimeInterval?
+        var currentSegUpdatedAt: TimeInterval = 0
+        var bestText = ""
+        var lastEmittedPartial = ""
+        var finishRequested = false
+        var finished = false
+
+        func commonPrefixCountCI(_ a: String, _ b: String) -> Int {
+            let ac = Array(a.lowercased())
+            let bc = Array(b.lowercased())
+            let lim = min(ac.count, bc.count)
+            var idx = 0
+            while idx < lim && ac[idx] == bc[idx] { idx += 1 }
+            return idx
+        }
+
+        func rebuildBestText() -> String {
+            var parts = committedSegments
+            if !currentSegment.isEmpty {
+                parts.append(currentSegment)
+            }
+            bestText = parts.joined(separator: " ")
+            return bestText
+        }
+
+        func commitCurrentSegmentIfNeeded() {
+            let trimmed = currentSegment.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                committedSegments.append(trimmed)
+            }
+            currentSegment = ""
+            currentSegFirstTs = nil
+        }
+
+        func emitAndExitLocked() {
+            if finished { return }
+            finished = true
+            let finalOut = rebuildBestText()
+            emitJSONLine(["type": "final", "text": finalOut, "backend": "ane_sfspeech"])
+            exit(0)
+        }
+
+        func startRecognitionSegmentLocked() {
+            let newReq = SFSpeechAudioBufferRecognitionRequest()
+            newReq.requiresOnDeviceRecognition = true
+            newReq.shouldReportPartialResults = true
+            if !contextualList.isEmpty {
+                newReq.contextualStrings = contextualList
+            }
+            activeReq = newReq
+            activeTask = recognizer.recognitionTask(with: newReq) { res, err in
+                stateQueue.async {
+                    if finished { return }
+                    let now = Date().timeIntervalSince1970
+                    if let res {
+                        let raw = res.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let firstTs = res.bestTranscription.segments.first?.timestamp
+
+                        if raw.isEmpty {
+                            // Never wipe `bestText` when on-device SFSpeechRecognizer clears its active buffer on a pause
+                            if !currentSegment.isEmpty && !finishRequested {
+                                commitCurrentSegmentIfNeeded()
+                            }
+                        } else {
+                            // If SFSpeechRecognizer re-included the just-committed segment, pop it to avoid duplication
+                            if currentSegment.isEmpty,
+                               let last = committedSegments.last,
+                               raw.lowercased().hasPrefix(last.lowercased()),
+                               raw.count >= last.count
+                            {
+                                _ = committedSegments.popLast()
+                            } else if !currentSegment.isEmpty {
+                                let cp = commonPrefixCountCI(currentSegment, raw)
+                                let tsJumped: Bool = {
+                                    if let prevTs = currentSegFirstTs, let newTs = firstTs {
+                                        return newTs > prevTs + 0.60 && cp < 3
+                                    }
+                                    return false
+                                }()
+                                let collapsed = currentSegment.count >= 10
+                                    && cp < 3
+                                    && raw.count < Int(Double(currentSegment.count) * 0.60)
+                                let pauseReplaced = currentSegment.count >= 3
+                                    && (now - currentSegUpdatedAt) >= 0.65
+                                    && cp < 2
+                                    && raw.count <= currentSegment.count + 2
+
+                                if tsJumped || collapsed || pauseReplaced {
+                                    commitCurrentSegmentIfNeeded()
+                                }
+                            }
+
+                            currentSegment = raw
+                            if let firstTs {
+                                if let prevTs = currentSegFirstTs {
+                                    currentSegFirstTs = min(prevTs, firstTs)
+                                } else {
+                                    currentSegFirstTs = firstTs
+                                }
+                            }
+                            currentSegUpdatedAt = now
+
+                            let full = rebuildBestText()
+                            if !res.isFinal && !full.isEmpty && full != lastEmittedPartial {
+                                lastEmittedPartial = full
+                                emitJSONLine(["type": "partial", "text": full, "backend": "ane_sfspeech"])
+                            }
+                        }
+
+                        if res.isFinal {
+                            if finishRequested {
+                                emitAndExitLocked()
+                            } else {
+                                // On-device recognizer finalized an utterance while Fn is still held:
+                                // lock in spoken text and seamlessly roll into a new recognition request.
+                                commitCurrentSegmentIfNeeded()
+                                activeTask?.cancel()
+                                startRecognitionSegmentLocked()
+                            }
+                        }
+                    } else if err != nil {
+                        if finishRequested {
+                            emitAndExitLocked()
+                        } else {
+                            commitCurrentSegmentIfNeeded()
+                            activeTask?.cancel()
+                            startRecognitionSegmentLocked()
+                        }
+                    }
+                }
+            }
         }
 
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
-        var bestText = ""
         var lastSpeechTs = Date().timeIntervalSince1970
         var heardSpeech = false
         let startTs = lastSpeechTs
 
+        stateQueue.sync {
+            startRecognitionSegmentLocked()
+        }
+
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buf, _ in
-            req.append(buf)
+            stateQueue.async {
+                activeReq?.append(buf)
+            }
             if let ch = buf.floatChannelData?[0] {
                 let frames = Int(buf.frameLength)
                 var sumSq: Float = 0
@@ -201,21 +342,18 @@ public enum EarsEngine {
         let sigSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global(qos: .userInteractive))
         let termSrc = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global(qos: .userInteractive))
 
-        var finished = false
-        var lastEmittedPartial = ""
-        func emitAndExit() {
-            if finished { return }
-            finished = true
-            emitJSONLine(["type": "final", "text": bestText, "backend": "ane_sfspeech"])
-            exit(0)
-        }
-
         func finishMic() {
-            engine.stop()
-            inputNode.removeTap(onBus: 0)
-            req.endAudio()
-            DispatchQueue.global().asyncAfter(deadline: .now() + 1.8) {
-                emitAndExit()
+            stateQueue.async {
+                if finishRequested { return }
+                finishRequested = true
+                engine.stop()
+                inputNode.removeTap(onBus: 0)
+                activeReq?.endAudio()
+                DispatchQueue.global().asyncAfter(deadline: .now() + 1.8) {
+                    stateQueue.async {
+                        emitAndExitLocked()
+                    }
+                }
             }
         }
 
@@ -230,20 +368,6 @@ public enum EarsEngine {
         } catch {
             emitJSONLine(["error": "audio_engine_start_failed: \(error.localizedDescription)"])
             exit(4)
-        }
-
-        _ = recognizer.recognitionTask(with: req) { res, err in
-            if let res {
-                bestText = res.bestTranscription.formattedString
-                if res.isFinal {
-                    emitAndExit()
-                } else if !bestText.isEmpty && bestText != lastEmittedPartial {
-                    lastEmittedPartial = bestText
-                    emitJSONLine(["type": "partial", "text": bestText, "backend": "ane_sfspeech"])
-                }
-            } else if err != nil {
-                emitAndExit()
-            }
         }
 
         DispatchQueue.global().async {
@@ -358,7 +482,7 @@ public enum EarsEngine {
             }
         }
 
-        guard let src = CGEventSource(stateID: .hidSystemState) else {
+        guard let src = CGEventSource(stateID: .privateState) ?? CGEventSource(stateID: .hidSystemState) else {
             return ["status": "error", "error": "CGEventSource unavailable"]
         }
 

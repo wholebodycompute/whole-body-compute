@@ -1595,7 +1595,7 @@ def check_organ_brainstem() -> Dict[str, Any]:
                 data = json.loads(resp.read().decode("utf-8", errors="replace"))
                 mlx_online = True
                 models = data.get("mlx_metal_models", [])
-                mlx_model = models[0] if models else "voicefi-coder-mlx"
+                mlx_model = models[0] if models else "body-coder-mlx"
                 tok_s = data.get("mlx_worker", {}).get("last_metrics", {}).get("tok_per_s")
     except Exception:
         pass
@@ -2000,9 +2000,9 @@ def check_organ_hippocampus() -> Dict[str, Any]:
             from whole_body_compute.local.dot_memory import get_dot_store
 
             store = get_dot_store()
-            store.search("voice", top_k=2, use_embeddings=False)
+            store.search("voice", top_k=2, use_embeddings=False, record_access=False)
             with store._connect() as conn:
-                mem_count = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+                mem_count = conn.execute("SELECT COUNT(*) FROM memories WHERE COALESCE(archived, 0) = 0").fetchone()[0]
                 try:
                     episodes_count = conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
                 except Exception:
@@ -2015,7 +2015,7 @@ def check_organ_hippocampus() -> Dict[str, Any]:
                 except Exception:
                     try:
                         habits_count = conn.execute(
-                            "SELECT COUNT(*) FROM memories WHERE category = 'habit_pattern'"
+                            "SELECT COUNT(*) FROM memories WHERE category = 'habit_pattern' AND COALESCE(archived, 0) = 0"
                         ).fetchone()[0]
                     except Exception:
                         habits_count = 0
@@ -2409,7 +2409,9 @@ def exercise_5_organ_reflex_loop() -> Dict[str, Any]:
         from whole_body_compute.local.dot_memory import get_dot_store
         from whole_body_compute.local.rem_sleep import REMSleepDaemon
 
-        dot_mems = get_dot_store().search("preference", top_k=2, use_embeddings=False)
+        dot_mems = get_dot_store().search(
+            "preference", top_k=2, use_embeddings=False, record_access=False
+        )
         _ = REMSleepDaemon()
         hippo_details = f"Retrieved {len(dot_mems)} semantic facts • REM harvester ready"
         hippo_passed = True

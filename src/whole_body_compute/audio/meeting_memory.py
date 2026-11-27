@@ -725,8 +725,12 @@ def _try_local_llm_meeting_synthesis(
     app_name: str,
     transcript: str,
 ) -> Optional[Dict[str, Any]]:
-    """Attempt zero-egress structured JSON synthesis via localhost MLX (:9379/:9380) or Ollama (:11434)."""
+    """Attempt zero-egress structured JSON synthesis via `localbench-specialist-router` (:9380/:9379) or Ollama (:11434)."""
     clipped = transcript[-12000:] if len(transcript) > 12000 else transcript
+    sys_prompt = (
+        "You are an executive business writing and structured meeting summary synthesizer. "
+        "Respond ONLY with strict valid JSON."
+    )
     prompt = (
         "Summarize this call transcript into strict JSON with keys: "
         '"summary" (2-3 sentences), "key_points" (list of strings), '
@@ -734,17 +738,36 @@ def _try_local_llm_meeting_synthesis(
         f"Title: {title} ({app_name})\nTranscript:\n{clipped}\n\nJSON:"
     )
 
-    # 1. Try local OpenAI-compatible MLX / Gemma servers (:9379, :9380)
-    for url in (
-        "http://127.0.0.1:9379/v1/chat/completions",
-        "http://127.0.0.1:9380/v1/chat/completions",
+    preferred_model = "localbench-specialist-router"
+    try:
+        from whole_body_compute.local.router import default_router
+
+        dec = default_router.resolve_model(task_type="prose", prefer_warm_reflex=False)
+        if dec.is_local and dec.selected_model:
+            preferred_model = dec.selected_model
+    except Exception:
+        pass
+
+    shadow_enabled = os.environ.get("WBC_ROUTER_SHADOW") == "1"
+
+    # 1. Try warm SpecialistRouter / LiteRT / MLX Metal bridges (:9380 -> :9379)
+    for port, target_model in (
+        (9380, preferred_model),
+        (9379, preferred_model),
+        (9379, "gemma4-2b"),
     ):
+        url = f"http://127.0.0.1:{port}/v1/chat/completions"
+        t_start = time.perf_counter()
         try:
             req = urllib.request.Request(
                 url,
                 data=json.dumps(
                     {
-                        "messages": [{"role": "user", "content": prompt}],
+                        "model": target_model,
+                        "messages": [
+                            {"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": prompt},
+                        ],
                         "temperature": 0.1,
                         "max_tokens": 512,
                     }
@@ -757,6 +780,19 @@ def _try_local_llm_meeting_synthesis(
                 raw = body["choices"][0]["message"]["content"]
                 parsed = _parse_json_object(raw)
                 if parsed:
+                    if shadow_enabled:
+                        from whole_body_compute.local.shadow_ledger import record_shadow_eval
+
+                        record_shadow_eval(
+                            task_type="meeting_summary",
+                            engine=f"specialist_router_{port}",
+                            model=str(body.get("model") or target_model),
+                            latency_ms=(time.perf_counter() - t_start) * 1000.0,
+                            valid_guardrail=True,
+                            baseline_used="shadow",
+                            tokens_saved_est=max(0, len(prompt) // 4),
+                            sla_ms=4000.0,
+                        )
                     return parsed
         except Exception:
             continue
@@ -898,7 +934,7 @@ def check_live_deja_vu(
     """
     Real-Time In-Call "Whisper in Your Ear" (Roadmap H3):
     Queries `dot_memory.db` via ANE + AMX/Metal Q4_0 (~13-21ms, 0% GPU contention)
-    on incoming `[Them]` utterances and surfaces a silent HUD card (`:9381`) when
+    on incoming `[Them]` utterances and surfaces a silent HUD card (`:9383`) when
     a teammate mentions a prior decision, bug, or architecture fact.
     """
     if utterance.speaker != "Them":
@@ -935,7 +971,7 @@ def check_live_deja_vu(
         if notify_hud and not os.environ.get("PYTEST_CURRENT_TEST"):
             try:
                 req = urllib.request.Request(
-                    "http://127.0.0.1:9381/hud/deja-vu",
+                    "http://127.0.0.1:9383/hud/deja-vu",
                     data=json.dumps(card).encode("utf-8"),
                     headers={"Content-Type": "application/json"},
                     method="POST",

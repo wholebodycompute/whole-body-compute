@@ -1,6 +1,6 @@
 import AppKit
 import Foundation
-import WBCEyesCore
+import WholeBodyComputeCore
 
 final class WholeBodyComputeAppDelegate: NSObject, NSApplicationDelegate {
     private var socketServer: SocketServer?
@@ -47,6 +47,7 @@ final class WholeBodyComputeAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if !headlessMode {
+            EarsHighlightOverlay.shared.installKillSwitchObserver(killSwitch: .shared)
             MainActor.assumeIsolated {
                 self.statusBarController = StatusBarController(killSwitch: .shared)
             }

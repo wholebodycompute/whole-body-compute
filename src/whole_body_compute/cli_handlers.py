@@ -385,16 +385,29 @@ def _render_community_context_banner(metrics_dict: dict[str, Any]) -> str:
     steps = int(metrics_dict.get("steps", 0))
     kb = float(metrics_dict.get("full_size_kb", 0.0))
     infl = float(metrics_dict.get("latency_inflation_ratio", 1.0))
+    compaction_count = int(metrics_dict.get("compaction_count", 0) or 0)
+    peak_csi = float(metrics_dict.get("peak_csi", csi) or csi)
+    compact_tag = (
+        f" [post-compact #{compaction_count} • peak CSI {peak_csi:.3f}]"
+        if compaction_count > 0
+        else ""
+    )
     short_id = str(metrics_dict.get("short_id") or metrics_dict.get("conv_id", "")[:8])
     harness_raw = str(metrics_dict.get("harness") or "antigravity")
     harness_label = "Claude Code" if harness_raw == "claude_code" else "Antigravity"
     lines = [
-        f"\n🧠 [Cognitive Thermal Sentry - {harness_label} `{short_id}`] Status: {badge} (CSI {csi:.3f})",
+        f"\n🧠 [Cognitive Thermal Sentry - {harness_label} `{short_id}`] Status: {badge} (CSI {csi:.3f}{compact_tag})",
         "─" * 80,
         f"  • Steps / Transcript: {steps} steps • {kb:.1f} KB • Turn Latency Inflation: {infl:.2f}x",
         f"  • Bloat Attribution:  {metrics_dict.get('primary_bloat_cause', 'NOMINAL')} "
         f"({float(metrics_dict.get('avoidable_bloat_kb', 0.0)):.1f} KB avoidable)",
     ]
+    if compaction_count > 0:
+        cum_steps = int(metrics_dict.get("cumulative_steps", steps) or steps)
+        cum_kb = float(metrics_dict.get("cumulative_size_kb", kb) or kb)
+        lines.append(
+            f"  • Cumulative History: {cum_steps:,} steps / {cum_kb:,.1f} KB across {compaction_count} compaction(s)"
+        )
     if tier in ("YELLOW", "RED"):
         lines.append(
             "  • 🔒 Pro ($29/mo):    Thread is saturated! Unlock 1-click `body flush --auto` "
@@ -728,29 +741,127 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
     if cmd in ("audit-spend", "audit", "roi", "finops"):
         from pathlib import Path
         from whole_body_compute.finops_audit import (
-            audit_historical_spend,
-            format_finops_audit_receipt,
-            format_finops_markdown_receipt,
+            _load_standalone_audit_module,
+            format_unified_audit_markdown_receipt,
+            sanitize_lowering_analysis,
         )
 
-        days = getattr(args, "days", 30)
-        price_per_m = getattr(args, "price_per_m", 5.0)
-        seats = getattr(args, "seats", 10)
-        top = getattr(args, "top", 5)
+        days = int(getattr(args, "days", 30) or 30)
+        raw_price = getattr(args, "price_per_m", None)
+        explicit_price = raw_price is not None
+        price_per_m = float(raw_price) if explicit_price else 5.0
+        raw_seats = getattr(args, "seats", None)
+        explicit_seats = raw_seats is not None
+        seats = max(1, int(raw_seats)) if explicit_seats else 1
+        top = int(getattr(args, "top", 5) or 5)
         export_path = getattr(args, "export_receipt", None)
-        is_json = getattr(args, "json", False)
-        import_paths = getattr(args, "import_paths", None) or []
-        use_cloud_api = getattr(args, "cloud", False)
+        is_json = bool(getattr(args, "json", False))
+        no_color = bool(getattr(args, "no_color", False))
+        no_telemetry = bool(getattr(args, "no_telemetry", False))
+        unshielded_only = bool(getattr(args, "unshielded_only", False))
+        lowering = bool(getattr(args, "lowering", False))
+        raw_ci_dir = getattr(args, "ci_dir", None)
+        ci_dir_path = Path(raw_ci_dir).expanduser() if raw_ci_dir else None
+        by_client = bool(getattr(args, "by_client", False))
+        client_slug = getattr(args, "client_slug", None)
+        sync_edge = bool(getattr(args, "sync_edge", False))
+        edge_url = str(getattr(args, "edge_url", None) or "https://gateway.wholebodycompute.com")
+
+        edge_sync_res = None
+        if sync_edge:
+            try:
+                from whole_body_compute.cloud_audit import sync_edge_proxy_receipts
+                from whole_body_compute.license import LicenseManager
+
+                lic_key = str((LicenseManager().get_status() or {}).get("license_key") or os.environ.get("WBC_LICENSE_KEY") or "")
+                edge_sync_res = sync_edge_proxy_receipts(lic_key, edge_base_url=edge_url)
+            except Exception as exc:
+                edge_sync_res = {"ok": False, "error": str(exc), "synced": 0}
+
+        raw_import_paths = list(getattr(args, "import_paths", None) or [])
+        auto_downloads = bool(getattr(args, "auto_downloads", False)) or any(
+            str(p).strip().lower() == "auto" for p in raw_import_paths
+        )
+        import_paths = [p for p in raw_import_paths if str(p).strip().lower() != "auto"]
+        auto_dl_missing = False
+        if auto_downloads:
+            from whole_body_compute.cloud_audit import discover_recent_cloud_exports
+
+            found_dl = discover_recent_cloud_exports()
+            if not found_dl:
+                auto_dl_missing = True
+            for disc_p in found_dl:
+                if str(disc_p) not in import_paths:
+                    import_paths.append(str(disc_p))
+        use_cloud_api = bool(getattr(args, "cloud", False))
         admin_key = getattr(args, "anthropic_admin_key", None) or (
             os.environ.get("ANTHROPIC_ADMIN_API_KEY") if use_cloud_api else None
         )
 
-        audit = audit_historical_spend(
-            days=days,
-            price_per_m=price_per_m,
-            seats=seats,
-            top=top,
+        isolated_harness_env = any(
+            os.environ.get(k)
+            for k in (
+                "AGY_BRAIN_DIR",
+                "ANTIGRAVITY_BRAIN_DIR",
+                "CLAUDE_CODE_DIR",
+                "GOOSE_SESSIONS_DB",
+                "CURSOR_STORAGE_DIR",
+                "CODEX_SESSIONS_DIR",
+                "CODEX_HOME",
+                "CLINE_STORAGE_DIR",
+                "WINDSURF_STORAGE_DIR",
+                "AIDER_HISTORY_PATH",
+                "CONTINUE_SESSIONS_DIR",
+                "ZED_THREADS_DIR",
+                "GEMINI_CLI_DIR",
+                "WBC_AUDIT_HOME_DIR",
+            )
         )
+        shield_summary = None
+        if not unshielded_only and (
+            (not isolated_harness_env and ci_dir_path is None) or bool(os.environ.get("WBC_SHIELD_DB_PATH"))
+        ):
+            try:
+                from whole_body_compute.shield import ShieldTelemetryLedger
+
+                win_arg = f"{days}d" if days > 0 else "all"
+                shield_summary = ShieldTelemetryLedger().get_summary(
+                    price_per_m=(price_per_m if explicit_price else None),
+                    window=win_arg,
+                )
+            except Exception:
+                shield_summary = None
+
+        standalone_mod = _load_standalone_audit_module()
+        if standalone_mod is None:
+            from whole_body_compute.bundled import standalone_audit as standalone_mod
+
+        import inspect
+
+        audit_kwargs: Dict[str, Any] = {
+            "days": days,
+            "price_per_m": price_per_m,
+            "seats": seats,
+            "top": top,
+            "explicit_price_override": explicit_price,
+            "unshielded_only": unshielded_only,
+            "import_paths": import_paths,
+            "shield_ledger_summary": shield_summary,
+        }
+        try:
+            _sig_params = inspect.signature(standalone_mod.run_multi_harness_finops_audit).parameters
+            if "ci_dir" in _sig_params:
+                audit_kwargs["ci_dir"] = ci_dir_path
+            if "lowering" in _sig_params:
+                audit_kwargs["lowering"] = lowering
+        except (TypeError, ValueError):
+            pass
+
+        audit = standalone_mod.run_multi_harness_finops_audit(**audit_kwargs)
+        if lowering and "lowering_analysis" not in audit:
+            audit["lowering_analysis"] = {}
+        if isinstance(audit.get("lowering_analysis"), dict):
+            audit["lowering_analysis"] = sanitize_lowering_analysis(audit["lowering_analysis"])
 
         cloud_sources = []
         if import_paths or use_cloud_api or admin_key:
@@ -766,20 +877,92 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
                 cloud_sources.append(fetch_anthropic_cloud_usage(admin_key or "", days=days))
             audit["cloud_usage"] = cloud_sources
 
+        show_team = bool((explicit_seats and seats > 1) or export_path)
         if export_path:
             out_p = Path(export_path)
             out_p.parent.mkdir(parents=True, exist_ok=True)
-            out_p.write_text(format_finops_markdown_receipt(audit), encoding="utf-8")
+            out_p.write_text(
+                format_unified_audit_markdown_receipt(audit, show_team=show_team),
+                encoding="utf-8",
+            )
             audit["exported_receipt_path"] = str(out_p)
 
+        dl_hint = "No ~/Downloads file: console.anthropic.com/settings/cost or claude.ai export"
+        if auto_dl_missing:
+            audit["cloud_download_hint"] = dl_hint
+
+        if not no_telemetry and os.environ.get("DO_NOT_TRACK", "").strip().lower() not in ("1", "true", "yes", "on"):
+            try:
+                from whole_body_compute.procedural_telemetry import track_wbc_event
+
+                hb_t = audit.get("harness_breakdown", {}) or {}
+                active_h = [k for k, v in hb_t.items() if isinstance(v, dict) and int(v.get("threads", 0)) > 0]
+                track_wbc_event(
+                    "wbc_audit_completed",
+                    {
+                        "mode": "body_audit_cli",
+                        "command": cmd,
+                        "is_qualified_audit": int(audit.get("conversations_scanned", 0)) > 0,
+                        "window_days": days,
+                        "conversations_scanned": int(audit.get("conversations_scanned", 0)),
+                        "total_steps": int(audit.get("total_steps", 0)),
+                        "active_harnesses": ",".join(active_h),
+                        "active_harnesses_count": len(active_h),
+                        "exact_api_spend_usd": float(
+                            (audit.get("measured_spend") or {}).get("exact_api_spend_usd", 0.0)
+                        ),
+                        "wasted_spend_usd": float(audit.get("wasted_spend_usd", 0.0)),
+                        "savings_pct": float(audit.get("savings_pct", 0.0)),
+                    },
+                )
+            except Exception:
+                pass
+
         if is_json:
-            print(json.dumps(audit, indent=2))
+            json_audit = dict(audit)
+            json_audit.pop("_local_titles_by_id", None)
+            if edge_sync_res is not None:
+                json_audit["edge_sync"] = edge_sync_res
+            if by_client or client_slug:
+                try:
+                    from whole_body_compute.shield import get_proxy_client_summary
+
+                    json_audit["proxy_by_client"] = get_proxy_client_summary(
+                        window=(f"{days}d" if days > 0 else "all"),
+                        client_filter=client_slug,
+                    )
+                except Exception:
+                    pass
+            print(json.dumps(json_audit, indent=2))
         else:
-            print(format_finops_audit_receipt(audit))
+            use_color = False if no_color else None
+            print(
+                standalone_mod.format_standalone_receipt(
+                    audit,
+                    color=use_color,
+                    show_team=show_team,
+                    cli_mode=True,
+                )
+            )
             if cloud_sources:
                 print(format_cloud_audit_section(cloud_sources))
+            if by_client or client_slug:
+                try:
+                    from whole_body_compute.cloud_audit import format_proxy_client_receipt
+                    from whole_body_compute.proxy.chore_router import load_clients_config
+                    from whole_body_compute.shield import get_proxy_client_summary
+
+                    p_sum = get_proxy_client_summary(
+                        window=(f"{days}d" if days > 0 else "all"),
+                        client_filter=client_slug,
+                    )
+                    print(format_proxy_client_receipt(p_sum, clients_cfg=load_clients_config()))
+                except Exception:
+                    pass
+            if auto_dl_missing:
+                print(f"  {dl_hint}")
             if export_path:
-                print(f"📄 Exported shareable Markdown FinOps ROI receipt to `{export_path}`\n")
+                print(f"  Exported Markdown receipt -> {export_path}")
         return 0
 
     if cmd in ("team-sync", "hive-sync", "share-exemplars"):
@@ -1158,11 +1341,20 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
                 return 0
 
             if recall_query is not None:
-                matches = store.recall(recall_query, top_k=5)
+                t0_rec = time.monotonic()
+                matches = store.recall(recall_query, top_k=5, record_access=False)
                 if not matches:
-                    matches = store.search(recall_query, top_k=5, use_embeddings=False)
+                    matches = store.search(recall_query, top_k=5, use_embeddings=False, record_access=False)
+                hit_ids = [int(m["id"]) for m in matches if float(m.get("score", 0.0)) > 0.0]
+                if hit_ids:
+                    store._record_memory_recall_events(
+                        hit_ids,
+                        mode="cli_recall",
+                        elapsed_ms=(time.monotonic() - t0_rec) * 1000.0,
+                        top_score=float(matches[0].get("score", 0.0)) if matches else 0.0,
+                    )
                 with store._connect() as conn:
-                    mem_count = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+                    mem_count = conn.execute("SELECT COUNT(*) FROM memories WHERE COALESCE(archived, 0) = 0").fetchone()[0]
                 out_data = {
                     "query": recall_query,
                     "memory_count": mem_count,
@@ -1449,6 +1641,13 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
                 from whole_body_compute.organs.immune import get_immune_pre_post_scorecard
 
                 organ_res["pre_post_scorecard"] = get_immune_pre_post_scorecard()
+            elif cmd in ("memory", "hippocampus"):
+                try:
+                    from whole_body_compute.local.dot_memory import get_dot_store
+
+                    organ_res["impact_summary"] = get_dot_store().get_memory_impact_summary()
+                except Exception:
+                    pass
             print(json.dumps(organ_res, indent=2))
         else:
             fake_report = {
@@ -1464,6 +1663,34 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
 
                 print(format_immune_scorecard_table())
                 print()
+            elif cmd in ("memory", "hippocampus") and organ_res.get("vital_signs", {}).get("wal_enabled"):
+                try:
+                    from whole_body_compute.local.dot_memory import get_dot_store
+
+                    imp = get_dot_store().get_memory_impact_summary()
+                    hr = f"{imp['helpful_rate_pct']:.1f}%" if imp["helpful_rate_pct"] is not None else "calibrating (0 resolved)"
+                    print("📊 [Hippocampus Recall & Outcome Scorecard]")
+                    print("─" * 84)
+                    print(
+                        f"  • Active Facts:      {imp['active_facts']} active "
+                        f"({imp['archived_facts']} archived/superseded)"
+                    )
+                    print(
+                        f"  • Embedded Coverage: {imp['embedded_active']}/{imp['active_facts']} "
+                        f"({imp['embedded_coverage_pct']:.1f}% Q4/vector indexed)"
+                    )
+                    print(
+                        f"  • Recall Utilization:{imp['utilized_active']}/{imp['active_facts']} "
+                        f"({imp['utilization_pct']:.1f}% recalled • {imp['total_recalls']} total hits)"
+                    )
+                    print(
+                        f"  • Causal Outcomes:   {imp['helpful_outcomes']} helpful / "
+                        f"{imp['harmful_outcomes']} harmful -> {hr}"
+                    )
+                    print("─" * 84)
+                    print()
+                except Exception:
+                    pass
             elif cmd == "heart":
                 vitals = organ_res.get("vital_signs", {})
                 large_procs = vitals.get("large_processes", [])
@@ -1487,5 +1714,78 @@ def dispatch_organ_and_cognitive_command(cmd: str, args: argparse.Namespace) -> 
                 print("  💡 Tip: Pass `--app <App>` or `--max-elements 20` to capture a live Foveal AXUIElement DOM snapshot.")
                 print()
         return 0 if organ_res.get("status") != "fail" else 1
+
+    if cmd == "proxy":
+        action = str(getattr(args, "proxy_action", "start") or "start").lower()
+        is_json = bool(getattr(args, "json", False))
+        if action in ("status", "report"):
+            from whole_body_compute.cloud_audit import format_proxy_client_receipt
+            from whole_body_compute.shield import get_proxy_client_summary
+
+            p_sum = get_proxy_client_summary(
+                window=getattr(args, "window", "30d"),
+                client_filter=getattr(args, "client_slug", None),
+            )
+            if is_json:
+                print(json.dumps(p_sum, indent=2))
+            else:
+                clients_cfg = {}
+                try:
+                    from whole_body_compute.proxy.chore_router import load_clients_config
+
+                    loaded_cfg = load_clients_config()
+                    if isinstance(loaded_cfg, dict):
+                        clients_cfg = loaded_cfg
+                except Exception:
+                    pass
+                print(format_proxy_client_receipt(p_sum, clients_cfg=clients_cfg))
+            return 0
+
+        if getattr(args, "daemon", False):
+            from whole_body_compute.daemon import manage_launchd_daemon
+
+            d_res = manage_launchd_daemon("install", dry_run=False)
+            if is_json:
+                print(json.dumps(d_res, indent=2))
+            else:
+                print("Installed & started LaunchAgents (including com.wholebodycompute.proxy).")
+            return 0
+
+        from whole_body_compute.proxy import ProxyConfig, run_proxy_server
+
+        cfg = ProxyConfig(
+            host=str(getattr(args, "host", "127.0.0.1") or "127.0.0.1"),
+            port=int(getattr(args, "port", 9381) or 9381),
+            anti_slop=bool(getattr(args, "anti_slop", False)),
+            chore_router=bool(getattr(args, "chore_router", False)),
+        )
+        tunnel_proc = None
+        if getattr(args, "tunnel", False):
+            import shutil
+            import subprocess
+
+            cf_bin = shutil.which("cloudflared")
+            if cf_bin:
+                tunnel_proc = subprocess.Popen(
+                    [cf_bin, "tunnel", "--url", f"http://{cfg.host}:{cfg.port}"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        try:
+            run_proxy_server(cfg)
+        finally:
+            if tunnel_proc is not None:
+                tunnel_proc.terminate()
+        return 0
+
+    if cmd == "claude-desktop-mcp":
+        from whole_body_compute.integrations.claude_desktop_mcp import main as bouncer_main
+
+        bouncer_argv = []
+        if getattr(args, "db_path", None):
+            bouncer_argv.extend(["--db-path", str(args.db_path)])
+        if getattr(args, "memory_db", None):
+            bouncer_argv.extend(["--memory-db", str(args.memory_db)])
+        return int(bouncer_main(bouncer_argv) or 0)
 
     return None

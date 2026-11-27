@@ -57,9 +57,10 @@ from whole_body_compute.local.supervisor import default_supervisor
 
 logger = logging.getLogger("whole_body_compute.local.embed")
 
-# Default model identifiers
+# Default model identifiers (folds tev1:0.8b reflex arbitration into warm :9379 body-coder-mlx)
 EMBEDDING_GEMMA_MODEL = "embedding-gemma-2:740m"
-TEV_REFLEX_MODEL = "tev1:0.8b"
+TEV_REFLEX_MODEL = "body-coder-mlx"
+LEGACY_TEV_REFLEX_MODEL = "tev1:0.8b"
 EMBEDDING_DIM = 768
 
 # Default socket and HTTP endpoints
@@ -488,7 +489,7 @@ class Tier0ReflexArbiter:
         start_t = time.perf_counter()
 
         # Step 1: Check ThermalSupervisor (Tier 0 is permitted under SERIOUS, blocked only on CRITICAL)
-        can_run, reason, _ = default_supervisor.can_load_model("tev1:0.8b", is_tier0=True)
+        can_run, reason, _ = default_supervisor.can_load_model(TEV_REFLEX_MODEL, is_tier0=True)
         if not can_run:
             return Tier0Action(
                 action="escalate",

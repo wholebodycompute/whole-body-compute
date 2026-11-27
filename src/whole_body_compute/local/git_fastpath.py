@@ -30,6 +30,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from whole_body_compute.local.shadow_ledger import (
+    is_external_models_drive_mounted,
+    is_infra_error,
+    record_shadow_eval,
+    strip_llm_fences_and_thoughts,
+)
+
 # Fast secret scanning regex (detects common API keys, private keys, and tokens)
 _FAST_SECRET_RE = re.compile(
     r"("
@@ -654,11 +661,21 @@ def synthesize_commit_message(
     if no_llm or os.environ.get("WBC_DISABLE_LOCAL_LLM"):
         return cold_msg
 
-    # 2. Warm Local Metal (:9379 or :9380)
-    for port in (9379, 9380):
+    # 2. Warm Local Metal (:9379 body-coder-mlx or :9380 gemma4-26b / localbench-specialist-router)
+    model_9380 = (
+        "gemma4-26b"
+        if is_external_models_drive_mounted()
+        else "localbench-specialist-router"
+    )
+    for port, model_name in ((9379, "body-coder-mlx"), (9380, model_9380)):
         if _is_port_open(port):
-            with contextlib.suppress(OSError, json.JSONDecodeError, KeyError):
+            t0 = time.perf_counter()
+            first_line = ""
+            is_valid_cc = False
+            infra_skipped = False
+            try:
                 payload = json.dumps({
+                    "model": model_name,
                     "messages": [
                         {
                             "role": "system",
@@ -685,11 +702,44 @@ def synthesize_commit_message(
                 with urllib.request.urlopen(req, timeout=0.6) as resp:
                     if resp.status == 200:
                         res_json = json.loads(resp.read().decode("utf-8"))
-                        text = res_json["choices"][0]["message"]["content"].strip()
-                        first_line = text.splitlines()[0].strip().strip('"').strip("'")
-                        if re.match(r"^(feat|fix|refactor|chore|test|docs|perf)\(?[a-zA-Z0-9_\-]*\)?:\s*.+", first_line):
-                            return first_line
-            break
+                        raw_text = str(res_json["choices"][0]["message"]["content"])
+                        text = strip_llm_fences_and_thoughts(raw_text)
+                        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+                        first_line = lines[0].strip('"').strip("'") if lines else ""
+                        is_valid_cc = bool(
+                            re.match(
+                                r"^(feat|fix|refactor|chore|test|docs|perf)\(?[a-zA-Z0-9_\-]*\)?:\s*.+",
+                                first_line,
+                            )
+                        )
+                    elif is_infra_error(status_code=resp.status):
+                        infra_skipped = True
+            except (
+                OSError,
+                json.JSONDecodeError,
+                KeyError,
+                IndexError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                if is_infra_error(exc=exc):
+                    infra_skipped = True
+            if os.environ.get("WBC_ROUTER_SHADOW") == "1":
+                record_shadow_eval(
+                    task_type="fast_commit",
+                    engine=f"metal_{port}",
+                    model=model_name,
+                    latency_ms=(time.perf_counter() - t0) * 1000.0,
+                    valid_guardrail=is_valid_cc,
+                    baseline_used="live_fallback",
+                    sla_ms=600.0,
+                    tokens_saved_est=80,
+                    infra_skip=infra_skipped,
+                )
+            if is_valid_cc:
+                return first_line
+            if not infra_skipped:
+                break
 
     return cold_msg
 

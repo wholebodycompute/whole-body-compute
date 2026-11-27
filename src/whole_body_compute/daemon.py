@@ -6,7 +6,7 @@ Works out-of-the-box in both Open-Core Community (`brew install whole-body-compu
   1. `com.wholebodycompute.foveal` - Community & Pro: Warm Unix socket Foveal DOM daemon (`~/.whole_body_compute/foveal.sock`)
   2. `com.wholebodycompute.foveal-memory` - Community & Pro: Sovereign Foveal Memory HTTP `:9382` bridge
   3. `com.wholebodycompute.remsleep` - Pro/Team: 03:30 AM Nocturnal REM Sleep & LoRA Distillation
-  4. `com.wholebodycompute.telemetry` - Pro/Team: Live Biometric Telemetry HUD & WebSocket `:9381`
+  4. `com.wholebodycompute.telemetry` - Pro/Team: Live Biometric Telemetry HUD & WebSocket `:9383`
 """
 
 from __future__ import annotations
@@ -31,14 +31,14 @@ WBC_EYES_TEAM_ID = "Y25SHBA3P5"
 WBC_APP_NAME = "Whole Body Compute.app"
 WBC_APP_EXECUTABLE_NAME = "WholeBodyCompute"
 WBC_EYES_BUNDLE_ID = "com.wholebodycompute.app"
-WBC_EYES_APP_VERSION = "0.1.6"
+WBC_EYES_APP_VERSION = "0.1.8"
 WBC_EYES_RELEASE_ZIP_URL = (
     f"https://github.com/wholebodycompute/whole-body-compute/releases/download/"
     f"v{WBC_EYES_APP_VERSION}/Whole-Body-Compute-{WBC_EYES_APP_VERSION}.zip"
 )
 # Populate with the 64-char SHA-256 printed by:
 #   ./scripts/build_wbc_eyes_app.sh --notarize --install
-WBC_EYES_PINNED_SHA256 = "5c31885c522908fc8bbeb00c6968e42c2214aee247409529f530aa311e31cd12"
+WBC_EYES_PINNED_SHA256 = "270337c7384f0f58119f50dfe86ccce2a4d472f52c9e51fd5c300ecb887e3b15"
 _FORBIDDEN_EYES_ENTITLEMENTS: Tuple[str, ...] = (
     "com.apple.security.cs.disable-library-validation",
     "com.apple.security.cs.allow-dyld-environment-variables",
@@ -52,6 +52,7 @@ DAEMON_LABELS: Tuple[str, ...] = (
     "com.wholebodycompute.ears",
     "com.wholebodycompute.remsleep",
     "com.wholebodycompute.telemetry",
+    "com.wholebodycompute.proxy",
 )
 
 COMMUNITY_DAEMON_LABELS: Tuple[str, ...] = (
@@ -63,6 +64,7 @@ COMMUNITY_DAEMON_LABELS: Tuple[str, ...] = (
 PRO_DAEMON_LABELS: Tuple[str, ...] = (
     "com.wholebodycompute.remsleep",
     "com.wholebodycompute.telemetry",
+    "com.wholebodycompute.proxy",
 )
 
 
@@ -801,13 +803,23 @@ def build_launchd_plist_specs(
         }
         specs["com.wholebodycompute.telemetry"] = {
             "Label": "com.wholebodycompute.telemetry",
-            "ProgramArguments": resolve_body_program_args(["hud", "--host", "127.0.0.1", "--port", "9381"]),
+            "ProgramArguments": resolve_body_program_args(["hud", "--host", "127.0.0.1", "--port", "9383"]),
             "EnvironmentVariables": dict(env_vars),
             "RunAtLoad": True,
             "KeepAlive": True,
             "ProcessType": "Background",
             "StandardOutPath": str(resolved_logs / "telemetry_server.log"),
             "StandardErrorPath": str(resolved_logs / "telemetry_server.log"),
+        }
+        specs["com.wholebodycompute.proxy"] = {
+            "Label": "com.wholebodycompute.proxy",
+            "ProgramArguments": resolve_body_program_args(["proxy", "--host", "127.0.0.1", "--port", "9381"]),
+            "EnvironmentVariables": dict(env_vars),
+            "RunAtLoad": True,
+            "KeepAlive": True,
+            "ProcessType": "Background",
+            "StandardOutPath": str(resolved_logs / "finops_proxy.log"),
+            "StandardErrorPath": str(resolved_logs / "finops_proxy.log"),
         }
 
     return specs
@@ -1092,7 +1104,7 @@ def manage_launchd_daemon(
         f"│ com.wholebodycompute.foveal-memory │ {'🟢 ACTIVE  ' if fm_active and fm_pid != '-' else '⚪ STOPPED '} │ PID {fm_pid.ljust(4)} │ {fm_plist.name} • Local Foveal HTTP :9382  │",
         f"│ com.wholebodycompute.ears          │ {'🟢 ACTIVE  ' if ears_active and ears_pid != '-' else '⚪ STOPPED '} │ PID {ears_pid.ljust(4)} │ {ears_plist.name} • Hold Fn AST Dictation  │",
         f"│ com.wholebodycompute.remsleep      │ {rem_status_cell} │ 03:30 AM │ {rem_plist.name} • Nightly REM consolidation    │",
-        f"│ com.wholebodycompute.telemetry     │ {tel_status_cell} │ PID {tel_pid.ljust(4)} │ {tel_plist.name} • Biometric HUD on :9381  │",
+        f"│ com.wholebodycompute.telemetry     │ {tel_status_cell} │ PID {tel_pid.ljust(4)} │ {tel_plist.name} • Biometric HUD on :9383  │",
         "└─────────────────────────────────┴────────────┴──────────┴──────────────────────────────────────────────────┘",
         f"🌙 Last REM Sleep Activity: {last_run_summary}",
         "💡 Manage daemons: `body daemon install` • `body daemon logs` • `body daemon uninstall`",

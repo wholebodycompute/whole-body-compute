@@ -79,12 +79,198 @@ write_dedup_cache() {
   fi
 }
 
+resolve_cid_and_tp() {
+  TP_VAL=""
+  CID_VAL=""
+  case "$PAYLOAD" in
+    *'"conversationId"'*)
+      C_TMP="${PAYLOAD#*\"conversationId\"}"
+      C_TMP="${C_TMP#*:}"
+      while :; do
+        case "$C_TMP" in
+          [[:space:]]*) C_TMP="${C_TMP#?}" ;;
+          *) break ;;
+        esac
+      done
+      case "$C_TMP" in
+        '"'*)
+          C_TMP="${C_TMP#\"}"
+          CID_VAL="${C_TMP%%\"*}"
+          ;;
+      esac
+      ;;
+    *'"conversation_id"'*)
+      C_TMP="${PAYLOAD#*\"conversation_id\"}"
+      C_TMP="${C_TMP#*:}"
+      while :; do
+        case "$C_TMP" in
+          [[:space:]]*) C_TMP="${C_TMP#?}" ;;
+          *) break ;;
+        esac
+      done
+      case "$C_TMP" in
+        '"'*)
+          C_TMP="${C_TMP#\"}"
+          CID_VAL="${C_TMP%%\"*}"
+          ;;
+      esac
+      ;;
+  esac
+  CID_VAL="$(printf '%s' "$CID_VAL" | tr -cd 'A-Za-z0-9_-' | cut -c 1-64)"
+  case "$PAYLOAD" in
+    *'"transcriptPath"'*)
+      TP_TMP="${PAYLOAD#*\"transcriptPath\"}"
+      TP_TMP="${TP_TMP#*\"}"
+      TP_VAL="${TP_TMP%%\"*}"
+      ;;
+    *'"transcript_path"'*)
+      TP_TMP="${PAYLOAD#*\"transcript_path\"}"
+      TP_TMP="${TP_TMP#*\"}"
+      TP_VAL="${TP_TMP%%\"*}"
+      ;;
+  esac
+  case "$TP_VAL" in
+    *".."*) TP_VAL="" ;;
+  esac
+  if [ -z "$TP_VAL" ] && [ -n "$CID_VAL" ]; then
+    TP_CAND_FULL="$HOME/.gemini/antigravity/brain/$CID_VAL/.system_generated/logs/transcript_full.jsonl"
+    if [ -f "$TP_CAND_FULL" ] && [ ! -L "$TP_CAND_FULL" ]; then
+      TP_VAL="$TP_CAND_FULL"
+    else
+      TP_VAL="$HOME/.gemini/antigravity/brain/$CID_VAL/.system_generated/logs/transcript.jsonl"
+    fi
+  elif [ -n "$TP_VAL" ]; then
+    case "$TP_VAL" in
+      */transcript.jsonl)
+        TP_SIB_FULL="${TP_VAL%/transcript.jsonl}/transcript_full.jsonl"
+        if [ -f "$TP_SIB_FULL" ] && [ ! -L "$TP_SIB_FULL" ]; then
+          TP_VAL="$TP_SIB_FULL"
+        fi
+        ;;
+    esac
+  fi
+}
+
+compute_tp_active_metrics() {
+  ACTIVE_BYTES="${TP_BYTES:-0}"
+  ACTIVE_LINES=0
+  COMPACT_CNT=0
+  _need_lines="${1:-0}"
+  if [ "${TP_BYTES:-0}" -ge 163840 ] 2>/dev/null || [ "$_need_lines" = "1" ]; then
+    ACTIVE_LINES="$(wc -l < "$TP_VAL" 2>/dev/null | tr -d ' ')"
+  fi
+  if [ "${TP_BYTES:-0}" -ge 163840 ] 2>/dev/null || [ "${ACTIVE_LINES:-0}" -ge 150 ] 2>/dev/null; then
+    CP_MATCHES="$(grep -n -E '(^|\{[[:space:]]*|,[[:space:]]*)"type"[[:space:]]*:[[:space:]]*"CHECKPOINT"' "$TP_VAL" 2>/dev/null || true)"
+    if [ -n "$CP_MATCHES" ]; then
+      COMPACT_CNT="$(printf '%s\n' "$CP_MATCHES" | wc -l | tr -d ' ')"
+      LAST_CP_ENTRY="$(printf '%s\n' "$CP_MATCHES" | tail -n 1)"
+      LAST_CP_LINE="${LAST_CP_ENTRY%%:*}"
+      case "$LAST_CP_LINE" in
+        ''|*[!0-9]*) COMPACT_CNT=0 ;;
+        *)
+          ACTIVE_BYTES="$(tail -n +"$LAST_CP_LINE" "$TP_VAL" 2>/dev/null | wc -c | tr -d ' ')"
+          if [ "${ACTIVE_LINES:-0}" -gt 0 ] 2>/dev/null; then
+            ACTIVE_LINES=$(( ACTIVE_LINES - LAST_CP_LINE + 1 ))
+            [ "$ACTIVE_LINES" -lt 1 ] 2>/dev/null && ACTIVE_LINES=1
+          else
+            ACTIVE_LINES="$(tail -n +"$LAST_CP_LINE" "$TP_VAL" 2>/dev/null | wc -l | tr -d ' ')"
+          fi
+          ;;
+      esac
+    fi
+  fi
+}
+
+csi_marker_crossed() {
+  _cur_bucket="${1:-0}"
+  _cur_epoch="${2:-0}"
+  CSI_MARKER="$WBC_RUN_DIR/wbc_csi_warned_${CID_VAL:-global}"
+  LAST_EPOCH=0
+  LAST_BUCKET=0
+  if [ -f "$CSI_MARKER" ] && [ ! -L "$CSI_MARKER" ]; then
+    RAW_MARKER="$(tr -d ' \n\r\t' < "$CSI_MARKER" 2>/dev/null || printf '0')"
+    case "$RAW_MARKER" in
+      *:*)
+        LAST_EPOCH="${RAW_MARKER%%:*}"
+        LAST_BUCKET="${RAW_MARKER#*:}"
+        ;;
+      *)
+        LAST_EPOCH=0
+        LAST_BUCKET="$RAW_MARKER"
+        ;;
+    esac
+  fi
+  case "$LAST_EPOCH" in ''|*[!0-9]*) LAST_EPOCH=0 ;; esac
+  case "$LAST_BUCKET" in ''|*[!0-9]*) LAST_BUCKET=0 ;; esac
+  if [ "$_cur_epoch" -gt "$LAST_EPOCH" ] 2>/dev/null; then
+    LAST_BUCKET=0
+  elif [ "$_cur_epoch" -lt "$LAST_EPOCH" ] 2>/dev/null; then
+    return 1
+  fi
+  if [ "$_cur_bucket" -gt "$LAST_BUCKET" ] 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+csi_bucket_crossed() {
+  if [ -n "$TP_VAL" ] && [ -f "$TP_VAL" ] && [ ! -L "$TP_VAL" ]; then
+    CSI_BUCKET=0
+    TP_BYTES="$(wc -c < "$TP_VAL" 2>/dev/null | tr -d ' ')"
+    compute_tp_active_metrics 1
+    if [ "${ACTIVE_BYTES:-0}" -ge 327680 ] 2>/dev/null; then
+      CSI_BUCKET=$(( ACTIVE_BYTES / 327680 ))
+    fi
+    if [ "$CSI_BUCKET" -lt 3 ] 2>/dev/null; then
+      if [ "${ACTIVE_LINES:-0}" -ge 350 ] 2>/dev/null && [ "$CSI_BUCKET" -lt 3 ]; then
+        CSI_BUCKET=3
+      elif [ "${ACTIVE_LINES:-0}" -ge 280 ] 2>/dev/null && [ "$CSI_BUCKET" -lt 2 ]; then
+        CSI_BUCKET=2
+      elif [ "${ACTIVE_LINES:-0}" -ge 150 ] 2>/dev/null && [ "$CSI_BUCKET" -lt 1 ]; then
+        CSI_BUCKET=1
+      fi
+    fi
+    if [ "$CSI_BUCKET" -ge 1 ] 2>/dev/null; then
+      if csi_marker_crossed "$CSI_BUCKET" "$COMPACT_CNT"; then
+        return 0
+      fi
+    fi
+  fi
+  return 1
+}
+
+csi_post_bucket_crossed() {
+  if [ -n "$TP_VAL" ] && [ -f "$TP_VAL" ] && [ ! -L "$TP_VAL" ]; then
+    CSI_BUCKET=0
+    TP_BYTES="$(wc -c < "$TP_VAL" 2>/dev/null | tr -d ' ')"
+    if [ "${TP_BYTES:-0}" -ge 163840 ] 2>/dev/null; then
+      compute_tp_active_metrics 0
+      if [ "${ACTIVE_BYTES:-0}" -ge 655360 ] 2>/dev/null; then
+        CSI_BUCKET=$(( ACTIVE_BYTES / 327680 ))
+      fi
+      if [ "$CSI_BUCKET" -lt 3 ] 2>/dev/null; then
+        if [ "${ACTIVE_LINES:-0}" -ge 350 ] 2>/dev/null && [ "$CSI_BUCKET" -lt 3 ]; then
+          CSI_BUCKET=3
+        elif [ "${ACTIVE_LINES:-0}" -ge 280 ] 2>/dev/null && [ "$CSI_BUCKET" -lt 2 ]; then
+          CSI_BUCKET=2
+        fi
+      fi
+      if [ "$CSI_BUCKET" -ge 2 ] 2>/dev/null; then
+        if csi_marker_crossed "$CSI_BUCKET" "$COMPACT_CNT"; then
+          return 0
+        fi
+      fi
+    fi
+  fi
+  return 1
+}
+
 if [ "$PHASE" = "pre-invocation" ] || [ "$PHASE" = "pre_invocation" ]; then
   if [ -z "$PYTEST_CURRENT_TEST" ] && [ "$VOICEFI_STRICT_TEST_HOOK" != "1" ]; then
     PREINV_QDIR="${WBC_PREINV_QUEUE_DIR:-$WBC_RUN_DIR/preinv_queue}"
     if [ ! -d "$PREINV_QDIR" ] || [ -z "$(ls -A "$PREINV_QDIR" 2>/dev/null)" ]; then
-      # Zero-bloat URL + Command Reflex + CSI RED gate: only wake Python when the latest user prompt
-      # carries an https:// URL, a WBC command-reflex stem, OR when main-thread transcript crosses a new 900KB bucket.
+      # Zero-bloat URL + Command Reflex + 2-Tier CSI gate: only wake Python when the latest user prompt
+      # carries an https:// URL, a WBC command-reflex stem, OR when main-thread transcript crosses a new 320KB/step bucket.
       # In protojson, invocationNum is 0-indexed (omitted or 0 on fresh user turn, >=1 on mid-turn tool loops).
       case "$PAYLOAD" in
         *'"invocationNum":'[1-9]* | *'"invocationNum": '[1-9]*)
@@ -94,49 +280,17 @@ if [ "$PHASE" = "pre-invocation" ] || [ "$PHASE" = "pre_invocation" ]; then
       esac
       PREINV_URL_MATCH=0
       case "$PAYLOAD" in
-        *https://* | *[cC][oO][mM][mM][iI][tT]* | *[cC][hH][eE][cC][kK][pP][oO][iI][nN][tT]* | *[fF][lL][uU][sS][hH]* | *[hH][aA][nN][dD][oO][fF][fF]* | *[wW][iI][pP]* | *[sS][cC][rR][eE][eE][nN]* | *[cC][hH][rR][oO][mM][eE]* | *'body '* | *'wbc '* | *[rR][eE][mM][eE][mM][bB][eE][rR]* | *[sS][aA][vV][iI][nN][gG][sS]* | *[sS][cC][oO][rR][eE][cC][aA][rR][dD]* | *[sS][aA][tT][uU][rR][aA][tT][iI][oO][nN]* | *'fresh thread'* | *'new convo'* | *'new thread'*)
+        *https://* | *[cC][oO][mM][mM][iI][tT]* | *[cC][hH][eE][cC][kK][pP][oO][iI][nN][tT]* | *[fF][lL][uU][sS][hH]* | *[hH][aA][nN][dD][oO][fF][fF]* | *[hH][aA][nN][dD]' '[oO][fF][fF]* | *[wW][iI][pP]* | *[sS][cC][rR][eE][eE][nN]* | *[cC][hH][rR][oO][mM][eE]* | *'body '* | *'wbc '* | *[rR][eE][mM][eE][mM][bB][eE][rR]* | *[sS][aA][vV][iI][nN][gG][sS]* | *[sS][cC][oO][rR][eE][cC][aA][rR][dD]* | *[sS][aA][tT][uU][rR][aA][tT][iI][oO][nN]* | *'fresh thread'* | *'new convo'* | *'new thread'*)
           PREINV_URL_MATCH=1
           ;;
       esac
-      TP_VAL=""
-      CID_VAL=""
-      case "$PAYLOAD" in
-        *'"conversationId"'*)
-          C_TMP="${PAYLOAD#*\"conversationId\"}"
-          C_TMP="${C_TMP#*\"}"
-          CID_VAL="${C_TMP%%\"*}"
-          ;;
-        *'"conversation_id"'*)
-          C_TMP="${PAYLOAD#*\"conversation_id\"}"
-          C_TMP="${C_TMP#*\"}"
-          CID_VAL="${C_TMP%%\"*}"
-          ;;
-      esac
-      CID_VAL="$(printf '%s' "$CID_VAL" | tr -cd 'A-Za-z0-9_-' | cut -c 1-64)"
-      case "$PAYLOAD" in
-        *'"transcriptPath"'*)
-          TP_TMP="${PAYLOAD#*\"transcriptPath\"}"
-          TP_TMP="${TP_TMP#*\"}"
-          TP_VAL="${TP_TMP%%\"*}"
-          ;;
-        *'"transcript_path"'*)
-          TP_TMP="${PAYLOAD#*\"transcript_path\"}"
-          TP_TMP="${TP_TMP#*\"}"
-          TP_VAL="${TP_TMP%%\"*}"
-          ;;
-      esac
-      case "$TP_VAL" in
-        *".."*) TP_VAL="" ;;
-      esac
-      if [ -z "$TP_VAL" ] && [ -n "$CID_VAL" ]; then
-        TP_VAL="$HOME/.gemini/antigravity/brain/$CID_VAL/.system_generated/logs/transcript.jsonl"
-      fi
+      resolve_cid_and_tp
       if [ -n "$TP_VAL" ] && [ -f "$TP_VAL" ] && [ ! -L "$TP_VAL" ]; then
         LAST_TP="$(tail -n 2 "$TP_VAL" 2>/dev/null || true)"
         case "$LAST_TP" in
           *'"type":"USER_INPUT"'* | *'"type": "USER_INPUT"'*)
             case "$LAST_TP" in
-              *https://* | *[cC][oO][mM][mM][iI][tT]* | *[cC][hH][eE][cC][kK][pP][oO][iI][nN][tT]* | *[fF][lL][uU][sS][hH]* | *[hH][aA][nN][dD][oO][fF][fF]* | *[wW][iI][pP]* | *[sS][cC][rR][eE][eE][nN]* | *[cC][hH][rR][oO][mM][eE]* | *'body '* | *'wbc '* | *[rR][eE][mM][eE][mM][bB][eE][rR]* | *[sS][aA][vV][iI][nN][gG][sS]* | *[sS][cC][oO][rR][eE][cC][aA][rR][dD]* | *[sS][aA][tT][uU][rR][aA][tT][iI][oO][nN]* | *'fresh thread'* | *'new convo'* | *'new thread'*)
+              *https://* | *[cC][oO][mM][mM][iI][tT]* | *[cC][hH][eE][cC][kK][pP][oO][iI][nN][tT]* | *[fF][lL][uU][sS][hH]* | *[hH][aA][nN][dD][oO][fF][fF]* | *[hH][aA][nN][dD]' '[oO][fF][fF]* | *[wW][iI][pP]* | *[sS][cC][rR][eE][eE][nN]* | *[cC][hH][rR][oO][mM][eE]* | *'body '* | *'wbc '* | *[rR][eE][mM][eE][mM][bB][eE][rR]* | *[sS][aA][vV][iI][nN][gG][sS]* | *[sS][cC][oO][rR][eE][cC][aA][rR][dD]* | *[sS][aA][tT][uU][rR][aA][tT][iI][oO][nN]* | *'fresh thread'* | *'new convo'* | *'new thread'*)
                 PREINV_URL_MATCH=1
                 ;;
             esac
@@ -153,17 +307,8 @@ if [ "$PHASE" = "pre-invocation" ] || [ "$PHASE" = "pre_invocation" ]; then
             esac
             ;;
         esac
-        TP_BYTES="$(wc -c < "$TP_VAL" 2>/dev/null | tr -d ' ')"
-        if [ "${TP_BYTES:-0}" -ge 921600 ]; then
-          CSI_BUCKET=$(( TP_BYTES / 921600 ))
-          CSI_MARKER="$WBC_RUN_DIR/wbc_csi_warned_${CID_VAL:-global}"
-          LAST_BUCKET=0
-          if [ -f "$CSI_MARKER" ] && [ ! -L "$CSI_MARKER" ]; then
-            LAST_BUCKET="$(cat "$CSI_MARKER" 2>/dev/null | tr -d ' \n' || printf '0')"
-          fi
-          if [ "$CSI_BUCKET" -gt "${LAST_BUCKET:-0}" ] 2>/dev/null; then
-            PREINV_URL_MATCH=1
-          fi
+        if csi_bucket_crossed; then
+          PREINV_URL_MATCH=1
         fi
       fi
       if [ "$PREINV_URL_MATCH" = "0" ]; then
@@ -288,12 +433,28 @@ case "$WBC_AIRLOCK_MODE" in
         esac
         PENDING_SCOUT_HIT=0
         if [ -z "$PYTEST_CURRENT_TEST" ] || [ "$WBC_ENABLE_REFLEX_GATE_IN_TESTS" = "1" ]; then
-          if [ -n "$RAW_READ_PATH" ] && [ -f "$WBC_RUN_DIR/pending_reflex_scout" ] && [ ! -L "$WBC_RUN_DIR/pending_reflex_scout" ]; then
+          if [ -n "$RAW_READ_PATH" ]; then
             READ_BASE="${RAW_READ_PATH##*/}"
-            IFS= read -r P_SCOUTS < "$WBC_RUN_DIR/pending_reflex_scout" 2>/dev/null || P_SCOUTS=""
-            case "$P_SCOUTS" in
-              *"|${READ_BASE}|"*) PENDING_SCOUT_HIT=1 ;;
-            esac
+            if [ -f "$WBC_RUN_DIR/pending_reflex_scout" ] && [ ! -L "$WBC_RUN_DIR/pending_reflex_scout" ]; then
+              IFS= read -r P_SCOUTS < "$WBC_RUN_DIR/pending_reflex_scout" 2>/dev/null || P_SCOUTS=""
+              case "$P_SCOUTS" in
+                *"|${READ_BASE}|"*) PENDING_SCOUT_HIT=1 ;;
+              esac
+            fi
+            if [ "$PENDING_SCOUT_HIT" = "0" ] && [ -f "$WBC_RUN_DIR/recent_ast_slices" ] && [ ! -L "$WBC_RUN_DIR/recent_ast_slices" ]; then
+              IFS= read -r R_SLICE_LINE < "$WBC_RUN_DIR/recent_ast_slices" 2>/dev/null || R_SLICE_LINE=""
+              R_SLICE_TS="${R_SLICE_LINE%%|*}"
+              case "$R_SLICE_TS" in
+                ''|*[!0-9]*) ;;
+                *)
+                  if [ $(( TS - R_SLICE_TS )) -le 300 ] 2>/dev/null; then
+                    case "$R_SLICE_LINE" in
+                      *"|${READ_BASE}|"*) PENDING_SCOUT_HIT=1 ;;
+                    esac
+                  fi
+                  ;;
+              esac
+            fi
           fi
         fi
         case "$PENDING_SCOUT_HIT:$RAW_READ_PATH" in
@@ -348,6 +509,21 @@ case "$WBC_AIRLOCK_MODE" in
                   END_LINE=$((START_LINE + LIMIT_VAL - 1))
                 fi
                 ;;
+              *'"limit"'*)
+                e_tmp="${PAYLOAD#*\"limit\"}"
+                e_tmp="${e_tmp#*:}"
+                while :; do
+                  case "$e_tmp" in
+                    [[:space:]]*) e_tmp="${e_tmp#?}" ;;
+                    *) break ;;
+                  esac
+                done
+                LIMIT_VAL="${e_tmp%%[!0-9]*}"
+                if [ -n "$LIMIT_VAL" ] && [ "$LIMIT_VAL" -ge 1 ] 2>/dev/null; then
+                  START_LINE=1
+                  END_LINE="$LIMIT_VAL"
+                fi
+                ;;
             esac
 
             if [ -n "$START_LINE" ] && [ -n "$END_LINE" ] && [ "$START_LINE" -ge 1 ] 2>/dev/null; then
@@ -384,9 +560,10 @@ case "$WBC_AIRLOCK_MODE" in
                       *'"Read"'*) TOOL_NAME="Read" ;;
                       *'"view_file"'*) TOOL_NAME="view_file" ;;
                     esac
-                    TARGET="$(printf '%s' "$RAW_TARGET" | tr '\n\r\t"\\`' '      ' | cut -c 1-80)"
+                    TARGET="$(printf '%s' "$RAW_TARGET" | tr '\n\r\t"\\`' '      ' | cut -c 1-220)"
+                    resolve_cid_and_tp
                     AUDIT_LOG="${VOICEFI_IMMUNE_AUDIT_PATH:-${WBC_IMMUNE_AUDIT_PATH:-$WBC_DIR/immune_audit.jsonl}}"
-                    printf '{"timestamp":%s.0,"phase":"pre","fast_path":true,"conversation_id":"global","step_idx":0,"tool":"%s","target":"%s","decision":"allow","stage":0,"assert_delta":0,"latency_ms":1.8,"reason":"Blood-Brain Barrier sh bounded-read fast-path allow"}\n' "$TS" "$TOOL_NAME" "$TARGET" >> "$AUDIT_LOG" 2>/dev/null || true
+                    printf '{"timestamp":%s.0,"phase":"pre","fast_path":true,"conversation_id":"%s","step_idx":0,"tool":"%s","target":"%s","decision":"allow","stage":0,"assert_delta":0,"latency_ms":1.8,"reason":"Blood-Brain Barrier sh bounded-read fast-path allow"}\n' "$TS" "${CID_VAL:-global}" "$TOOL_NAME" "$TARGET" >> "$AUDIT_LOG" 2>/dev/null || true
                     write_dedup_cache "$ALLOW_JSON"
                     printf '%s\n' "$ALLOW_JSON"
                     exit 0
@@ -465,21 +642,22 @@ case "$WBC_AIRLOCK_MODE" in
                             SH_ACTION="slice_claude"
                           fi
                         else
-                          if [ "$TOTAL_LINES" -le 800 ] 2>/dev/null; then
+                          if [ "$TOTAL_LINES" -le 300 ] 2>/dev/null; then
                             SH_ACTION="allow_native"
                           elif [ "$TOTAL_LINES" -gt 1080 ] 2>/dev/null; then
                             SH_ACTION="slice_agy"
                           fi
                         fi
 
-                        TARGET="$(printf '%s' "$SH_FPATH" | tr '\n\r\t"\\`' '      ' | cut -c 1-80)"
+                        TARGET="$(printf '%s' "$SH_FPATH" | tr '\n\r\t"\\`' '      ' | cut -c 1-220)"
                         FPATH_JSON="$(printf '%s' "$SH_FPATH" | tr -d '\n\r\t' | sed 's/\\/\\\\/g; s/"/\\"/g')"
+                        resolve_cid_and_tp
 
                         if [ "$SH_ACTION" = "allow_native" ]; then
                           TOOL_NAME="read_file"
                           [ "$IS_CLAUDE" = "1" ] && TOOL_NAME="Read"
                           AUDIT_LOG="${VOICEFI_IMMUNE_AUDIT_PATH:-${WBC_IMMUNE_AUDIT_PATH:-$WBC_DIR/immune_audit.jsonl}}"
-                          printf '{"timestamp":%s.0,"phase":"pre","fast_path":true,"conversation_id":"global","step_idx":0,"tool":"%s","target":"%s","decision":"allow","stage":0,"assert_delta":0,"latency_ms":2.4,"reason":"Blood-Brain Barrier sh under-ceiling allow"}\n' "$TS" "$TOOL_NAME" "$TARGET" >> "$AUDIT_LOG" 2>/dev/null || true
+                          printf '{"timestamp":%s.0,"phase":"pre","fast_path":true,"conversation_id":"%s","step_idx":0,"tool":"%s","target":"%s","decision":"allow","stage":0,"assert_delta":0,"latency_ms":2.4,"reason":"Blood-Brain Barrier sh under-ceiling allow"}\n' "$TS" "${CID_VAL:-global}" "$TOOL_NAME" "$TARGET" >> "$AUDIT_LOG" 2>/dev/null || true
                           write_dedup_cache "$ALLOW_JSON"
                           printf '%s\n' "$ALLOW_JSON"
                           exit 0
@@ -534,15 +712,22 @@ case "$WBC_AIRLOCK_MODE" in
                             FBASE="${SH_FPATH##*/}"
                             FBASE="$(printf '%s' "$FBASE" | tr -d '\n\r\t"\\`$')"
                             SAVED_TOK=$(( (TOTAL_LINES - 160) * 10 ))
+                            MAX_SAVED_TOK=9920
+                            [ "$SH_ACTION" = "slice_claude" ] && MAX_SAVED_TOK=23400
+                            [ "$SAVED_TOK" -gt "$MAX_SAVED_TOK" ] 2>/dev/null && SAVED_TOK="$MAX_SAVED_TOK"
                             [ "$SAVED_TOK" -lt 100 ] 2>/dev/null && SAVED_TOK=100
                             QUAD_TOK=$(( SAVED_TOK * 20 ))
+                            _tmp_rslice="$WBC_RUN_DIR/recent_ast_slices.tmp.$$"
+                            if [ ! -L "$_tmp_rslice" ] && printf '%s|%s|\n' "$TS" "$FBASE" > "$_tmp_rslice" 2>/dev/null; then
+                              mv -f "$_tmp_rslice" "$WBC_RUN_DIR/recent_ast_slices" 2>/dev/null || rm -f "$_tmp_rslice" 2>/dev/null || true
+                            fi
                             AUDIT_LOG="${VOICEFI_IMMUNE_AUDIT_PATH:-${WBC_IMMUNE_AUDIT_PATH:-$WBC_DIR/immune_audit.jsonl}}"
                             if [ "$SH_ACTION" = "slice_claude" ]; then
                               SLICE_OUT="{\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"permissionDecision\": \"allow\", \"updatedInput\": {\"file_path\": \"${FPATH_JSON}\", \"offset\": 1, \"limit\": 160}, \"additionalContext\": \"Blood-Brain Barrier Auto-Slice (\`${FBASE}\`, ${TOTAL_LINES} lines -> L1-160):\\nInstant AST / Section Map for \`${FBASE}\`:\\n${OUTLINE_ESC}\"}, \"reason\": \"Blood-Brain Barrier Auto-Slice (\`${FBASE}\`, ${TOTAL_LINES} lines -> L1-160)\"}"
-                              printf '{"timestamp":%s.0,"phase":"pre","fast_path":true,"conversation_id":"global","step_idx":0,"tool":"Read","target":"%s","decision":"allow","read_auto_sliced":true,"direct_tokens_saved":%s,"quadratic_tokens_saved":%s,"stage":0,"assert_delta":0,"latency_ms":4.2,"reason":"Blood-Brain Barrier sh AST auto-slice L1-160"}\n' "$TS" "$TARGET" "$SAVED_TOK" "$QUAD_TOK" >> "$AUDIT_LOG" 2>/dev/null || true
+                              printf '{"timestamp":%s.0,"phase":"pre","fast_path":true,"conversation_id":"%s","step_idx":0,"tool":"Read","target":"%s","decision":"allow","read_auto_sliced":true,"direct_tokens_saved":%s,"quadratic_tokens_saved":%s,"stage":0,"assert_delta":0,"latency_ms":4.2,"reason":"Blood-Brain Barrier sh AST auto-slice L1-160"}\n' "$TS" "${CID_VAL:-global}" "$TARGET" "$SAVED_TOK" "$QUAD_TOK" >> "$AUDIT_LOG" 2>/dev/null || true
                             else
                               SLICE_OUT="{\"decision\": \"allow\", \"overwrite\": {\"StartLine\": 1, \"EndLine\": 160}, \"reason\": \"Blood-Brain Barrier Auto-Slice (\`${FBASE}\`, ${TOTAL_LINES} lines -> L1-160):\\nInstant AST / Section Map for \`${FBASE}\`:\\n${OUTLINE_ESC}\"}"
-                              printf '{"timestamp":%s.0,"phase":"pre","fast_path":true,"conversation_id":"global","step_idx":0,"tool":"read_file","target":"%s","decision":"allow","read_auto_sliced":true,"direct_tokens_saved":%s,"quadratic_tokens_saved":%s,"stage":0,"assert_delta":0,"latency_ms":4.2,"reason":"Blood-Brain Barrier sh AST auto-slice L1-160"}\n' "$TS" "$TARGET" "$SAVED_TOK" "$QUAD_TOK" >> "$AUDIT_LOG" 2>/dev/null || true
+                              printf '{"timestamp":%s.0,"phase":"pre","fast_path":true,"conversation_id":"%s","step_idx":0,"tool":"read_file","target":"%s","decision":"allow","read_auto_sliced":true,"direct_tokens_saved":%s,"quadratic_tokens_saved":%s,"stage":0,"assert_delta":0,"latency_ms":4.2,"reason":"Blood-Brain Barrier sh AST auto-slice L1-160"}\n' "$TS" "${CID_VAL:-global}" "$TARGET" "$SAVED_TOK" "$QUAD_TOK" >> "$AUDIT_LOG" 2>/dev/null || true
                             fi
                             write_dedup_cache "$SLICE_OUT"
                             printf '%s\n' "$SLICE_OUT"
@@ -562,9 +747,9 @@ case "$WBC_AIRLOCK_MODE" in
                                     PY_B="$(command -v python3 2>/dev/null || printf 'python3')"
                                   fi
                                   if [ -f "$IM_PY" ]; then
-                                    "$PY_B" -S "$IM_PY" --phase fast-milestone --count "$NEW_BBB_CNT" --harness "$H_NAME" --target "$SH_FPATH" --total-lines "$TOTAL_LINES" --saved-tokens "$SAVED_TOK" >/dev/null 2>&1
+                                    "$PY_B" -S "$IM_PY" --phase fast-milestone --count "$NEW_BBB_CNT" --harness "$H_NAME" --target "$SH_FPATH" --total-lines "$TOTAL_LINES" --saved-tokens "$SAVED_TOK" --session-id "${CID_VAL:-}" >/dev/null 2>&1
                                   elif command -v whole-body-immune-gate >/dev/null 2>&1; then
-                                    whole-body-immune-gate --phase fast-milestone --count "$NEW_BBB_CNT" --harness "$H_NAME" --target "$SH_FPATH" --total-lines "$TOTAL_LINES" --saved-tokens "$SAVED_TOK" >/dev/null 2>&1
+                                    whole-body-immune-gate --phase fast-milestone --count "$NEW_BBB_CNT" --harness "$H_NAME" --target "$SH_FPATH" --total-lines "$TOTAL_LINES" --saved-tokens "$SAVED_TOK" --session-id "${CID_VAL:-}" >/dev/null 2>&1
                                   fi
                                 ) </dev/null >/dev/null 2>&1 &
                               fi
@@ -610,6 +795,12 @@ elif [ "$PHASE" = "post" ]; then
           POST_FAST_OK=0
           ;;
       esac
+    fi
+    if [ "$POST_FAST_OK" = "1" ]; then
+      resolve_cid_and_tp
+      if csi_post_bucket_crossed; then
+        POST_FAST_OK=0
+      fi
     fi
     if [ "$POST_FAST_OK" = "1" ]; then
       POST_OUT='{"injectSteps": []}'

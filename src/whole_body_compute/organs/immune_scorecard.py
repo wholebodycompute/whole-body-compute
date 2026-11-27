@@ -97,9 +97,8 @@ def _classify_bicameral_event(e: Dict[str, Any]) -> Optional[str]:
     target = str(e.get("target") or "").lower()
     ev_stage = str(e.get("event") or e.get("gate_stage") or "").lower()
     is_slice = bool(
-        e.get("bounded_slice_read")
-        or ev_stage in ("pre_tool_slice_allowed", "pre_tool_ast_slicer_block")
-        or (e.get("fast_path") and t_name in read_low_names)
+        e.get("read_auto_sliced")
+        or ev_stage in ("pre_tool_ast_slicer_block", "pre_tool_auto_slice")
     )
     is_healed = bool(e.get("auto_healed") or int(e.get("em_dash_healed", 0)) > 0)
     is_blocked = (
@@ -191,9 +190,8 @@ def compute_bicameral_split_metrics(
         target = str(e.get("target") or "").lower()
         ev_stage = str(e.get("event") or e.get("gate_stage") or "").lower()
         is_slice = bool(
-            e.get("bounded_slice_read")
-            or ev_stage in ("pre_tool_slice_allowed", "pre_tool_ast_slicer_block")
-            or (e.get("fast_path") and t_name in ("read_file", "view_file"))
+            e.get("read_auto_sliced")
+            or ev_stage in ("pre_tool_ast_slicer_block", "pre_tool_auto_slice")
         )
         is_healed = bool(e.get("auto_healed") or int(e.get("em_dash_healed", 0)) > 0)
         is_blocked = (
@@ -215,7 +213,7 @@ def compute_bicameral_split_metrics(
         elif t_name in ("whole_body_compute", "local_scout", "local_implementer", "vifi", "body", "supervisor"):
             local_ops += 1
             local_model_shield_ops += 1
-        elif t_name == "run_command":
+        elif t_name in ("run_command", "bash", "execute_command", "developer__shell"):
             if any(kw in target for kw in local_model_cli_keywords):
                 local_ops += 1
                 local_model_shield_ops += 1
@@ -325,6 +323,8 @@ _SLIM_KEEP_KEYS = (
     "post_output_sliced",
     "direct_tokens_saved",
     "quadratic_tokens_saved",
+    "model_name",
+    "model",
 )
 _MEM_SLIM_CACHE: Dict[str, Any] = {}
 
@@ -557,54 +557,67 @@ def get_immune_pre_post_scorecard(
     secret_alerts = sum(1 for e in post_events if e.get("secret_in_output"))
 
     context_gate_intercepts = sum(1 for e in pre_events if e.get("context_gate_triggered"))
-    bounded_slice_reads = sum(
-        1 for e in pre_events if e.get("bounded_slice_read") or e.get("read_auto_sliced")
+    active_ast_slices = sum(1 for e in pre_events if e.get("read_auto_sliced"))
+    voluntary_bounded_reads = sum(
+        1 for e in pre_events if e.get("bounded_slice_read") and not e.get("read_auto_sliced")
     )
+    bounded_slice_reads = active_ast_slices
     post_sliced_count = sum(1 for e in post_events if e.get("post_output_sliced"))
-    direct_tokens_saved = sum(int(e.get("direct_tokens_saved", 0)) for e in pre_events) + sum(
-        int(e.get("direct_tokens_saved", 0)) for e in post_events
-    )
-    quadratic_tokens_saved = sum(
-        int(e.get("quadratic_tokens_saved", 0)) for e in pre_events
-    ) + sum(int(e.get("quadratic_tokens_saved", 0)) for e in post_events)
 
-    # Deduplicated direct token savings: cap read_file/view_file savings at 8,000 tokens
-    # (IDE native 800-line ceiling) and credit each (conversation_id, target) once per session.
-    _read_file_max_by_session: Dict[Tuple[str, str], int] = {}
-    _other_direct_saved = 0
-    for e in pre_events:
-        d_sav = int(e.get("direct_tokens_saved", 0) or 0)
-        if d_sav <= 0:
-            continue
-        t_low = str(e.get("tool") or "").strip().lower()
-        if t_low in ("read_file", "view_file"):
-            cid_k = str(e.get("conversation_id") or "")[:8]
-            tgt_k = str(e.get("target") or "").strip()
-            capped = min(8000, d_sav)
-            prev = _read_file_max_by_session.get((cid_k, tgt_k), 0)
-            if capped > prev:
-                _read_file_max_by_session[(cid_k, tgt_k)] = capped
-        else:
-            _other_direct_saved += d_sav
-    for e in post_events:
-        _other_direct_saved += int(e.get("direct_tokens_saved", 0) or 0)
-    dedup_direct_tokens_saved = sum(_read_file_max_by_session.values()) + _other_direct_saved
-    dedup_direct_usd_saved = round((dedup_direct_tokens_saved / 1_000_000.0) * 3.00, 2)
-
-    direct_usd_saved = round((direct_tokens_saved / 1_000_000.0) * 3.00, 2)
-    reingestion_tokens = max(0, quadratic_tokens_saved - direct_tokens_saved)
-    cached_reingestion_usd = round((reingestion_tokens / 1_000_000.0) * 0.30, 2)
-    estimated_usd_saved = round(direct_usd_saved + cached_reingestion_usd, 2)
-    pre_invocation_nudges = len(pre_inv_events)
-
-    cutoff_24h = time.time() - 86400.0
-    pre_24h = [e for e in pre_events if float(e.get("timestamp", 0.0)) >= cutoff_24h]
-    intercepted_24h = sum(
-        1 for e in pre_24h if e.get("decision") in ("ask", "force_ask", "deny")
+    from whole_body_compute.shield import (
+        _lookup_model_rate,
+        _normalize_target_label,
+        detect_active_model_and_rate,
+        get_harness_file_token_ceiling,
     )
 
+    _, active_rate_per_m = detect_active_model_and_rate()
+
+    def _tool_read_ceiling(tool_raw: str) -> Optional[int]:
+        tl = str(tool_raw or "").strip().lower()
+        if tl in ("read_file", "view_file"):
+            return get_harness_file_token_ceiling(bot_name="antigravity")
+        if tl in ("read", "notebookread"):
+            return get_harness_file_token_ceiling(bot_name="claude-code")
+        if tl in ("beforereadfile", "pre_read_code"):
+            return get_harness_file_token_ceiling(bot_name="cursor")
+        if tl == "developer__text_editor":
+            return get_harness_file_token_ceiling(bot_name="codex")
+        return None
+
+    def _coalesce_session_cumulative(ev_rows: List[Tuple[float, int, float]]) -> Tuple[int, float]:
+        if not ev_rows:
+            return 0, 0.0
+        ordered = sorted(ev_rows, key=lambda item: item[0])
+        buckets: List[Tuple[float, int, float]] = []
+        for ts_v, s_v, r_v in ordered:
+            if not buckets or (ts_v - buckets[-1][0]) >= 25.0:
+                buckets.append((ts_v, s_v, r_v))
+            else:
+                b_ts, b_sav, b_r = buckets[-1]
+                buckets[-1] = (b_ts, b_sav + s_v, b_r)
+        n_t = len(buckets)
+        cum_tok = sum((n_t - idx) * b_sav for idx, (_, b_sav, _) in enumerate(buckets))
+        direct_t = sum(b_sav for _, b_sav, _ in buckets)
+        avg_r = sum(r_v for _, _, r_v in ordered) / max(1, len(ordered))
+        reingest_usd = (max(0, cum_tok - direct_t) / 1_000_000.0) * (avg_r * 0.10)
+        return cum_tok, reingest_usd
+
+    # Chronological, ceiling-capped, per-(session, canonical_target) deduplicated savings
+    # Exclude voluntary bounded_slice_read (without read_auto_sliced / active interception).
+    sorted_pre = sorted(pre_events, key=lambda e: float(e.get("timestamp") or 0.0))
+    dedup_credits: Dict[Tuple[str, str], int] = {}
+    bare_seen_credits: Dict[Tuple[str, str], int] = {}
+    catchall_last_ts: Dict[str, float] = {}
+    catchall_epoch: Dict[str, int] = {}
+    session_ev_groups: Dict[Tuple[str, int], List[Tuple[float, int, float]]] = {}
+    tool_session_ev_groups: Dict[Tuple[str, str, int], List[Tuple[float, int, float]]] = {}
+
+    direct_tokens_saved = 0
+    total_direct_usd = 0.0
     tools_stats: Dict[str, Dict[str, Any]] = {}
-    for e in pre_events:
+
+    for e in sorted_pre:
         t_name = str(e.get("tool") or "unknown").strip() or "unknown"
         if t_name not in tools_stats:
             tools_stats[t_name] = {
@@ -615,6 +628,7 @@ def get_immune_pre_post_scorecard(
                 "slices": 0,
                 "direct_tokens_saved": 0,
                 "quadratic_tokens_saved": 0,
+                "direct_usd": 0.0,
                 "estimated_usd_saved": 0.0,
                 "allowed_pct": 0.0,
                 "intercepted_pct": 0.0,
@@ -628,15 +642,79 @@ def get_immune_pre_post_scorecard(
             st["intercepted"] += 1
         if e.get("auto_healed"):
             st["auto_healed"] += 1
-        if e.get("bounded_slice_read") or e.get("read_auto_sliced"):
+        if e.get("read_auto_sliced"):
             st["slices"] += 1
-        st["direct_tokens_saved"] += int(e.get("direct_tokens_saved", 0) or 0)
-        st["quadratic_tokens_saved"] += int(e.get("quadratic_tokens_saved", 0) or 0)
 
-    for e in post_events:
-        d_post = int(e.get("direct_tokens_saved", 0) or 0)
-        q_post = int(e.get("quadratic_tokens_saved", 0) or 0)
-        if d_post <= 0 and q_post <= 0 and not e.get("post_output_sliced"):
+        is_active = bool(
+            e.get("read_auto_sliced")
+            or e.get("context_gate_triggered")
+            or e.get("auto_healed")
+            or dec in ("ask", "force_ask", "deny")
+        )
+        if not is_active:
+            continue
+
+        d_sav = max(0, int(e.get("direct_tokens_saved", 0) or 0))
+        if d_sav <= 0:
+            continue
+
+        read_ceil = _tool_read_ceiling(t_name)
+        if read_ceil is not None:
+            d_sav = min(read_ceil, d_sav)
+
+        ts_v = float(e.get("timestamp") or 0.0)
+        cid_raw = str(e.get("conversation_id") or "").strip() or "global"
+        is_catchall = cid_raw in ("global", "default-session", "local", "cli-standalone", "")
+        cur_ep = 0
+        if is_catchall:
+            prev_ts = catchall_last_ts.get(cid_raw)
+            cur_ep = catchall_epoch.get(cid_raw, 0)
+            if prev_ts is not None and (ts_v - prev_ts) > 7200.0:
+                cur_ep += 1
+                catchall_epoch[cid_raw] = cur_ep
+            catchall_last_ts[cid_raw] = ts_v
+        eff_sess = f"{cid_raw}#{cur_ep}" if is_catchall and cur_ep > 0 else cid_raw
+
+        raw_tgt = str(e.get("target") or "").strip()
+        if not os.environ.get("VOICEFI_IMMUNE_AUDIT_PATH") and raw_tgt.replace("\\", "/").startswith(
+            ("/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/")
+        ):
+            continue
+        norm_tgt = _normalize_target_label(raw_tgt) if raw_tgt else ""
+        if norm_tgt and norm_tgt != "unknown":
+            dk = (eff_sess, norm_tgt)
+            b_only = Path(norm_tgt).name if "/" in norm_tgt else norm_tgt
+            bk = (eff_sess, b_only)
+            if "/" not in norm_tgt:
+                prev_c = max(dedup_credits.get(dk, 0), bare_seen_credits.get(bk, 0))
+            else:
+                prev_c = max(dedup_credits.get(dk, 0), dedup_credits.get(bk, 0))
+            eff_saved = max(0, max(prev_c, d_sav) - prev_c)
+            new_hwm = prev_c + eff_saved
+            dedup_credits[dk] = new_hwm
+            bare_seen_credits[bk] = max(bare_seen_credits.get(bk, 0), new_hwm)
+            if "/" in norm_tgt and bk in dedup_credits:
+                dedup_credits[bk] = max(dedup_credits[bk], new_hwm)
+        else:
+            eff_saved = d_sav
+
+        if eff_saved <= 0:
+            continue
+
+        ev_model = str(e.get("model_name") or e.get("model") or "").strip()
+        row_rate = _lookup_model_rate(ev_model) if ev_model else active_rate_per_m
+        row_direct_usd = (eff_saved / 1_000_000.0) * row_rate
+
+        direct_tokens_saved += eff_saved
+        total_direct_usd += row_direct_usd
+        st["direct_tokens_saved"] += eff_saved
+        st["direct_usd"] += row_direct_usd
+        session_ev_groups.setdefault((cid_raw, cur_ep), []).append((ts_v, eff_saved, row_rate))
+        tool_session_ev_groups.setdefault((t_name, cid_raw, cur_ep), []).append((ts_v, eff_saved, row_rate))
+
+    for e in sorted(post_events, key=lambda ev: float(ev.get("timestamp") or 0.0)):
+        d_post = max(0, int(e.get("direct_tokens_saved", 0) or 0))
+        if d_post <= 0 and not e.get("post_output_sliced"):
             continue
         t_name = str(e.get("tool") or "unknown").strip() or "unknown"
         if t_name not in tools_stats:
@@ -648,6 +726,7 @@ def get_immune_pre_post_scorecard(
                 "slices": 0,
                 "direct_tokens_saved": 0,
                 "quadratic_tokens_saved": 0,
+                "direct_usd": 0.0,
                 "estimated_usd_saved": 0.0,
                 "allowed_pct": 100.0,
                 "intercepted_pct": 0.0,
@@ -655,19 +734,63 @@ def get_immune_pre_post_scorecard(
         st = tools_stats[t_name]
         if e.get("post_output_sliced"):
             st["slices"] += 1
+        if d_post <= 0:
+            continue
+        ts_v = float(e.get("timestamp") or 0.0)
+        cid_raw = str(e.get("conversation_id") or "").strip() or "global"
+        is_catchall_post = cid_raw in ("global", "default-session", "local", "cli-standalone", "")
+        cur_ep_post = 0
+        if is_catchall_post:
+            prev_ts = catchall_last_ts.get(cid_raw)
+            cur_ep_post = catchall_epoch.get(cid_raw, 0)
+            if prev_ts is not None and (ts_v - prev_ts) > 7200.0:
+                cur_ep_post += 1
+                catchall_epoch[cid_raw] = cur_ep_post
+            catchall_last_ts[cid_raw] = ts_v
+        ev_model = str(e.get("model_name") or e.get("model") or "").strip()
+        row_rate = _lookup_model_rate(ev_model) if ev_model else active_rate_per_m
+        row_direct_usd = (d_post / 1_000_000.0) * row_rate
+        direct_tokens_saved += d_post
+        total_direct_usd += row_direct_usd
         st["direct_tokens_saved"] += d_post
-        st["quadratic_tokens_saved"] += q_post
+        st["direct_usd"] += row_direct_usd
+        session_ev_groups.setdefault((cid_raw, cur_ep_post), []).append((ts_v, d_post, row_rate))
+        tool_session_ev_groups.setdefault((t_name, cid_raw, cur_ep_post), []).append((ts_v, d_post, row_rate))
+
+    quadratic_tokens_saved = 0
+    total_reingest_usd = 0.0
+    for ev_rows in session_ev_groups.values():
+        c_tok, r_usd = _coalesce_session_cumulative(ev_rows)
+        quadratic_tokens_saved += c_tok
+        total_reingest_usd += r_usd
+
+    tool_cum_map: Dict[str, Tuple[int, float]] = {}
+    for (t_name, _cid, _ep), ev_rows in tool_session_ev_groups.items():
+        c_tok, r_usd = _coalesce_session_cumulative(ev_rows)
+        prev_ct, prev_ru = tool_cum_map.get(t_name, (0, 0.0))
+        tool_cum_map[t_name] = (prev_ct + c_tok, prev_ru + r_usd)
+
+    dedup_direct_tokens_saved = direct_tokens_saved
+    direct_usd_saved = round(total_direct_usd, 2)
+    dedup_direct_usd_saved = direct_usd_saved
+    cached_reingestion_usd = round(total_reingest_usd, 2)
+    estimated_usd_saved = round(total_direct_usd + total_reingest_usd, 2)
+    pre_invocation_nudges = len(pre_inv_events)
+
+    cutoff_24h = time.time() - 86400.0
+    pre_24h = [e for e in pre_events if float(e.get("timestamp", 0.0)) >= cutoff_24h]
+    intercepted_24h = sum(
+        1 for e in pre_24h if e.get("decision") in ("ask", "force_ask", "deny")
+    )
 
     for t_name, st in tools_stats.items():
         tot = st["total"]
         if tot > 0:
             st["allowed_pct"] = round((st["allowed"] / tot) * 100.0, 1)
             st["intercepted_pct"] = round((st["intercepted"] / tot) * 100.0, 1)
-        d_tok = int(st["direct_tokens_saved"])
-        q_tok = int(st["quadratic_tokens_saved"])
-        d_usd = (d_tok / 1_000_000.0) * 3.00
-        c_usd = (max(0, q_tok - d_tok) / 1_000_000.0) * 0.30
-        st["estimated_usd_saved"] = round(d_usd + c_usd, 2)
+        t_cum, t_reingest_usd = tool_cum_map.get(t_name, (int(st["direct_tokens_saved"]), 0.0))
+        st["quadratic_tokens_saved"] = t_cum
+        st["estimated_usd_saved"] = round(float(st.pop("direct_usd", 0.0)) + t_reingest_usd, 2)
 
     tools_breakdown = dict(
         sorted(
@@ -752,6 +875,8 @@ def get_immune_pre_post_scorecard(
         "secret_output_alerts": secret_alerts,
         "active_antibodies": len(AntibodyRegistry.get_instance().list_antibodies()),
         "context_gate_intercepts": context_gate_intercepts,
+        "active_ast_slices": active_ast_slices,
+        "voluntary_bounded_reads": voluntary_bounded_reads,
         "bounded_slice_reads": bounded_slice_reads,
         "post_sliced_count": post_sliced_count,
         "direct_tokens_saved": direct_tokens_saved,

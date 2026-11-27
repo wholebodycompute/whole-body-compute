@@ -465,7 +465,9 @@ class ChaosOrganFuzzer:
         """Inject malformed turns and verify REM sleep consolidation stability."""
         t0 = time.perf_counter()
         temp_dir = tempfile.mkdtemp(prefix="voicefi_fuzz_rem_")
+        temp_dot = MemoryStore(db_path=Path(temp_dir) / "dot_memory.db", auto_seed=False)
         daemon = REMSleepDaemon(
+            dot_store=temp_dot,
             output_dataset=Path(temp_dir) / "golden.jsonl",
             goose_db=Path(temp_dir) / "sessions.db",
         )

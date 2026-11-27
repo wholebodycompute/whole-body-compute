@@ -311,6 +311,11 @@ def _query_analytics_db_hybrid_stats(days: int = 1) -> Dict[str, Any]:
         "qa_pass_rate_pct": 100.0,
         "speed_talking_sec_saved": 0.0,
         "mcp_events_count": 0,
+        "peak_max_ctx": 0,
+        "total_turns_over_100k": 0,
+        "sessions_over_100k": 0,
+        "sessions_over_200k": 0,
+        "heavy_sessions": [],
     }
 
     # Try voicefi.analytics.queries first if installed (skip when explicit custom DB/WBC_DATA_DIR is set)
@@ -455,6 +460,37 @@ def _query_analytics_db_hybrid_stats(days: int = 1) -> Dict[str, Any]:
 
                 out["speed_talking_sec_saved"] = round(speed_saved_sec, 1)
                 out["mcp_events_count"] = mcp_count
+
+            if "session_context_telemetry" in tables:
+                ctx_row = cur.execute(
+                    "SELECT COALESCE(MAX(max_ctx), 0), COALESCE(SUM(turns_over_100k), 0), "
+                    "SUM(CASE WHEN max_ctx >= 100000 THEN 1 ELSE 0 END), "
+                    "SUM(CASE WHEN max_ctx >= 200000 THEN 1 ELSE 0 END) "
+                    "FROM session_context_telemetry WHERE updated_at >= ?",
+                    (cutoff_ts,),
+                ).fetchone()
+                if ctx_row:
+                    out["peak_max_ctx"] = int(ctx_row[0] or 0)
+                    out["total_turns_over_100k"] = int(ctx_row[1] or 0)
+                    out["sessions_over_100k"] = int(ctx_row[2] or 0)
+                    out["sessions_over_200k"] = int(ctx_row[3] or 0)
+                heavy_rows = cur.execute(
+                    "SELECT conversation_id, harness, active_model, max_ctx, latest_ctx, turns_over_100k, planner_turns "
+                    "FROM session_context_telemetry WHERE updated_at >= ? ORDER BY max_ctx DESC LIMIT 5",
+                    (cutoff_ts,),
+                ).fetchall()
+                out["heavy_sessions"] = [
+                    {
+                        "conversation_id": str(r[0]),
+                        "harness": str(r[1] or ""),
+                        "active_model": str(r[2] or ""),
+                        "max_ctx": int(r[3] or 0),
+                        "latest_ctx": int(r[4] or 0),
+                        "turns_over_100k": int(r[5] or 0),
+                        "planner_turns": int(r[6] or 0),
+                    }
+                    for r in heavy_rows
+                ]
         finally:
             conn.close()
     except Exception as exc:
@@ -932,8 +968,19 @@ class CanonicalMetricsEngine:
             active_metrics = convs_24h[0]
 
         csi_score = round(float(active_metrics.csi), 3) if active_metrics else 0.0
+        peak_csi = (
+            round(float(getattr(active_metrics, "peak_csi", csi_score) or csi_score), 3)
+            if active_metrics
+            else 0.0
+        )
+        compaction_count = int(getattr(active_metrics, "compaction_count", 0) or 0) if active_metrics else 0
         csi_status = str(active_metrics.health_tier) if active_metrics else "GREEN"
         active_steps = int(active_metrics.steps) if active_metrics else 0
+        cumulative_steps = (
+            int(getattr(active_metrics, "cumulative_steps", active_steps) or active_steps)
+            if active_metrics
+            else 0
+        )
         planner_turns = int(getattr(active_metrics, "planner_turns", 0)) if active_metrics else 0
         early_step_sec = round(float(getattr(active_metrics, "early_step_sec", 0.0)), 2) if active_metrics else 0.0
         recent_step_sec = round(float(getattr(active_metrics, "recent_step_sec", 0.0)), 2) if active_metrics else 0.0
@@ -941,6 +988,11 @@ class CanonicalMetricsEngine:
             round(float(getattr(active_metrics, "latency_inflation_ratio", 1.0)), 2) if active_metrics else 1.0
         )
         transcript_kb = round(float(active_metrics.full_size_kb), 1) if active_metrics else 0.0
+        cumulative_size_kb = (
+            round(float(getattr(active_metrics, "cumulative_size_kb", transcript_kb) or transcript_kb), 1)
+            if active_metrics
+            else 0.0
+        )
         avoidable_kb = round(float(active_metrics.avoidable_bloat_kb), 1) if active_metrics else 0.0
         active_cid = str(active_metrics.conv_id) if active_metrics else "local-session"
         short_id = str(active_metrics.short_id) if active_metrics else "local"
@@ -1092,14 +1144,18 @@ class CanonicalMetricsEngine:
             "conv_id": active_cid,
             "short_id": short_id,
             "csi_score": csi_score,
+            "peak_csi": peak_csi,
+            "compaction_count": compaction_count,
             "csi_status": csi_status,
             "active_step_count": active_steps,
+            "cumulative_steps": cumulative_steps,
             "planner_turns": planner_turns,
             "early_step_sec": early_step_sec,
             "recent_step_sec": recent_step_sec,
             "latency_inflation_ratio": latency_inflation_ratio,
             "target_max_steps": 30,
             "transcript_kb": transcript_kb,
+            "cumulative_size_kb": cumulative_size_kb,
             "avoidable_bloat_kb": avoidable_kb,
             "threads_analyzed_24h": len(convs_24h),
             "threads_analyzed_7d": len(convs_7d),

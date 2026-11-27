@@ -2,18 +2,18 @@
 import PackageDescription
 
 let package = Package(
-    name: "WBCEyes",
+    name: "WholeBodyCompute",
     platforms: [
         .macOS(.v13)
     ],
     products: [
-        .library(name: "WBCEyesCore", targets: ["WBCEyesCore"]),
-        .executable(name: "WholeBodyCompute", targets: ["WBCEyes"])
+        .library(name: "WholeBodyComputeCore", targets: ["WholeBodyComputeCore"]),
+        .executable(name: "WholeBodyCompute", targets: ["WholeBodyCompute"])
     ],
     targets: [
         .target(
-            name: "WBCEyesCore",
-            path: "Sources/WBCEyesCore",
+            name: "WholeBodyComputeCore",
+            path: "Sources/WholeBodyComputeCore",
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("ApplicationServices"),
@@ -25,14 +25,14 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "WBCEyes",
-            dependencies: ["WBCEyesCore"],
-            path: "Sources/WBCEyes"
+            name: "WholeBodyCompute",
+            dependencies: ["WholeBodyComputeCore"],
+            path: "Sources/WholeBodyCompute"
         ),
         .testTarget(
-            name: "WBCEyesTests",
-            dependencies: ["WBCEyesCore"],
-            path: "Tests/WBCEyesTests"
+            name: "WholeBodyComputeTests",
+            dependencies: ["WholeBodyComputeCore"],
+            path: "Tests/WholeBodyComputeTests"
         )
     ]
 )

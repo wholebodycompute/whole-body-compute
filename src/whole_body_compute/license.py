@@ -510,6 +510,8 @@ FEATURE_MIN_TIER: Dict[str, str] = {
     "anti_cheat_guard": "community",
     "pal_skill_export": "community",
     "unlimited_pal_skill_export": "pro",
+    "code_lowering": "community",
+    "unlimited_code_lowering": "pro",
     "unlimited_bbb": "pro",
     "unlimited_silicon_offload": "community",
     "unlimited_anti_cheat_guard": "community",
@@ -518,6 +520,9 @@ FEATURE_MIN_TIER: Dict[str, str] = {
     "rem_sleep_lora": "pro",
     "cephalic_prewarm": "pro",
     "voicefi_speed_studio": "pro",
+    "proxy_unlimited": "pro",
+    "proxy_chore_router": "pro",
+    "agency_multi_client": "team",
     "team_sync": "team",
     "cfo_multi_seat_rollup": "team",
     "shared_hooks_policy": "team",
@@ -1125,6 +1130,7 @@ class LicenseManager:
         daily_anti_cheat_blocks: int = 0,
         em_dashes_healed_today: int = 0,
         skill_exports_used: int = 0,
+        lowering_scripts_used: int = 0,
         *,
         emit_telemetry: bool = True,
         active_tier: Optional[str] = None,
@@ -1136,6 +1142,7 @@ class LicenseManager:
         - `silicon_offload` / `unlimited_silicon_offload` is 100% Free Forever across all tiers
         - `anti_cheat_guard` / `unlimited_anti_cheat_guard` is 100% Free Forever across all tiers
         - `pal_skill_export` is allowed up to 1 free full portable skill export (then Dry-Run Preview)
+        - `code_lowering` is allowed up to 1 free lowered script per month (then Dry-Run Preview)
         - `em_dash_auto_heal` is 100% Free Forever across all tiers
         Once limits are exceeded, the Blood-Brain Barrier (BBB) operates in non-destructive Pass-Through
         mode and emits a live receipt/alert nudge.
@@ -1179,6 +1186,21 @@ class LicenseManager:
                     f"{pro_checkout} (`body upgrade --open` -> `body license --activate <POLAR_KEY>`)"
                 )
 
+        if curr_tier == "community" and feature_name in ("code_lowering", "unlimited_code_lowering"):
+            if lowering_scripts_used < 1 and feature_name == "code_lowering":
+                allowed = True
+                pass_through_on_limit = False
+            else:
+                allowed = False
+                pass_through_on_limit = True
+                req_tier = "pro"
+                nudge = (
+                    f"⚡ [WBC Community Limit: {max(1, lowering_scripts_used)}/1 Free Lowered Scripts Used This Month] "
+                    "Dry-Run Preview active: unlock Unlimited `body lower` Compilation, CI Workflow Generation "
+                    "& Team Exemplar Sharing with Whole Body Compute Pro ($29/mo) or Team ($79/seat/mo): "
+                    f"{pro_checkout} (`body upgrade --open` -> `body license --activate <POLAR_KEY>`)"
+                )
+
         if curr_tier == "community" and feature_name in ("bbb_interception", "unlimited_bbb"):
             if daily_interceptions >= 100 or feature_name == "unlimited_bbb":
                 allowed = False
@@ -1219,6 +1241,8 @@ class LicenseManager:
             current_usage_val = int(daily_anti_cheat_blocks)
         elif feature_name in ("pal_skill_export", "unlimited_pal_skill_export"):
             current_usage_val = int(skill_exports_used)
+        elif feature_name in ("code_lowering", "unlimited_code_lowering"):
+            current_usage_val = int(lowering_scripts_used)
 
         if curr_tier == "community":
             if feature_name in ("bbb_interception", "unlimited_bbb"):
@@ -1275,6 +1299,7 @@ class LicenseManager:
                         "daily_silicon_offloads": int(daily_silicon_offloads),
                         "daily_anti_cheat_blocks": int(daily_anti_cheat_blocks),
                         "skill_exports_used": int(skill_exports_used),
+                        "lowering_scripts_used": int(lowering_scripts_used),
                     },
                     detached_hook=True,
                 )
@@ -1292,6 +1317,7 @@ class LicenseManager:
             "daily_silicon_offloads": int(daily_silicon_offloads),
             "daily_anti_cheat_blocks": int(daily_anti_cheat_blocks),
             "em_dashes_healed_today": int(em_dashes_healed_today),
+            "lowering_scripts_used": int(lowering_scripts_used),
             "estimated_offloaded_tokens_today": est_offloaded_tokens_today,
             "estimated_read_reingestion_tokens": est_tokens_per_read,
             "estimated_read_waste_usd": est_waste_usd,

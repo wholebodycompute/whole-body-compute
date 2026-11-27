@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 import math
 import os
+import socket
 import sys
 from pathlib import Path
 import threading
@@ -35,6 +36,12 @@ import time
 from typing import Any, Dict, Literal, Optional, Tuple
 
 import numpy as np
+
+from whole_body_compute.local.shadow_ledger import (
+    is_infra_error,
+    record_shadow_eval,
+    strip_llm_fences_and_thoughts,
+)
 
 TurnState = Literal["DONE", "LIKELY_DONE", "MID_THOUGHT", "HOLDING"]
 BargeInAction = Literal["STOP", "CONTINUE"]
@@ -737,9 +744,11 @@ class OllamaLogitScorer:
 
     BARGE_IN_SYSTEM_PROMPT = (
         "You are a full-duplex voice barge-in filter. While the AI assistant is speaking, "
-        "the user made a sound. Output CONTINUE if it is a passive backchannel acknowledgement "
-        '(like "uh-huh", "mm-hmm", "okay", "yeah", "got it", "right"). Output STOP if the user '
-        'wants to interrupt, correct, or ask something (like "wait", "stop", "hold on", "no, check main.py").\n'
+        "the user spoke briefly. Output CONTINUE ONLY if it is passive acknowledgement, "
+        'agreement, or brief praise (like "uh-huh", "mm-hmm", "okay", "yeah", "got it", '
+        '"makes sense", "good point"). Output STOP if the user gives any command, request, '
+        'pace change, error report, correction, or topic redirect (like "wait", "stop", '
+        '"hold on", "back up", "check logs", "run tests", "no, check main.py").\n'
         "Respond with exactly one word: STOP or CONTINUE."
     )
 
@@ -758,15 +767,17 @@ class OllamaLogitScorer:
         self._is_reachable: bool = False
 
     def _check_available(self) -> bool:
-        """Fast cached check for thermal health and Ollama availability."""
+        """Fast cached check for thermal health and local Metal / Ollama availability."""
         # Never make live network calls inside unit tests unless explicitly mocked/forced
-        if os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get(
-            "VOICEFI_ALLOW_OLLAMA_IN_TESTS"
-        ):
+        allow_in_tests = bool(
+            os.environ.get("VOICEFI_ALLOW_OLLAMA_IN_TESTS")
+            or os.environ.get("WBC_TEST_VOICE_SHADOW") == "1"
+        )
+        if os.environ.get("PYTEST_CURRENT_TEST") and not allow_in_tests:
             return False
 
         now = time.monotonic()
-        if (now - self._last_health_check) < 15.0:
+        if self._last_health_check > 0.0 and (now - self._last_health_check) < 15.0:
             return self._is_reachable
 
         self._last_health_check = now
@@ -779,6 +790,15 @@ class OllamaLogitScorer:
                 return False
         except Exception:
             pass
+
+        if os.environ.get("WBC_TURN_LOCAL_METAL") == "1":
+            for port in (9379, 9380):
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.025):
+                        self._is_reachable = True
+                        return True
+                except OSError:
+                    pass
 
         try:
             import httpx
@@ -798,20 +818,118 @@ class OllamaLogitScorer:
 
         return self._is_reachable
 
-    def _query_binary_logprobs(
+    def _query_metal_tiebreaker(
+        self,
+        system_prompt: str,
+        user_text: str,
+        valid_tokens: Tuple[str, ...],
+    ) -> Optional[Tuple[str, str, str, float]]:
+        """
+        Query warm LiteRT/SpecialistRouter bridges (:9379 gemma4-2b -> :9380 localbench-specialist-router)
+        for a strict binary tiebreaker token (e.g. DONE/WAIT or STOP/CONTINUE) without touching
+        Ollama (:11434) or heavy code-gen models. Returns (token, engine, model, latency_ms) or None.
+        """
+        candidates = (
+            (9379, "gemma4-2b", "litert_metal_9379"),
+            (9380, "localbench-specialist-router", "specialist_router_9380"),
+        )
+        open_ports: Dict[int, bool] = {}
+        shadow_or_live = (
+            os.environ.get("WBC_ROUTER_SHADOW") == "1"
+            or os.environ.get("WBC_TURN_LOCAL_METAL") == "1"
+        )
+        valid_upper = tuple(t.upper() for t in valid_tokens)
+
+        import httpx
+
+        for port, model_name, engine_name in candidates:
+            if port not in open_ports:
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.025):
+                        open_ports[port] = True
+                except OSError:
+                    open_ports[port] = False
+            if not open_ports[port]:
+                continue
+
+            payload: Dict[str, Any] = {
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_text},
+                ],
+                "max_tokens": 4,
+                "temperature": 0.0,
+            }
+            t0 = time.perf_counter()
+            try:
+                resp = httpx.post(
+                    f"http://127.0.0.1:{port}/v1/chat/completions",
+                    json=payload,
+                    timeout=min(self.timeout_s, 0.18),
+                )
+                latency_ms = (time.perf_counter() - t0) * 1000.0
+                if resp.status_code != 200:
+                    if shadow_or_live and is_infra_error(status_code=resp.status_code):
+                        record_shadow_eval(
+                            task_type="turn_barge_in",
+                            engine=engine_name,
+                            model=model_name,
+                            latency_ms=latency_ms,
+                            valid_guardrail=False,
+                            baseline_used=(
+                                "live_metal"
+                                if os.environ.get("WBC_TURN_LOCAL_METAL") == "1"
+                                else "shadow_only"
+                            ),
+                            sla_ms=160.0,
+                            infra_skip=True,
+                            extra={"status_code": resp.status_code},
+                        )
+                    continue
+
+                data = resp.json()
+                choice = (data.get("choices") or [{}])[0]
+                raw_content = ((choice.get("message") or {}).get("content")) or ""
+                cleaned = strip_llm_fences_and_thoughts(str(raw_content)).strip()
+                if not cleaned:
+                    continue
+                first_raw = cleaned.split()[0]
+                token = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$", "", first_raw).upper()
+                if token not in valid_upper:
+                    continue
+
+                used_model = str(data.get("model") or model_name)
+                return (token, engine_name, used_model, latency_ms)
+            except Exception as exc:
+                if shadow_or_live and is_infra_error(exc=exc):
+                    record_shadow_eval(
+                        task_type="turn_barge_in",
+                        engine=engine_name,
+                        model=model_name,
+                        latency_ms=(time.perf_counter() - t0) * 1000.0,
+                        valid_guardrail=False,
+                        baseline_used=(
+                            "live_metal"
+                            if os.environ.get("WBC_TURN_LOCAL_METAL") == "1"
+                            else "shadow_only"
+                        ),
+                        sla_ms=160.0,
+                        infra_skip=True,
+                        extra={"error": type(exc).__name__},
+                    )
+                continue
+
+        return None
+
+    def _query_ollama_logprobs(
         self,
         system_prompt: str,
         user_prompt: str,
         positive_Prefix: str,
         negative_Prefix: str,
     ) -> Optional[float]:
-        """
-        Send a 1-token chat completion request and compute exact softmax probability:
-            p(positive) = exp(lp_pos) / (exp(lp_pos) + exp(lp_neg))
-        """
-        if not self._check_available():
-            return None
-
+        """Query Ollama /v1/chat/completions for 1-token logprob softmax probability."""
         try:
             import httpx
 
@@ -876,6 +994,87 @@ class OllamaLogitScorer:
             return None
         except Exception:
             return None
+
+    def _query_binary_logprobs(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        positive_Prefix: str,
+        negative_Prefix: str,
+    ) -> Optional[float]:
+        """
+        Send a 1-token chat completion request and compute exact softmax probability:
+            p(positive) = exp(lp_pos) / (exp(lp_pos) + exp(lp_neg))
+        Supports live local Metal (:9379) opt-in via WBC_TURN_LOCAL_METAL=1 and
+        shadow-only telemetry via WBC_ROUTER_SHADOW=1.
+        """
+        valid_tokens = (positive_Prefix.upper(), negative_Prefix.upper())
+
+        if os.environ.get("WBC_TURN_LOCAL_METAL") == "1":
+            if not self._check_available():
+                return None
+            metal_res = self._query_metal_tiebreaker(system_prompt, user_prompt, valid_tokens)
+            if metal_res is not None:
+                token, engine, model, latency_ms = metal_res
+                record_shadow_eval(
+                    task_type="turn_barge_in",
+                    engine=engine,
+                    model=model,
+                    latency_ms=latency_ms,
+                    valid_guardrail=True,
+                    baseline_used="live_metal",
+                    sla_ms=160.0,
+                    tokens_saved_est=45,
+                    extra={"decision": token},
+                )
+                return 0.85 if token == positive_Prefix.upper() else 0.15
+            return self._query_ollama_logprobs(
+                system_prompt, user_prompt, positive_Prefix, negative_Prefix
+            )
+
+        live_result: Optional[float] = (
+            self._query_ollama_logprobs(
+                system_prompt, user_prompt, positive_Prefix, negative_Prefix
+            )
+            if self._check_available()
+            else None
+        )
+
+        if os.environ.get("WBC_ROUTER_SHADOW") == "1":
+            in_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST"))
+            allow_shadow_in_test = (
+                os.environ.get("WBC_TEST_VOICE_SHADOW") == "1"
+                or os.environ.get("WBC_SHADOW_SYNC") == "1"
+            )
+            if not in_pytest or allow_shadow_in_test:
+                def _run_shadow_tiebreaker() -> None:
+                    metal_res = self._query_metal_tiebreaker(
+                        system_prompt, user_prompt, valid_tokens
+                    )
+                    if metal_res is not None:
+                        token, engine, model, latency_ms = metal_res
+                        record_shadow_eval(
+                            task_type="turn_barge_in",
+                            engine=engine,
+                            model=model,
+                            latency_ms=latency_ms,
+                            valid_guardrail=True,
+                            baseline_used="shadow_only",
+                            sla_ms=160.0,
+                            tokens_saved_est=45,
+                            extra={"decision": token},
+                        )
+
+                if os.environ.get("WBC_SHADOW_SYNC") == "1":
+                    _run_shadow_tiebreaker()
+                else:
+                    threading.Thread(
+                        target=_run_shadow_tiebreaker,
+                        name="wbc-turn-barge-in-shadow",
+                        daemon=True,
+                    ).start()
+
+        return live_result
 
     def score_turn_end(self, transcript: str) -> Optional[float]:
         """Return p(DONE) in [0.0, 1.0] from 1-token logits, or None if unavailable."""

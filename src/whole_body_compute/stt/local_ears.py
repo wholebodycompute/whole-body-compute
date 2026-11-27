@@ -232,9 +232,24 @@ do {
     exit(4)
 }
 
+var committedSegments: [String] = []
+var currentSegment = ""
 let _ = recognizer.recognitionTask(with: req) { res, err in
     if let res = res {
-        bestText = res.bestTranscription.formattedString
+        let raw = res.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw.isEmpty {
+            if !currentSegment.isEmpty && !finished {
+                committedSegments.append(currentSegment)
+                currentSegment = ""
+            }
+        } else {
+            if !currentSegment.isEmpty && currentSegment.count >= 10 && raw.count < Int(Double(currentSegment.count) * 0.60)
+               && !raw.lowercased().hasPrefix(String(currentSegment.lowercased().prefix(3))) {
+                committedSegments.append(currentSegment)
+            }
+            currentSegment = raw
+            bestText = (committedSegments + [currentSegment]).joined(separator: " ")
+        }
         if res.isFinal {
             emitAndExit()
         } else if !bestText.isEmpty && bestText != lastEmittedPartial {

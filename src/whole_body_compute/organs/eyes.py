@@ -1,5 +1,5 @@
 """
-Organ 07 (Organ 2 of Sensory System): The Eyes - Foveal Vision & Screen Accessibility.
+Organ 03 (The Eyes, Hands & Ears): The Eyes - Foveal Vision & Screen Accessibility.
 
 Provides sub-15ms (<420 tokens) zero-screenshot inspection and driving for Electron,
 Chromium, and native macOS applications (Claude, Muse, Grok, Arc, Chrome) with 0 MB local model weights.
@@ -29,7 +29,7 @@ logger = logging.getLogger("whole_body_compute.organs.eyes")
 
 
 class OrganEyes:
-    """High-level interface to Organ 07 (The Eyes / Foveal Vision)."""
+    """High-level interface to Organ 03 (The Eyes / Foveal Vision)."""
 
     @classmethod
     def inspect(

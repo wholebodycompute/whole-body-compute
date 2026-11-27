@@ -3,13 +3,14 @@ Whole Body Compute CLI (`body` / `wbc`)
 Unified entrypoint for the 5-Organ Sovereign Agent Runtime.
 """
 
-import argparse
-import json
-import sys
-import time
-from typing import List, Optional
+from __future__ import annotations
 
-from whole_body_compute import __version__
+import argparse
+import contextlib
+import json
+import os
+import sys
+
 from whole_body_compute.cli_handlers import (
     cmd_checkpoint,
     cmd_commit,
@@ -17,31 +18,48 @@ from whole_body_compute.cli_handlers import (
     dispatch_organ_and_cognitive_command,
     render_pro_upgrade_card,
 )
-from whole_body_compute.cli_parser import (
-    SINGLE_ORGAN_DISPATCH,
-    build_parser,
-    setup_parser,
-)
+from whole_body_compute.cli_parser import SINGLE_ORGAN_DISPATCH
+from whole_body_compute.cli_parser import build_parser as _raw_build_parser
 from whole_body_compute.doctor import (
     check_10_organs,
-    check_organ_brainstem,
-    check_organ_circadian,
-    check_organ_heart,
-    check_organ_hippocampus,
-    check_organ_immune_system,
-    check_organ_mouth_and_ears,
-    check_organ_nervous_system,
-    check_organ_prefrontal,
-    check_organ_skeleton,
-    check_organ_the_eyes,
-    check_organ_the_hands,
     exercise_10_organ_reflex_loop,
     format_organ_doctor_table,
     format_reflex_exercise_table,
 )
 
+__all__ = ["SINGLE_ORGAN_DISPATCH", "build_parser", "cmd_immune", "main", "setup_parser"]
 
-def main(argv: Optional[List[str]] = None) -> int:
+
+def _ensure_savings_gaps_flags(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Register `--gaps` and `--hours` on the `savings` subparser if not already present."""
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            p_sav = action.choices.get("savings")
+            if p_sav is not None and "--gaps" not in p_sav._option_string_actions:
+                p_sav.add_argument(
+                    "--gaps",
+                    action="store_true",
+                    help="Mine shield coverage gaps from immune_audit.jsonl and reflex_gates.sqlite",
+                )
+                p_sav.add_argument(
+                    "--hours",
+                    type=float,
+                    default=5.0,
+                    help="Lookback window in hours for `--gaps` (default: 5.0)",
+                )
+            break
+    return parser
+
+
+def build_parser() -> argparse.ArgumentParser:
+    return _ensure_savings_gaps_flags(_raw_build_parser())
+
+
+def setup_parser() -> argparse.ArgumentParser:
+    return build_parser()
+
+
+def main(argv: list[str] | None = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     if (
         len(raw_argv) >= 2
@@ -78,7 +96,7 @@ def _dispatch_main(
     parser: argparse.ArgumentParser,
 ) -> int:
     if cmd != "immune-hook" and not (cmd in ("immune", "bbb") and getattr(args, "blob", None)):
-        try:
+        with contextlib.suppress(Exception):
             from whole_body_compute.procedural_telemetry import (
                 maybe_emit_first_run_telemetry_notice,
                 track_wbc_event,
@@ -87,8 +105,47 @@ def _dispatch_main(
             if cmd not in ("telemetry", "dna", "learnings"):
                 maybe_emit_first_run_telemetry_notice(is_json=bool(getattr(args, "json", False)))
             track_wbc_event("wbc_cli_command", {"command": cmd})
-        except Exception:
-            pass
+
+    if cmd in ("tips", "pro-tips", "guide", "playbook"):
+        from whole_body_compute.tips import (
+            AGENT_RULES_SNIPPET,
+            DOCS_URL,
+            filter_tips,
+            format_tips_playbook,
+            open_docs_in_browser,
+        )
+
+        as_json = bool(getattr(args, "json", False))
+        topic = getattr(args, "topic", None)
+        open_res = None
+        if getattr(args, "open", False):
+            open_res = open_docs_in_browser()
+
+        if getattr(args, "rules", False):
+            if as_json:
+                print(json.dumps({"docs_url": DOCS_URL, "agent_rules_markdown": AGENT_RULES_SNIPPET}, indent=2))
+            else:
+                print(AGENT_RULES_SNIPPET)
+            return 0
+
+        tips_list = filter_tips(topic)
+        if as_json:
+            payload: dict[str, object] = {
+                "docs_url": DOCS_URL,
+                "topic": topic or "all",
+                "count": len(tips_list),
+                "tips": tips_list,
+                "agent_rules_markdown": AGENT_RULES_SNIPPET,
+            }
+            if open_res is not None:
+                payload["browser"] = open_res
+            print(json.dumps(payload, indent=2))
+            return 0 if tips_list else 1
+
+        print("\n" + format_tips_playbook(topic=topic, random_one=bool(getattr(args, "random", False))) + "\n")
+        if open_res and open_res.get("opened"):
+            print(f"🌐 Opened {DOCS_URL} in your browser.\n")
+        return 0 if tips_list else 1
 
     if cmd in ("stats", "usage", "analytics"):
         from whole_body_compute.procedural_telemetry import (
@@ -105,6 +162,7 @@ def _dispatch_main(
 
     if cmd in ("people", "contacts", "relationships"):
         from pathlib import Path
+
         from whole_body_compute.people import (
             capture_live_browser_engagement,
             copy_person_dm_to_clipboard,
@@ -198,6 +256,12 @@ def _dispatch_main(
         from whole_body_compute.begin import format_body_begin_banner, run_body_begin
 
         target_dir = getattr(args, "workspace_opt", None) or getattr(args, "target", None)
+        raw_ci_mode = getattr(args, "ci_mode", None)
+        ci_mode: bool | None = (
+            True
+            if (getattr(args, "headless_claude", False) and raw_ci_mode is not False)
+            else raw_ci_mode
+        )
         res = run_body_begin(
             target_dir=target_dir,
             dry_run=getattr(args, "dry_run", False),
@@ -208,11 +272,48 @@ def _dispatch_main(
             seats=getattr(args, "seats", 10),
             telemetry_tier=getattr(args, "telemetry_tier", None),
             no_daemon=getattr(args, "no_daemon", False),
+            ci_mode=ci_mode,
+            claude_desktop=(True if getattr(args, "claude_desktop", False) else None),
         )
         if getattr(args, "json", False):
             print(json.dumps(res, indent=2))
         else:
             print(format_body_begin_banner(res))
+        return 0
+
+    if cmd == "lower":
+        from whole_body_compute.lower import lower_workflow, sanitize_lowering_payload
+
+        is_json = bool(getattr(args, "json", False))
+        try:
+            res = lower_workflow(
+                session_path=getattr(args, "session", None),
+                from_audit=bool(getattr(args, "from_audit", False)),
+                ci_dir=getattr(args, "ci_dir", None),
+                out_path=getattr(args, "out", None),
+                name=getattr(args, "name", None),
+                dry_run=bool(getattr(args, "dry_run", False)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            err_payload = sanitize_lowering_payload({"ok": False, "written": False, "error": str(exc)})
+            if is_json:
+                print(json.dumps(err_payload, indent=2))
+            else:
+                print(f"❌ `body lower` failed: {err_payload['error']}")
+            return 1
+
+        if is_json:
+            print(json.dumps(res, indent=2))
+        elif res.get("written"):
+            print(
+                f"⚡ Lowered `{res['category']}` ({res['step_count']} deterministic steps) -> `{res['out_path']}`"
+            )
+        else:
+            print(
+                f"🔍 [Dry-Run Lowering Preview: `{res['category']}` ({res['step_count']} steps) -> `{res['target_path']}`]"
+            )
+            if res.get("upgrade_nudge"):
+                print(f"  {res['upgrade_nudge']}")
         return 0
 
     if cmd == "scout":
@@ -272,12 +373,15 @@ def _dispatch_main(
 
     if cmd in ("ears", "transcribe", "dictate"):
         from pathlib import Path
+
         from whole_body_compute.organs.ears import OrganEars
 
         ears = OrganEars(
             workspace=Path(args.workspace) if getattr(args, "workspace", None) else None,
             backend=getattr(args, "backend", "auto"),
             hotkey=getattr(args, "hotkey", "fn"),
+            highlight=not bool(getattr(args, "no_highlight", False)),
+            highlight_target=getattr(args, "highlight_target", "auto") or "auto",
         )
         as_json = bool(getattr(args, "json", False))
 
@@ -424,7 +528,7 @@ def _dispatch_main(
                     zip_bundle=not bool(getattr(args, "no_zip", False)),
                     dry_run=bool(getattr(args, "dry_run", False)),
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 if is_json:
                     print(json.dumps({"exported": False, "error": str(exc)}, indent=2))
                 else:
@@ -643,10 +747,20 @@ def _dispatch_main(
     if cmd in ("savings", "leaderboard", "rank"):
         from whole_body_compute.shield import (
             ShieldTelemetryLedger,
+            format_coverage_gaps,
             format_savings_leaderboard,
             format_savings_receipt,
+            get_coverage_gaps,
             get_savings_summary,
         )
+
+        if getattr(args, "gaps", False):
+            gaps_report = get_coverage_gaps(hours=float(getattr(args, "hours", 5.0) or 5.0))
+            if getattr(args, "json", False):
+                print(json.dumps(gaps_report, indent=2))
+            else:
+                print(format_coverage_gaps(gaps_report))
+            return 0
 
         if getattr(args, "reset", False):
             ledger = ShieldTelemetryLedger()
@@ -679,14 +793,16 @@ def _dispatch_main(
             print(format_savings_leaderboard(summary, top_n=top_n))
         else:
             print(format_savings_receipt(summary))
-            try:
+            with contextlib.suppress(Exception):
+                from whole_body_compute.tips import get_contextual_tip_for_savings
+
+                print(f"\n{get_contextual_tip_for_savings(summary)}")
+            with contextlib.suppress(Exception):
                 from whole_body_compute.updater import format_update_notice
 
                 notice = format_update_notice()
                 if notice:
                     print(f"\n{notice}")
-            except Exception:
-                pass
         return 0
 
     if cmd == "update":
@@ -718,24 +834,20 @@ def _dispatch_main(
         return 1
 
     if cmd in ("doctor", "status", "organs"):
-        try:
+        with contextlib.suppress(Exception):
             from whole_body_compute.local.scout import prewarm_scout
 
             prewarm_scout(background=True)
-        except Exception:
-            pass
         report = check_10_organs()
         is_json = bool(getattr(args, "json", False))
         if not is_json:
             print(format_organ_doctor_table(report))
-            try:
+            with contextlib.suppress(Exception):
                 from whole_body_compute.updater import format_update_notice
 
                 notice = format_update_notice()
                 if notice:
                     print(f"\n{notice}")
-            except Exception:
-                pass
 
         if getattr(args, "exercise", False):
             reflex = exercise_10_organ_reflex_loop()
@@ -969,7 +1081,7 @@ def _dispatch_main(
                 if harvester.consent_manager.can_share_procedural_dna() or getattr(args, "share", False) or getattr(args, "save", False):
                     tpl["cohort_id"] = harvester.consent_manager.get_cohort_id()
                     harvester.upsert_outbox_cards([tpl])
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 err = {"status": "error", "reason": str(exc), "target": target}
                 if is_json:
                     print(json.dumps(err, indent=2))
@@ -1202,6 +1314,7 @@ def _dispatch_main(
 
     if cmd in ("hud", "dashboard"):
         import subprocess
+
         from whole_body_compute.telemetry_server import (
             format_telemetry_history_table,
             serve_telemetry,
@@ -1212,10 +1325,26 @@ def _dispatch_main(
             return 0
 
         host = getattr(args, "host", "127.0.0.1")
-        port = getattr(args, "port", 9381)
+        port = getattr(args, "port", 9383)
         if getattr(args, "open", False):
             subprocess.Popen(["open", f"http://{host}:{port}"])
         serve_telemetry(host=host, port=port)
+        return 0
+
+    if cmd in ("coach", "progress"):
+        from whole_body_compute.coach import build_coach_report, format_coach_report
+
+        rep = build_coach_report(
+            mode=str(getattr(args, "mode", "auto") or "auto"),
+            window_days=int(getattr(args, "days", 30) or 30),
+            shield_window=str(getattr(args, "window", "all") or "all"),
+            gaps_hours=float(getattr(args, "hours", 5.0) or 5.0),
+            include_benchmarks=bool(getattr(args, "include_benchmarks", False)),
+        )
+        if getattr(args, "json", False):
+            print(json.dumps(rep, indent=2))
+        else:
+            print("\n" + format_coach_report(rep) + "\n")
         return 0
 
     if cmd == "immune-hook":
@@ -1228,7 +1357,7 @@ def _dispatch_main(
         try:
             raw_in = sys.stdin.read().strip()
             payload = json.loads(raw_in) if raw_in else {}
-        except Exception:
+        except (ValueError, OSError):
             payload = {}
 
         if phase == "post":
@@ -1238,7 +1367,20 @@ def _dispatch_main(
         print(json.dumps(out))
         return 0
 
-    dispatched = dispatch_organ_and_cognitive_command(cmd, args)
+    prev_inc_bench = os.environ.get("WBC_AUDIT_INCLUDE_BENCHMARKS")
+    set_inc_bench = cmd in ("audit-spend", "audit", "roi", "finops") and bool(
+        getattr(args, "include_benchmarks", False)
+    )
+    if set_inc_bench:
+        os.environ["WBC_AUDIT_INCLUDE_BENCHMARKS"] = "1"
+    try:
+        dispatched = dispatch_organ_and_cognitive_command(cmd, args)
+    finally:
+        if set_inc_bench:
+            if prev_inc_bench is None:
+                os.environ.pop("WBC_AUDIT_INCLUDE_BENCHMARKS", None)
+            else:
+                os.environ["WBC_AUDIT_INCLUDE_BENCHMARKS"] = prev_inc_bench
     if dispatched is not None:
         return dispatched
 

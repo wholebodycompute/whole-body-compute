@@ -125,7 +125,7 @@ public final class CallerAuthenticator: @unchecked Sendable {
             var randomBytes = [UInt8](repeating: 0, count: 32)
             let rc = SecRandomCopyBytes(kSecRandomDefault, randomBytes.count, &randomBytes)
             guard rc == errSecSuccess else {
-                throw NSError(domain: "WBCEyes.CallerAuthenticator", code: Int(rc), userInfo: [
+                throw NSError(domain: "WholeBodyCompute.CallerAuthenticator", code: Int(rc), userInfo: [
                     NSLocalizedDescriptionKey: "SecRandomCopyBytes failed (\(rc))"
                 ])
             }

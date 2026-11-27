@@ -70,6 +70,27 @@ def _record_local_event_sqlite(record: "HybridStepRecord", db_path: Path) -> Non
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS session_context_telemetry (
+                    conversation_id TEXT PRIMARY KEY,
+                    harness TEXT,
+                    active_model TEXT,
+                    is_subagent INTEGER DEFAULT 0,
+                    planner_turns INTEGER DEFAULT 0,
+                    active_steps INTEGER DEFAULT 0,
+                    max_ctx INTEGER DEFAULT 0,
+                    latest_ctx INTEGER DEFAULT 0,
+                    turns_over_100k INTEGER DEFAULT 0,
+                    subagent_calls INTEGER DEFAULT 0,
+                    compaction_count INTEGER DEFAULT 0,
+                    snowball_nudges INTEGER DEFAULT 0,
+                    bench_poll_nudges INTEGER DEFAULT 0,
+                    first_seen_ts REAL,
+                    updated_at REAL
+                )
+                """
+            )
+            conn.execute(
+                """
                 INSERT INTO events (event_name, duration_ms, success, caller_agent, tool_name, char_count, provider, properties, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
@@ -88,6 +109,107 @@ def _record_local_event_sqlite(record: "HybridStepRecord", db_path: Path) -> Non
         conn.close()
     except Exception as exc:
         logger.debug("Direct SQLite recording notice: %s", exc)
+
+
+def upsert_session_context_telemetry(
+    conversation_id: str,
+    harness: str = "",
+    active_model: str = "",
+    is_subagent: bool = False,
+    planner_turns: int = 0,
+    active_steps: int = 0,
+    max_ctx: int = 0,
+    latest_ctx: int = 0,
+    turns_over_100k: int = 0,
+    subagent_calls: int = 0,
+    compaction_count: int = 0,
+    snowball_nudges: int = 0,
+    bench_poll_nudges: int = 0,
+    first_seen_ts: Optional[float] = None,
+    updated_at: Optional[float] = None,
+) -> None:
+    """Upsert per-session context telemetry into analytics.db."""
+    if not conversation_id:
+        return
+    if os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get("WBC_ANALYTICS_DB"):
+        return
+    try:
+        import sqlite3
+
+        db_path = get_analytics_db_path()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        now_ts = time.time()
+        f_ts = float(first_seen_ts if first_seen_ts is not None else now_ts)
+        u_ts = float(updated_at if updated_at is not None else now_ts)
+        conn = sqlite3.connect(str(db_path), timeout=1.0)
+        with conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS session_context_telemetry (
+                    conversation_id TEXT PRIMARY KEY,
+                    harness TEXT,
+                    active_model TEXT,
+                    is_subagent INTEGER DEFAULT 0,
+                    planner_turns INTEGER DEFAULT 0,
+                    active_steps INTEGER DEFAULT 0,
+                    max_ctx INTEGER DEFAULT 0,
+                    latest_ctx INTEGER DEFAULT 0,
+                    turns_over_100k INTEGER DEFAULT 0,
+                    subagent_calls INTEGER DEFAULT 0,
+                    compaction_count INTEGER DEFAULT 0,
+                    snowball_nudges INTEGER DEFAULT 0,
+                    bench_poll_nudges INTEGER DEFAULT 0,
+                    first_seen_ts REAL,
+                    updated_at REAL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO session_context_telemetry (
+                    conversation_id, harness, active_model, is_subagent,
+                    planner_turns, active_steps, max_ctx, latest_ctx,
+                    turns_over_100k, subagent_calls, compaction_count,
+                    snowball_nudges, bench_poll_nudges, first_seen_ts, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET
+                    harness = CASE WHEN excluded.harness != '' THEN excluded.harness ELSE session_context_telemetry.harness END,
+                    active_model = CASE WHEN excluded.active_model != '' THEN excluded.active_model ELSE session_context_telemetry.active_model END,
+                    is_subagent = MAX(session_context_telemetry.is_subagent, excluded.is_subagent),
+                    planner_turns = MAX(session_context_telemetry.planner_turns, excluded.planner_turns),
+                    active_steps = MAX(session_context_telemetry.active_steps, excluded.active_steps),
+                    max_ctx = MAX(session_context_telemetry.max_ctx, excluded.max_ctx),
+                    latest_ctx = excluded.latest_ctx,
+                    turns_over_100k = MAX(session_context_telemetry.turns_over_100k, excluded.turns_over_100k),
+                    subagent_calls = MAX(session_context_telemetry.subagent_calls, excluded.subagent_calls),
+                    compaction_count = MAX(session_context_telemetry.compaction_count, excluded.compaction_count),
+                    snowball_nudges = MAX(session_context_telemetry.snowball_nudges, excluded.snowball_nudges),
+                    bench_poll_nudges = MAX(session_context_telemetry.bench_poll_nudges, excluded.bench_poll_nudges),
+                    first_seen_ts = COALESCE(MIN(session_context_telemetry.first_seen_ts, excluded.first_seen_ts), excluded.first_seen_ts),
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(conversation_id),
+                    str(harness or ""),
+                    str(active_model or ""),
+                    1 if is_subagent else 0,
+                    int(planner_turns),
+                    int(active_steps),
+                    int(max_ctx),
+                    int(latest_ctx),
+                    int(turns_over_100k),
+                    int(subagent_calls),
+                    int(compaction_count),
+                    int(snowball_nudges),
+                    int(bench_poll_nudges),
+                    f_ts,
+                    u_ts,
+                ),
+            )
+        conn.close()
+    except Exception as exc:
+        logger.debug("Session context telemetry upsert notice: %s", exc)
 
 
 def capture_wbc_hybrid_step(
@@ -609,6 +731,74 @@ def update_workspace_scorecard(
     md.extend(
         [
             "",
+            "---",
+            "",
+            "## 🧠 4. Session Context Snowball Telemetry",
+            "",
+        ]
+    )
+    try:
+        import sqlite3
+
+        adb_path = get_analytics_db_path()
+        peak_max_ctx = 0
+        total_turns_over_100k = 0
+        sessions_over_100k = 0
+        sessions_over_200k = 0
+        heavy_sessions: list[tuple[str, str, int, int, int]] = []
+        if adb_path.is_file():
+            conn = sqlite3.connect(f"file:{adb_path}?mode=ro", uri=True, timeout=1.0)
+            try:
+                cur = conn.cursor()
+                has_tbl = cur.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_context_telemetry'"
+                ).fetchone()
+                if has_tbl:
+                    row = cur.execute(
+                        "SELECT COALESCE(MAX(max_ctx), 0), COALESCE(SUM(turns_over_100k), 0), "
+                        "SUM(CASE WHEN max_ctx >= 100000 THEN 1 ELSE 0 END), "
+                        "SUM(CASE WHEN max_ctx >= 200000 THEN 1 ELSE 0 END) "
+                        "FROM session_context_telemetry"
+                    ).fetchone()
+                    if row:
+                        peak_max_ctx = int(row[0] or 0)
+                        total_turns_over_100k = int(row[1] or 0)
+                        sessions_over_100k = int(row[2] or 0)
+                        sessions_over_200k = int(row[3] or 0)
+                    heavy_sessions = [
+                        (str(r[0]), str(r[1] or "-"), int(r[2] or 0), int(r[3] or 0), int(r[4] or 0))
+                        for r in cur.execute(
+                            "SELECT conversation_id, harness, max_ctx, turns_over_100k, planner_turns "
+                            "FROM session_context_telemetry ORDER BY max_ctx DESC LIMIT 5"
+                        ).fetchall()
+                    ]
+            finally:
+                conn.close()
+        md.extend(
+            [
+                "| Metric | Value |",
+                "| :--- | :--- |",
+                f"| **Peak Max Context** | `{peak_max_ctx:,} tokens` |",
+                f"| **Total Turns >100K** | `{total_turns_over_100k:,}` |",
+                f"| **Sessions >100K / >200K** | `{sessions_over_100k}` / `{sessions_over_200k}` |",
+                "",
+            ]
+        )
+        if heavy_sessions:
+            md.extend(
+                [
+                    "| Conversation | Harness | Max Context | Turns >100K | Planner Turns |",
+                    "| :--- | :--- | :--- | :--- | :--- |",
+                ]
+            )
+            for cid, har, mctx, t100, pturns in heavy_sessions:
+                md.append(f"| `{cid[:16]}` | `{har}` | `{mctx:,}` | `{t100}` | `{pturns}` |")
+            md.append("")
+    except Exception:
+        pass
+
+    md.extend(
+        [
             "---",
             "",
             "## 🔄 4. The 3-Stage Hybrid Cloud + Local Operating Protocol",

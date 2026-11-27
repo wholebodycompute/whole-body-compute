@@ -1,5 +1,5 @@
 """
-End-to-end integration tests for `WBC Eyes.app` (`macos/WBCEyes`):
+End-to-end integration tests for `Whole Body Compute.app` (`macos/WholeBodyCompute`):
 1. `0600` socket & `0600` per-session HMAC token file permissions.
 2. `CallerAuthenticator` (`LOCAL_PEERPID` + `0600` HMAC-SHA256 + timestamp/nonce replay + `SecCode` identifier allowlist).
 3. 1-Click Kill Switch immediate refusal of `body eyes` and `body hands` without PyObjC fallback bypass.
@@ -42,7 +42,7 @@ from whole_body_compute.integrations.foveal_vision import (
 pytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="WBC Eyes.app is macOS-specific")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SWIFT_PKG_DIR = REPO_ROOT / "macos" / "WBCEyes"
+SWIFT_PKG_DIR = REPO_ROOT / "macos" / "WholeBodyCompute"
 BUILD_SCRIPT = REPO_ROOT / "scripts" / "build_wbc_eyes_app.sh"
 
 
@@ -213,6 +213,25 @@ def test_socket_permissions_and_caller_authentication(running_eyes_socket: Path)
     assert rpc_resp["jsonrpc"] == "2.0"
     assert rpc_resp["id"] == 7
     assert rpc_resp["result"]["provider"] == "Whole Body Compute.app"
+
+    # 5. Ears dictation highlight (`op="ears_highlight"`) resolves text_box -> window cleanly in headless mode
+    hl_show = send_foveal_socket_request({"op": "ears_highlight", "action": "show", "mode": "ptt", "target": "auto"})
+    assert hl_show is not None
+    assert hl_show["status"] == "ok"
+    assert hl_show["visible"] is True
+    assert hl_show["mode"] == "ptt"
+    assert hl_show["target_kind"] == "text_box"
+
+    hl_win = send_foveal_socket_request({"op": "ears_highlight", "action": "update", "mode": "hands_free", "target": "window"})
+    assert hl_win is not None
+    assert hl_win["visible"] is True
+    assert hl_win["mode"] == "hands_free"
+    assert hl_win["target_kind"] == "window"
+
+    hl_hide = send_foveal_socket_request({"op": "ears_highlight", "action": "hide"})
+    assert hl_hide is not None
+    assert hl_hide["status"] == "ok"
+    assert hl_hide["visible"] is False
 
 
 def test_seccode_signing_identifier_allowlist_blocks_unlisted_caller(wbc_eyes_bundle: Path) -> None:

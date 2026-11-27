@@ -63,5 +63,13 @@ recipes/candidates/
 # Internal/raw benchmark runs (already-tracked public HAL provenance files remain tracked)
 benchmarks/
 
+# Local scratch artifacts (unrelated Antigravity desktop bundle files at repo root)
+/menu.js
+/package.json
+
+# MCP App UI build dependencies
+src/whole_body_compute/mcp/ui_src/node_modules/
+
+
 
 

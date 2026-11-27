@@ -4,17 +4,23 @@ Filters non-actionable acoustic mic checks and conversational filler,
 normalizes phonetic spoken code slang, and manages contextual disambiguation.
 """
 
+import json
+import os
 import re
+import socket
+import threading
+import time
+import urllib.request
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Dict, Any, List
-import difflib
+from typing import Optional, Dict, Any, List, Tuple
 
-from whole_body_compute.stt.biasing import PhoneticNormalizer
-from whole_body_compute.audio.cognitive_safety import (
-    AcousticSafetyDecision,
-    default_cognitive_safety,
+from whole_body_compute.local.shadow_ledger import (
+    record_shadow_eval,
+    strip_llm_fences_and_thoughts,
 )
+from whole_body_compute.stt.biasing import PhoneticNormalizer
+from whole_body_compute.audio.cognitive_safety import default_cognitive_safety
 
 
 class SpokenIntentCategory(str, Enum):
@@ -51,6 +57,75 @@ class ActiveListeningResult:
     quick_spoken_reply: Optional[str] = None
     selected_option: Optional[str] = None
     confidence: float = 1.0
+
+
+def _query_metal_safety_gate(
+    text_clean: str,
+    system_prompt: str,
+    timeout_s: float = 0.8,
+) -> Optional[Tuple[bool, str, str, str, float]]:
+    """
+    Probe warm local Metal/SpecialistRouter ports (:9380 -> :9379) for destructive-command
+    safety classification without touching Ollama (:11434).
+    Returns (is_unsafe, reason, engine, model, latency_ms) on valid JSON, else None.
+    """
+    candidates = (
+        (9380, "localbench-specialist-router", "specialist_router_9380"),
+        (9379, "gemma4-2b", "litert_metal_9379"),
+        (9379, "body-coder-mlx", "mlx_metal_9379"),
+    )
+    open_ports: Dict[int, bool] = {}
+
+    for port, model, engine in candidates:
+        if port not in open_ports:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.025):
+                    open_ports[port] = True
+            except OSError:
+                open_ports[port] = False
+        if not open_ports[port]:
+            continue
+
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Input: {text_clean}\n"
+                        'Respond ONLY with strict JSON: {"safety": "safe"|"unsafe", "reason": "..."}'
+                    ),
+                },
+            ],
+            "temperature": 0.0,
+            "max_tokens": 80,
+        }
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        t0 = time.perf_counter()
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            raw_content = (
+                ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            )
+            cleaned = strip_llm_fences_and_thoughts(str(raw_content))
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict) and parsed.get("safety") in ("safe", "unsafe"):
+                latency_ms = (time.perf_counter() - t0) * 1000.0
+                is_unsafe = parsed["safety"] == "unsafe"
+                reason = str(parsed.get("reason") or "")
+                used_model = str(body.get("model") or model)
+                return (is_unsafe, reason, engine, used_model, latency_ms)
+        except Exception:
+            continue
+
+    return None
 
 
 class ActiveListeningEngine:
@@ -600,10 +675,6 @@ class ActiveListeningEngine:
         and local Ollama structured outputs for sub-100ms semantic classification
         only when destructive keywords are present.
         """
-        import os
-        import urllib.request
-        import json
-
         if not text or not text.strip():
             return (False, "")
 
@@ -663,17 +734,6 @@ class ActiveListeningEngine:
         if not tokens.intersection(destructive_stems):
             return (False, "")
 
-        # 4. Semantic LLM classification (Ollama / Gemma 2)
-        # Disabled by default to prevent false-positive spoken interrupts and battery churn.
-        # Downstream agent & WBC ImmuneGate provide execution-level protection.
-        # Set VOICEFI_ENABLE_SEMANTIC_SAFETY=1 to enable.
-        enable_semantic_llm = os.environ.get("VOICEFI_ENABLE_SEMANTIC_SAFETY", "0") == "1"
-        if not enable_semantic_llm or (
-            (os.environ.get("WBC_TESTING") == "1" or os.environ.get("VOICEFI_TESTING") == "1")
-            and not os.environ.get("VOICEFI_TEST_LIVE_OLLAMA")
-        ):
-            return (False, "")
-
         system_prompt = (
             "You are VoiceFi's cognitive safety guardrail.\n"
             "Your job is ONLY to identify whether the user is giving a DESTRUCTIVE execution command to a computer "
@@ -684,38 +744,104 @@ class ActiveListeningEngine:
             "If the text is conversational chatter, personal narrative, or not an explicit destructive action, it MUST be marked 'safe'."
         )
 
-        payload = {
-            "model": "gemma2:2b",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Input: {text_clean}"},
-            ],
-            "format": {
-                "type": "object",
-                "properties": {
-                    "safety": {"type": "string", "enum": ["safe", "unsafe"]},
-                    "reason": {"type": "string"},
+        # 4a. Live local Metal opt-in (:9380 -> :9379)
+        if os.environ.get("WBC_VOICE_SAFETY_LOCAL_METAL") == "1":
+            metal_res = _query_metal_safety_gate(text_clean, system_prompt)
+            if metal_res is not None:
+                is_unsafe, reason, engine, model, latency_ms = metal_res
+                record_shadow_eval(
+                    task_type="voice_safety_gate",
+                    engine=engine,
+                    model=model,
+                    latency_ms=latency_ms,
+                    valid_guardrail=True,
+                    baseline_used="live_metal",
+                    sla_ms=800.0,
+                    tokens_saved_est=90,
+                    extra={"predicted_unsafe": is_unsafe, "reason": reason[:120]},
+                )
+                return (is_unsafe, reason)
+
+        # 4b. Semantic LLM classification (Ollama / Gemma 2)
+        # Disabled by default to prevent false-positive spoken interrupts and battery churn.
+        # Downstream agent & WBC ImmuneGate provide execution-level protection.
+        # Set VOICEFI_ENABLE_SEMANTIC_SAFETY=1 to enable.
+        live_result: tuple[bool, str] = (False, "")
+        enable_semantic_llm = os.environ.get("VOICEFI_ENABLE_SEMANTIC_SAFETY", "0") == "1"
+        if enable_semantic_llm and not (
+            (os.environ.get("WBC_TESTING") == "1" or os.environ.get("VOICEFI_TESTING") == "1")
+            and not os.environ.get("VOICEFI_TEST_LIVE_OLLAMA")
+        ):
+            payload = {
+                "model": "gemma2:2b",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Input: {text_clean}"},
+                ],
+                "format": {
+                    "type": "object",
+                    "properties": {
+                        "safety": {"type": "string", "enum": ["safe", "unsafe"]},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["safety", "reason"],
                 },
-                "required": ["safety", "reason"],
-            },
-            "stream": False,
-            "options": {"temperature": 0.0},
-        }
+                "stream": False,
+                "options": {"temperature": 0.0},
+            }
 
-        req = urllib.request.Request(
-            "http://localhost:11434/api/chat",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
+            req = urllib.request.Request(
+                "http://localhost:11434/api/chat",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
 
-        try:
-            with urllib.request.urlopen(req, timeout=3.0) as response:
-                result = json.loads(response.read().decode())
-                parsed = json.loads(result["message"]["content"])
-                return (parsed.get("safety") == "unsafe", parsed.get("reason", ""))
-        except Exception:
-            return (False, "")
+            try:
+                with urllib.request.urlopen(req, timeout=3.0) as response:
+                    result = json.loads(response.read().decode())
+                    parsed = json.loads(result["message"]["content"])
+                    live_result = (parsed.get("safety") == "unsafe", parsed.get("reason", ""))
+            except Exception:
+                live_result = (False, "")
+
+        # 4c. Shadow-only local Metal telemetry evaluation (does not alter live_result)
+        if (
+            os.environ.get("WBC_VOICE_SAFETY_LOCAL_METAL") != "1"
+            and os.environ.get("WBC_ROUTER_SHADOW") == "1"
+        ):
+            in_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST"))
+            allow_shadow_in_test = (
+                os.environ.get("WBC_TEST_VOICE_SHADOW") == "1"
+                or os.environ.get("WBC_SHADOW_SYNC") == "1"
+            )
+            if not in_pytest or allow_shadow_in_test:
+                def _run_shadow_safety() -> None:
+                    metal_res = _query_metal_safety_gate(text_clean, system_prompt)
+                    if metal_res is not None:
+                        is_unsafe, reason, engine, model, latency_ms = metal_res
+                        record_shadow_eval(
+                            task_type="voice_safety_gate",
+                            engine=engine,
+                            model=model,
+                            latency_ms=latency_ms,
+                            valid_guardrail=True,
+                            baseline_used="shadow_only",
+                            sla_ms=800.0,
+                            tokens_saved_est=90,
+                            extra={"predicted_unsafe": is_unsafe, "reason": reason[:120]},
+                        )
+
+                if os.environ.get("WBC_SHADOW_SYNC") == "1":
+                    _run_shadow_safety()
+                else:
+                    threading.Thread(
+                        target=_run_shadow_safety,
+                        name="wbc-voice-safety-shadow",
+                        daemon=True,
+                    ).start()
+
+        return live_result
 
     @classmethod
     def extract_wakeword_and_prompt(

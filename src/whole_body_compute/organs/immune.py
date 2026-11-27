@@ -236,6 +236,9 @@ _SENSITIVE_READ_BASENAMES = frozenset({
     ".netrc",
     ".npmrc",
     ".pypirc",
+    ".bash_history",
+    ".zsh_history",
+    "secring.gpg",
     "id_rsa",
     "id_ed25519",
     "id_ecdsa",
@@ -298,7 +301,12 @@ def _is_sensitive_credential_path(raw_path: str, *, resolved_path: Optional[str]
 def _is_subagent_conversation(conv_id: str, payload: Optional[Dict[str, Any]] = None) -> bool:
     """Detect whether this tool call is executing inside an ephemeral subagent."""
     if payload:
-        if payload.get("is_subagent") or payload.get("parent_conversation_id"):
+        if (
+            payload.get("is_subagent")
+            or payload.get("isSubagent")
+            or payload.get("parent_conversation_id")
+            or payload.get("parentConversationId")
+        ):
             return True
         if str(payload.get("conversation_type", "")).lower() == "subagent":
             return True
@@ -1513,11 +1521,76 @@ def _reconcile_tactile_churn_on_post(
                 "pre_test_funcs": entry.get("last_test_funcs", []),
             }
 
-        tactile_delta = verify_post_edit_tactile_delta(
-            target_path_str,
-            pre_snapshot=baseline_dict,
-            seen_ast_digests=seen_digests,
-        )
+        tactile_delta: Optional[TactileDelta] = None
+        cand_sha = str(pre_info.get("cand_sha256") or "")
+        if cand_sha and os.path.isfile(target_path_str):
+            try:
+                _t_d0 = time.perf_counter()
+                _st_post = os.stat(target_path_str)
+                with open(target_path_str, "rb") as _df:
+                    _disk_sha = hashlib.sha256(_df.read()).hexdigest()[:16]
+                if _disk_sha == cand_sha:
+                    _pre_sha = str(baseline_dict.get("pre_sha256", ""))
+                    _pre_ast = str(baseline_dict.get("pre_ast_digest", ""))
+                    _post_ast = str(pre_info.get("cand_ast_digest", ""))
+                    _pre_topo = str(baseline_dict.get("pre_topology_digest", ""))
+                    _post_topo = str(pre_info.get("cand_topology_digest", ""))
+                    _pre_sym = int(baseline_dict.get("pre_symbol_count", 0))
+                    _post_sym = int(pre_info.get("cand_symbol_count", 0))
+                    _pre_ass = int(baseline_dict.get("pre_assert_count", 0))
+                    _post_ass = int(pre_info.get("cand_assert_count", 0))
+                    _pre_taut = int(baseline_dict.get("pre_tautological_asserts", 0))
+                    _post_taut = int(pre_info.get("cand_tautological_asserts", 0))
+                    _del_tests = sorted(
+                        set(baseline_dict.get("pre_test_funcs") or [])
+                        - set(pre_info.get("cand_test_funcs") or [])
+                    )
+                    _syn_ok = bool(pre_info.get("cand_ast_syntax_valid", True))
+                    _f_changed = bool(_disk_sha != _pre_sha)
+                    _ast_mut = bool(_syn_ok and _f_changed and (_post_ast != _pre_ast if (_post_ast or _pre_ast) else True))
+                    _taut_intro = max(0, _post_taut - _pre_taut)
+                    _ass_ok = bool(_syn_ok and _post_ass >= _pre_ass and _taut_intro == 0 and not _del_tests)
+                    _reverted = bool(_post_ast and _post_ast in seen_digests and _post_ast != _pre_ast)
+                    _net_prog = bool(_f_changed and _syn_ok and _ast_mut and _ass_ok and not _reverted)
+                    entry["last_mtime_ns"] = _st_post.st_mtime_ns
+                    entry["last_size_bytes"] = _st_post.st_size
+                    entry["last_tautological_asserts"] = _post_taut
+                    entry["last_test_funcs"] = list(pre_info.get("cand_test_funcs") or [])
+                    tactile_delta = TactileDelta(
+                        git_changed=_f_changed,
+                        latency_ms=round((time.perf_counter() - _t_d0) * 1000.0, 3),
+                        target_file=target_path_str,
+                        pre_sha256=_pre_sha,
+                        post_sha256=_disk_sha,
+                        file_changed=_f_changed,
+                        mechanical_noop=not _f_changed,
+                        ast_syntax_valid=_syn_ok,
+                        pre_ast_digest=_pre_ast,
+                        post_ast_digest=_post_ast,
+                        ast_mutated=_ast_mut,
+                        pre_topology_digest=_pre_topo,
+                        post_topology_digest=_post_topo,
+                        topology_mutated=bool(_post_topo != _pre_topo),
+                        pre_symbol_count=_pre_sym,
+                        post_symbol_count=_post_sym,
+                        symbol_delta=_post_sym - _pre_sym,
+                        pre_assert_count=_pre_ass,
+                        post_assert_count=_post_ass,
+                        assert_delta=_post_ass - _pre_ass,
+                        tautological_asserts_introduced=_taut_intro,
+                        deleted_test_funcs=_del_tests,
+                        assertions_preserved=_ass_ok,
+                        net_ast_progress=_net_prog,
+                    )
+            except Exception:
+                tactile_delta = None
+
+        if tactile_delta is None:
+            tactile_delta = verify_post_edit_tactile_delta(
+                target_path_str,
+                pre_snapshot=baseline_dict,
+                seen_ast_digests=seen_digests,
+            )
 
         if touch_recorded_in_pre:
             # Reconcile if PreToolUse thought candidate progressed, but on disk it was a no-op or syntax fault
@@ -1915,8 +1988,10 @@ def run_ide_pre_tool_hook(
         return run_ide_pre_invocation_hook(payload, audit_log_path=audit_log_path)
     args = (
         tool_call.get("args")
+        or tool_call.get("arguments")
         or tool_call.get("input")
         or payload.get("tool_input")
+        or payload.get("arguments")
         or payload.get("args")
         or {}
     )
@@ -1950,6 +2025,8 @@ def run_ide_pre_tool_hook(
     assert_delta = 0
     em_dash_healed = 0
     shell_auto_healed = False
+    git_commit_rewritten = False
+    inspection_fastpath_rewritten = False
     read_auto_sliced = False
     read_reflex_escalated = False
     tail_bridged = False
@@ -1999,6 +2076,8 @@ def run_ide_pre_tool_hook(
         or ""
     )[:140]
     pre_sha256 = ""
+    pre_edit_code_for_shadow = ""
+    read_exempt_or_small = False
     pre_file_snap: Optional[FileTactileSnapshot] = None
     cand_file_snap: Optional[FileTactileSnapshot] = None
 
@@ -2275,8 +2354,15 @@ def run_ide_pre_tool_hook(
                 )
                 if sensory_vector.proprioception.harness_name in ("antigravity", "windsurf"):
                     _stash_preinv_context(conv_id, foveal_guidance)
-            is_unconditionally_exempt = (
+            is_brain_log = (
                 "/brain/" in norm_raw_path
+                and (
+                    fpath.suffix.lower() in (".jsonl", ".log")
+                    or "/.system_generated/logs/" in norm_raw_path
+                )
+            )
+            is_unconditionally_exempt = (
+                ("/brain/" in norm_raw_path and not is_brain_log)
                 or "/mcp/chrome-devtools-mcp/" in norm_raw_path
                 or fpath.name in ("ACTIVE_PIPELINES.md", "HYBRID_TELEMETRY.md", "pyproject.toml")
             )
@@ -2321,6 +2407,8 @@ def run_ide_pre_tool_hook(
             ):
                 is_exempt_meta = True
 
+            if is_exempt_meta:
+                read_exempt_or_small = True
             _is_reg_file = (
                 _read_target_stat is not None and stat.S_ISREG(_read_target_stat.st_mode)
             ) if _read_target_stat is not None else fpath.is_file()
@@ -2373,6 +2461,7 @@ def run_ide_pre_tool_hook(
                         or fpath.suffix.lower() in (
                             ".py", ".ts", ".tsx", ".js", ".jsx", ".rs", ".go",
                             ".log", ".jsonl", ".md", ".markdown",
+                            ".json", ".yaml", ".yml", ".toml", ".csv", ".sql", ".html", ".css", ".xml", ".sh",
                         )
                         or fpath.name in ("README.md", "SKILL.md")
                     ):
@@ -2393,6 +2482,8 @@ def run_ide_pre_tool_hook(
                                 _FILE_LINE_COUNT_CACHE[_lc_key] = total_lines
                             if total_lines > 80:
                                 raw_text = _raw_bytes.decode("utf-8", errors="replace")
+                        if not has_bounds and total_lines <= sensory_vector.auto_slice_window:
+                            read_exempt_or_small = True
                         full_tokens_est = max(1, fsize // 4)
                         is_raw_log = fpath.suffix in (".log", ".jsonl") and total_lines > 100
 
@@ -2408,13 +2499,42 @@ def run_ide_pre_tool_hook(
                         )  # [direct-edit]
                         if is_strict_test and not has_bounds and is_read_trunc_offender and total_lines > 80:
                             file_threshold = 80
+                        if not has_bounds and sensory_vector.homeostatic_regime == "RED_TIGHT":
+                            file_threshold = min(file_threshold, 80)
+                        is_large_html_unbounded = (
+                            not has_bounds
+                            and fpath.suffix.lower() in (".html", ".htm")
+                            and (total_lines > 250 or fsize > 16_384)
+                        )
+                        if is_large_html_unbounded:
+                            file_threshold = min(file_threshold, 250)
 
                         line_ceil = sensory_vector.native_line_ceiling
                         tail_bridge_ceil = sensory_vector.tail_bridge_line_ceiling
                         head_byte_ceil = sensory_vector.tail_bridge_head_byte_ceiling
 
-                        if (total_lines > file_threshold or is_raw_log) and raw_text is None:
+                        if (total_lines > file_threshold or is_raw_log or is_large_html_unbounded) and raw_text is None:
                             raw_text = fpath.read_text(encoding="utf-8", errors="replace")
+
+                        if (
+                            not has_bounds
+                            and not is_raw_log
+                            and not is_large_html_unbounded
+                            and fpath.suffix.lower() == ".py"
+                            and 300 < total_lines <= file_threshold
+                            and (
+                                sensory_vector.homeostatic_regime != "GREEN_ELASTIC"
+                                or int(step_idx or 0) >= 6
+                            )
+                        ):
+                            py_nudge = (
+                                f"💡 [WBC Context-Tax Nudge]: Unbounded read of `{fpath.name}` ({total_lines:,} lines, "
+                                f"{fsize / 1024:.1f} KB) passed under the native ceiling. Prefer `StartLine`/`EndLine` "
+                                f"or `body scout \"{raw_path}\" -q \"<question>\"` to keep sessions below the 320 KB YELLOW threshold."
+                            )
+                            ephemeral_message = f"{ephemeral_message}\n{py_nudge}" if ephemeral_message else py_nudge
+                            if sensory_vector.proprioception.harness_name in ("antigravity", "windsurf"):
+                                _stash_preinv_context(conv_id, py_nudge)
 
                         if has_bounds and span_lines <= max_allowed_span and not is_raw_log:
                             bounded_slice_read = True
@@ -2422,7 +2542,13 @@ def run_ide_pre_tool_hook(
                                 slice_tokens_est = max(
                                     1, int(full_tokens_est * (span_lines / max(1, total_lines)))
                                 )
-                                direct_tokens_saved = max(0, full_tokens_est - slice_tokens_est)
+                                native_tok_ceil = (
+                                    25_000
+                                    if (line_ceil >= 2000 or tool_name == "Read")
+                                    else 11_520
+                                )
+                                capped_full_tokens_est = min(native_tok_ceil, full_tokens_est)
+                                direct_tokens_saved = max(0, capped_full_tokens_est - slice_tokens_est)
                                 quadratic_tokens_saved = direct_tokens_saved * remaining_turns
                                 reason = (
                                     f"⚡ Context Shield fast-path allow: Bounded slice L{start_line}-{end_line} "
@@ -2519,7 +2645,7 @@ def run_ide_pre_tool_hook(
                             ):
                                 _stash_preinv_context(conv_id, ephemeral_message)
                             reason = ephemeral_message
-                        elif total_lines > file_threshold or is_raw_log:
+                        elif total_lines > file_threshold or is_raw_log or is_large_html_unbounded:
                             outline = _build_fast_file_symbol_outline(fpath, raw_text)
                             outline_tokens = max(1, len(outline) // 4)
                             direct_tokens_saved = max(0, full_tokens_est - outline_tokens)
@@ -2594,7 +2720,7 @@ def run_ide_pre_tool_hook(
                                 )
                                 attached_tokens = outline_tokens
                                 reason = ephemeral_message
-                            elif not is_log_or_receipt_target and not is_pytest_or_strict_hook:  # [direct-edit]
+                            elif not is_pytest_or_strict_hook:  # [direct-edit]
                                 decision = "allow"
                                 read_auto_sliced = True
                                 bounded_slice_read = True
@@ -2602,7 +2728,22 @@ def run_ide_pre_tool_hook(
                                     truncation_cascade_clamped = True
                                 s_line = max(1, int(start_line or 1))
                                 clamp_win = 80 if is_read_trunc_offender else sensory_vector.auto_slice_window
-                                if not is_read_trunc_offender:
+                                if is_log_or_receipt_target:
+                                    log_win = min(120, clamp_win)
+                                    if not has_bounds:
+                                        s_line = max(1, total_lines - log_win + 1)
+                                    e_line = min(total_lines, s_line + log_win - 1)
+                                    fast_log_digest = ""
+                                    try:
+                                        fast_log_digest = _extract_fast_log_digest(fpath)
+                                    except Exception:
+                                        fast_log_digest = ""
+                                    preinv_stash_text = (
+                                        f"🩹 Blood-Brain Barrier Log Tail Auto-Slice (`{fpath.name}`, {total_lines:,} lines -> L{s_line}-{e_line}):\n"
+                                        + (f"{fast_log_digest}\n" if fast_log_digest else "")
+                                        + f"Instant Section Map for `{fpath.name}`:\n{outline}"
+                                    )
+                                elif not is_read_trunc_offender:
                                     try:
                                         from whole_body_compute.procedural_telemetry import get_wbc_data_dir
 
@@ -2673,10 +2814,12 @@ def run_ide_pre_tool_hook(
                                                 read_reflex_escalated = True
                                     except Exception:
                                         pass
-                                e_line = min(total_lines, s_line + clamp_win - 1)
+                                if not is_log_or_receipt_target:
+                                    e_line = min(total_lines, s_line + clamp_win - 1)
 
                                 is_zero_donut_unbounded = (
                                     not has_bounds
+                                    and not is_log_or_receipt_target
                                     and not is_read_trunc_offender
                                     and sensory_vector.homeostatic_regime != "RED_TIGHT"
                                 )
@@ -3040,11 +3183,20 @@ def run_ide_pre_tool_hook(
             raw_bytes = b""
             parent_py_tree: Optional[ast.AST] = None
             is_py_edit_target = fpath.suffix.lower() == ".py"
+            _edit_st: Optional[os.stat_result] = None
             if fpath.is_file():
                 try:
+                    _edit_st = fpath.stat()
                     raw_bytes = fpath.read_bytes()
                     pre_sha256 = hashlib.sha256(raw_bytes).hexdigest()[:16]
                     parent_code = raw_bytes.decode("utf-8", errors="replace")
+                    if (
+                        os.environ.get("WBC_ROUTER_SHADOW") == "1"
+                        and len(parent_code) <= 120_000
+                        and not sens_write_hit
+                        and not git_hook_hit
+                    ):
+                        pre_edit_code_for_shadow = parent_code
                 except Exception:
                     parent_code = ""
             if is_py_edit_target and parent_code.strip():
@@ -3052,12 +3204,46 @@ def run_ide_pre_tool_hook(
                     parent_py_tree = ast.parse(parent_code)
                 except Exception:
                     parent_py_tree = None
-            pre_file_snap = capture_file_tactile_snapshot(
-                fpath,
-                raw_text=parent_code,
-                raw_bytes=raw_bytes,
-                pre_parsed_tree=parent_py_tree,
-            )
+            _norm_w_key = resolved_write_path or str(fpath)
+            if _edit_st is not None:
+                with _TACTILE_SNAP_CACHE_LOCK:
+                    pre_file_snap = _TACTILE_SNAP_CACHE.get((_norm_w_key, _edit_st.st_mtime_ns, _edit_st.st_size))
+                if pre_file_snap is None:
+                    _conv_churn = (_loaded_streak_state.get(conv_id or "local") or {})
+                    if isinstance(_conv_churn, dict):
+                        _t_entry = (_conv_churn.get("tactile_churn") or {}).get(_norm_w_key)
+                        if (
+                            isinstance(_t_entry, dict)
+                            and _t_entry.get("last_mtime_ns") == _edit_st.st_mtime_ns
+                            and _t_entry.get("last_size_bytes") == _edit_st.st_size
+                            and _t_entry.get("last_sha256") == pre_sha256
+                        ):
+                            pre_file_snap = FileTactileSnapshot(
+                                file_path=str(fpath),
+                                exists=True,
+                                sha256=pre_sha256,
+                                size_bytes=_edit_st.st_size,
+                                ast_syntax_valid=True,
+                                ast_digest=str(_t_entry.get("last_ast_digest", "")),
+                                topology_digest=str(_t_entry.get("last_topology_digest", "")),
+                                symbol_count=int(_t_entry.get("last_symbol_count", 0)),
+                                assert_count=int(_t_entry.get("last_assert_count", 0)),
+                                tautological_asserts=int(_t_entry.get("last_tautological_asserts", 0)),
+                                test_funcs=list(_t_entry.get("last_test_funcs") or []),
+                                latency_ms=0.0,
+                            )
+            if pre_file_snap is None:
+                pre_file_snap = capture_file_tactile_snapshot(
+                    fpath,
+                    raw_text=parent_code,
+                    raw_bytes=raw_bytes,
+                    pre_parsed_tree=parent_py_tree,
+                )
+                if _edit_st is not None:
+                    with _TACTILE_SNAP_CACHE_LOCK:
+                        if len(_TACTILE_SNAP_CACHE) >= _MAX_TACTILE_SNAP_CACHE:
+                            _TACTILE_SNAP_CACHE.pop(next(iter(_TACTILE_SNAP_CACHE)))
+                        _TACTILE_SNAP_CACHE[(_norm_w_key, _edit_st.st_mtime_ns, _edit_st.st_size)] = pre_file_snap
 
             # 1a. Autonomic Machine-Mark & Em-Dash Auto-Heal (`overwrite`) for write/edit tools
             if decision != "deny" and not (
@@ -3070,6 +3256,8 @@ def run_ide_pre_tool_hook(
                     for c_key in ("Content", "content", "new_source"):
                         if c_key in args:
                             raw_content = str(args.get(c_key) or "")
+                            if not is_prose_file and raw_content.isascii() and "&" not in raw_content:
+                                continue
                             mm_res = auto_heal_machine_marks(raw_content, file_path=raw_path, heal_lexical=is_prose_file)
                             if mm_res["total_healed"] > 0:
                                 em_dash_healed += mm_res["total_healed"]
@@ -3080,6 +3268,8 @@ def run_ide_pre_tool_hook(
                     for r_key in ("Replacement", "new_string"):
                         if r_key in args:
                             raw_repl = str(args.get(r_key) or "")
+                            if not is_prose_file and raw_repl.isascii() and "&" not in raw_repl:
+                                continue
                             mm_res = auto_heal_machine_marks(raw_repl, file_path=raw_path, heal_lexical=is_prose_file)
                             if mm_res["total_healed"] > 0:
                                 em_dash_healed += mm_res["total_healed"]
@@ -3097,6 +3287,8 @@ def run_ide_pre_tool_hook(
                                 new_ed = dict(ed_item)
                                 for r_key in ("new_string", "Replacement"):
                                     if r_key in new_ed and isinstance(new_ed[r_key], str):
+                                        if not is_prose_file and new_ed[r_key].isascii() and "&" not in new_ed[r_key]:
+                                            continue
                                         mm_ed = auto_heal_machine_marks(
                                             new_ed[r_key],
                                             file_path=raw_path,
@@ -3348,6 +3540,43 @@ def run_ide_pre_tool_hook(
                                         f'      invoke_subagent(Model="flash", Role="Script Debugger", Prompt="Fix {fpath.name}...")\n'
                                         "   (Escape hatch: include `[direct-edit]` in the Replacement string if direct main-thread edit is strictly required)."
                                     )
+                            if (
+                                not os.environ.get("PYTEST_CURRENT_TEST")
+                                or os.environ.get("WBC_ENABLE_REFLEX_GATE_IN_TESTS") == "1"
+                                or "WBC_DATA_DIR" in os.environ
+                            ):
+                                try:
+                                    from whole_body_compute.local.reflex_gate import (
+                                        StructuralSignals,
+                                        record_shadow_evaluation_async,
+                                        resolve_repo_key,
+                                    )
+
+                                    _edit_repo_key = resolve_repo_key(str(fpath))
+                                    _py_edits_cur = int(c_state.get("py_file_edits", {}).get(raw_path, 0))
+                                    record_shadow_evaluation_async(
+                                        gate_id="single_file_edit_offload",
+                                        text=f".py | {fpath.name} | edit_count={_py_edits_cur + 1}",
+                                        actual_ok=bool(is_mlx_online and not has_direct_edit),
+                                        signals=StructuralSignals(
+                                            file_lines=int(_py_edits_cur + 1),
+                                            symbol_count=int(c_state.get("total_py_edits", 0)) + 1,
+                                            recently_edited=(_py_edits_cur > 0),
+                                            is_test_or_log=fpath.name.lower().startswith("test_"),
+                                            turn_depth=int(step_idx or 0),
+                                        ),
+                                        repo_key=_edit_repo_key,
+                                        model_name="body-coder-mlx",
+                                        sample_key=str(fpath),
+                                        metadata={
+                                            "file": fpath.name,
+                                            "mlx_online": bool(is_mlx_online),
+                                            "direct_edit_override": bool(has_direct_edit),
+                                            "decision": decision,
+                                        },
+                                    )
+                                except Exception:
+                                    pass
                 elif is_shell_hook:
                     for shell_bin in ("/bin/sh", "/bin/bash"):
                         if not os.path.exists(shell_bin):
@@ -3457,7 +3686,7 @@ def run_ide_pre_tool_hook(
             decision = "deny" if strict_deny else "ask"
             stage_triggered = 3
             reason = f"🛡️ Blood-Brain Barrier {v_res.get('reason')}"
-        elif os.environ.get("VOICEFI_CONTEXT_GATE_DISABLED") != "1":
+        elif decision == "allow" and os.environ.get("VOICEFI_CONTEXT_GATE_DISABLED") != "1":
             is_shell_trunc_offender = bool(
                 truncation_offenders.get("run_command")
                 or truncation_offenders.get("Bash")
@@ -3491,19 +3720,39 @@ def run_ide_pre_tool_hook(
                     f"due to recent truncation cascade events (capped at 60 lines)."
                 )
             else:
-                from whole_body_compute.organs.command_reflex import rewrite_git_commit_to_body_commit
+                git_commit_reflex = None
+                inspection_reflex = None
+                if os.environ.get("VOICEFI_AUTO_HEAL_SHELL", "1") == "1":
+                    from whole_body_compute.organs.command_reflex import (
+                        rewrite_git_commit_to_body_commit,
+                        rewrite_read_only_inspection_command,
+                    )
 
-                git_commit_reflex = rewrite_git_commit_to_body_commit(cmd_line, payload=payload)
-                if git_commit_reflex and os.environ.get("VOICEFI_AUTO_HEAL_SHELL", "1") == "1":
+                    git_commit_reflex = rewrite_git_commit_to_body_commit(cmd_line, payload=payload)
+                    if not git_commit_reflex:
+                        inspection_reflex = rewrite_read_only_inspection_command(cmd_line, payload=payload)
+                if git_commit_reflex:
                     healed_cmd = str(git_commit_reflex["rewritten_command"])
                     decision = "allow"
                     shell_auto_healed = True
+                    git_commit_rewritten = True
                     overwrite_args[cmd_arg_key] = healed_cmd
-                    direct_tokens_saved = int(git_commit_reflex.get("tokens_saved", 4150))
+                    direct_tokens_saved = int(git_commit_reflex.get("tokens_saved", 750))
                     remaining_turns = max(1, 25 - step_idx)
                     quadratic_tokens_saved = direct_tokens_saved * remaining_turns
                     target_path_str = "body commit"
                     reason = str(git_commit_reflex["reason"])
+                elif inspection_reflex:
+                    healed_cmd = str(inspection_reflex["rewritten_command"])
+                    decision = "allow"
+                    shell_auto_healed = True
+                    inspection_fastpath_rewritten = True
+                    overwrite_args[cmd_arg_key] = healed_cmd
+                    direct_tokens_saved = int(inspection_reflex.get("tokens_saved", 250))
+                    remaining_turns = max(1, 25 - step_idx)
+                    quadratic_tokens_saved = direct_tokens_saved * remaining_turns
+                    target_path_str = str(inspection_reflex.get("target") or healed_cmd)[:120]
+                    reason = str(inspection_reflex["reason"])
                 else:
                     bloat_res = inspect_shell_command_bloat(cmd_line)
                     if bloat_res.get("blocked"):
@@ -3744,7 +3993,7 @@ def run_ide_pre_tool_hook(
                             )
                     break
 
-        # Inspect tool event via VascularTrafficMonitor
+        # Inspect tool event via VascularTrafficMonitor + Organ 05 MCP Pre-Call Guard
         v_args = effective_args if isinstance(effective_args, dict) else {}
         v_res = VascularTrafficMonitor.inspect_tool_event(mcp_tool, v_args)
         if not v_res.get("allowed", True):
@@ -3755,7 +4004,15 @@ def run_ide_pre_tool_hook(
             decision = "deny" if strict_deny else "ask"
             stage_triggered = 3
             reason = f"🛡️ Blood-Brain Barrier {v_res.get('reason')}"
-        elif srv_name == "chrome-devtools-mcp" and mcp_tool in (
+        else:
+            from whole_body_compute.organs.immune_mcp import inspect_mcp_tool_call
+
+            mcp_call_res = inspect_mcp_tool_call(mcp_tool, v_args, server_name=srv_name)
+            if not mcp_call_res.get("allowed", True):
+                decision = "deny"
+                stage_triggered = 3
+                reason = f"🛡️ Blood-Brain Barrier {mcp_call_res.get('reason')}"
+        if decision == "allow" and srv_name == "chrome-devtools-mcp" and mcp_tool in (
             "take_screenshot",
             "take_snapshot",
             "click",
@@ -3805,6 +4062,14 @@ def run_ide_pre_tool_hook(
             decision = "deny" if strict_deny else "ask"
             stage_triggered = 3
             reason = f"🛡️ Blood-Brain Barrier {v_res.get('reason')}"
+        else:
+            from whole_body_compute.organs.immune_mcp import inspect_mcp_tool_call
+
+            mcp_call_res = inspect_mcp_tool_call(tool_name, overwrite_args or args)
+            if not mcp_call_res.get("allowed", True):
+                decision = "deny"
+                stage_triggered = 3
+                reason = f"🛡️ Blood-Brain Barrier {mcp_call_res.get('reason')}"
     elif tool_name in SUBAGENT_TOOL_NAMES:
         target_path_str = f"subagent:{args.get('Role') or args.get('role') or args.get('TypeName') or ''}"[:120]
         for p_key in ("Prompt", "prompt"):
@@ -3822,7 +4087,24 @@ def run_ide_pre_tool_hook(
                 audit_log_path=audit_log_path,
             )
         type_name = str(args.get("TypeName") or args.get("typeName") or "").strip().lower()
-        if type_name == "image-generator":
+        if type_name == "wbc-bench":
+            if conv_id in _BENCH_POLL_STATE:
+                _BENCH_POLL_STATE[conv_id]["bench_poll_count"] = 0
+                _BENCH_POLL_STATE[conv_id]["bench_task_active"] = False
+            model_val = args.get("Model") or args.get("model")
+            model_str = str(model_val or "").strip().lower()
+            role_str = str(args.get("Role") or args.get("role") or "")
+            prompt_str = str(args.get("Prompt") or args.get("prompt") or "")
+            has_frontier_override = "[frontier]" in f"{role_str} {prompt_str}".lower()
+            if (not model_str or model_str in ("inherit", "default", "none")) and not has_frontier_override:
+                overwrite_args = dict(args)
+                overwrite_args["Model"] = "flash_lite"
+                decision = "allow"
+                reason = "Blood-Brain Barrier FinOps Gate: Auto-rewrote wbc-bench Model to 'flash_lite'"
+            else:
+                decision = "allow"
+                reason = f"Blood-Brain Barrier FinOps Gate: wbc-bench model '{model_val or 'flash_lite'}' approved"
+        elif type_name == "image-generator":
             decision = "allow"
             reason = "Blood-Brain Barrier FinOps Gate: image-generator subagent approved"
         elif not is_strict_test:  # [direct-edit]
@@ -3967,6 +4249,24 @@ def run_ide_pre_tool_hook(
                 decision = "allow"
                 reason = "Blood-Brain Barrier Anti-Polling Gate: First status check permitted"
 
+    bench_poll_advisory_msg = ""
+    if decision == "allow":
+        bench_poll_advisory_msg = _evaluate_bench_polling_advisory(
+            conv_id=conv_id,
+            tool_name=tool_name,
+            args=args,
+            payload=payload,
+            is_subagent=_is_subagent_conversation(conv_id, payload),
+        )
+        if bench_poll_advisory_msg:
+            _stash_preinv_context(conv_id, bench_poll_advisory_msg)
+            try:
+                from whole_body_compute.local.telemetry import upsert_session_context_telemetry
+
+                upsert_session_context_telemetry(conv_id, bench_poll_nudges_delta=1)
+            except Exception:
+                pass
+
     churn_info = _update_tactile_churn_on_pre(
         conv_id=conv_id,
         tool_name=tool_name,
@@ -4009,6 +4309,14 @@ def run_ide_pre_tool_hook(
         "pre_assert_count": pre_file_snap.assert_count if pre_file_snap else 0,
         "pre_tautological_asserts": pre_file_snap.tautological_asserts if pre_file_snap else 0,
         "pre_test_funcs": list(pre_file_snap.test_func_names) if pre_file_snap else [],
+        "cand_sha256": cand_file_snap.sha256 if cand_file_snap else "",
+        "cand_ast_digest": cand_file_snap.ast_structural_digest if cand_file_snap else "",
+        "cand_topology_digest": cand_file_snap.ast_topology_digest if cand_file_snap else "",
+        "cand_symbol_count": cand_file_snap.symbol_count if cand_file_snap else 0,
+        "cand_assert_count": cand_file_snap.assert_count if cand_file_snap else 0,
+        "cand_tautological_asserts": cand_file_snap.tautological_asserts if cand_file_snap else 0,
+        "cand_test_funcs": list(cand_file_snap.test_func_names) if cand_file_snap else [],
+        "cand_ast_syntax_valid": bool(cand_file_snap.ast_syntax_valid) if cand_file_snap else True,
         "seen_ast_digests": churn_info.get("seen_ast_digests", []),
         "touch_recorded": True,
         "pre_net_ast_progress": bool(churn_info.get("net_ast_progress", False)),
@@ -4023,10 +4331,12 @@ def run_ide_pre_tool_hook(
         "context_gate_triggered": context_gate_triggered,
         "read_auto_sliced": bool(read_auto_sliced),
         "bounded_slice_read": bounded_slice_read,
-        "fast_path": bounded_slice_read,
+        "fast_path": bool(bounded_slice_read and not read_auto_sliced),
         "direct_tokens_saved": direct_tokens_saved,
         "quadratic_tokens_saved": quadratic_tokens_saved,
     }
+    if pre_edit_code_for_shadow and decision != "deny":
+        pre_state_obj["pre_code"] = pre_edit_code_for_shadow
     with _PRE_STATE_MEM_CACHE_LOCK:
         if len(_PRE_STATE_MEM_CACHE) >= _MAX_PRE_STATE_MEM_CACHE:
             _PRE_STATE_MEM_CACHE.pop(next(iter(_PRE_STATE_MEM_CACHE)))
@@ -4064,8 +4374,9 @@ def run_ide_pre_tool_hook(
             "machine_marks_scrubbed": em_dash_healed,
             "context_gate_triggered": context_gate_triggered,
             "read_auto_sliced": bool(read_auto_sliced),
+            "read_exempt_or_small": bool(read_exempt_or_small),
             "bounded_slice_read": bounded_slice_read,
-            "fast_path": bounded_slice_read,
+            "fast_path": bool(bounded_slice_read and not read_auto_sliced),
             "direct_tokens_saved": direct_tokens_saved,
             "quadratic_tokens_saved": quadratic_tokens_saved,
             "latency_ms": elapsed_ms,
@@ -4076,10 +4387,11 @@ def run_ide_pre_tool_hook(
     )
 
     # Record live telemetry in ShieldTelemetryLedger (`body savings`) ONLY on active hook interventions # [direct-edit]
+    # Note: `git_commit_rewritten` and `inspection_fastpath_rewritten` already log `command_reflex` in `command_reflex.py`.
     if (
         context_gate_triggered
         or read_auto_sliced
-        or shell_auto_healed
+        or (shell_auto_healed and not git_commit_rewritten and not inspection_fastpath_rewritten)
         or secrets_blocked_in_airlock > 0
         or (stage_triggered == 3 and decision in ("deny", "ask"))
     ):
@@ -4137,17 +4449,43 @@ def run_ide_pre_tool_hook(
                 if ev_type == "ast_slice_gate"
                 else max(0, min(harness_ceiling, int(direct_tokens_saved or 0)))
             )
-            record_shield_event(
-                event_type=ev_type,
-                target=target_path_str or tool_name or "pre_tool_hook",
-                raw_tokens_est=raw_tok_est,
-                compressed_tokens_est=comp_tok_est,
-                tokens_saved=saved_tok_est,
-                secrets_blocked=secrets_blocked_in_airlock,
-                latency_ms=elapsed_ms,
-                action_mode=act_mode,
-                payload=payload,
-            )
+            if act_mode == "gate_allow" and saved_tok_est <= 0 and secrets_blocked_in_airlock <= 0:
+                pass
+            elif (
+                ev_type == "vascular_block"
+                and re.search(r"\bredcode_idx\d+\.py\b", str(target_path_str or ""), re.IGNORECASE)
+            ):
+                pass
+            else:
+                record_shield_event(
+                    event_type=ev_type,
+                    target=target_path_str or tool_name or "pre_tool_hook",
+                    raw_tokens_est=raw_tok_est,
+                    compressed_tokens_est=comp_tok_est,
+                    tokens_saved=saved_tok_est,
+                    secrets_blocked=secrets_blocked_in_airlock,
+                    latency_ms=elapsed_ms,
+                    action_mode=act_mode,
+                    payload=payload,
+                )
+            if (
+                ev_type == "ast_slice_gate"
+                and target_path_str
+                and act_mode in ("auto_slice", "hard_deny")
+                and (not os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("WBC_RUN_DIR"))
+            ):
+                try:
+                    wbc_run = Path(
+                        os.environ.get("WBC_RUN_DIR")
+                        or (Path(os.environ.get("WBC_DATA_DIR") or (Path.home() / ".whole_body_compute")) / "run")
+                    )
+                    wbc_run.mkdir(parents=True, exist_ok=True)
+                    slice_sentinel = wbc_run / "recent_ast_slices"
+                    if not slice_sentinel.is_symlink():
+                        b_name_only = Path(target_path_str).name
+                        slice_sentinel.write_text(f"{int(time.time())}|{b_name_only}|\n", encoding="utf-8")
+                except Exception:
+                    pass
         except Exception:
             pass
     elif tool_name in READ_TOOL_NAMES and target_path_str and decision == "allow":
@@ -4354,12 +4692,25 @@ def run_ide_pre_tool_hook(
         if is_strict_test:
             out["additionalContext"] = combined_ctx
 
+    if bench_poll_advisory_msg:
+        ephemeral_message = (
+            f"{ephemeral_message}\n{bench_poll_advisory_msg}"
+            if ephemeral_message
+            else bench_poll_advisory_msg
+        )
     has_zero_donut_or_slice_ctx = bool(
         read_auto_sliced
         or bbb_limit_passthrough
         or tail_bridged
         or foveal_jumped
-        or (ephemeral_message and "[Foveal Eyes & Hands Shortcut" in ephemeral_message)
+        or bench_poll_advisory_msg
+        or (
+            ephemeral_message
+            and (
+                "[Foveal Eyes & Hands Shortcut" in ephemeral_message
+                or "[WBC Context-Tax Nudge]" in ephemeral_message
+            )
+        )
     )  # [direct-edit]
     if ephemeral_message:
         if is_strict_test or has_zero_donut_or_slice_ctx:
@@ -4826,47 +5177,18 @@ def _has_posthog_personal_key() -> bool:
     )
 
 
-def _build_preinv_url_reflex(transcript_path_str: str) -> str:
+def _build_preinv_url_reflex(
+    transcript_path_str: str,
+    payload: Optional[Dict[str, Any]] = None,
+) -> str:
     """Emit a zero-bloat PreInvocation reflex only when the latest USER_INPUT carries an https:// URL."""
-    if not transcript_path_str:
-        return ""
-    tp = Path(transcript_path_str)
-    if not tp.is_file():
-        return ""
-    try:
-        size = tp.stat().st_size
-        with tp.open("rb") as fh:
-            if size > 8192:
-                fh.seek(size - 8192)
-            tail_text = fh.read().decode("utf-8", errors="replace")
-    except Exception:
-        return ""
+    from whole_body_compute.organs.command_reflex import extract_clean_user_prompt
 
-    last_obj: Optional[Dict[str, Any]] = None
-    for raw_ln in reversed(tail_text.splitlines()):
-        raw_ln = raw_ln.strip()
-        if not raw_ln:
-            continue
-        try:
-            obj = json.loads(raw_ln)
-        except Exception:
-            continue
-        if isinstance(obj, dict):
-            last_obj = obj
-            break
-
-    if not last_obj or last_obj.get("type") != "USER_INPUT":
+    user_text, is_fresh = extract_clean_user_prompt(payload, transcript_path_str=transcript_path_str)
+    if not is_fresh or not user_text:
         return ""
-    content_low = str(last_obj.get("content") or "").lower()
+    content_low = user_text.lower()
     if "https://" not in content_low:
-        if any(
-            kw in content_low
-            for kw in ("body eyes", "body hands", "eyes and hands", "hands and eyes", "logged-in chrome", "my screen")
-        ):
-            return (
-                "👁️✋ [WBC Foveal Eyes & Hands Reflex]: Use `uv run body eyes --app \"<App>\" --max-elements 60` "
-                "and `uv run body hands --app \"<App>\" --click <e_id>` instead of `browser` subagent, `osascript`, or `screencapture`."
-            )
         return ""
     if "posthog.com" in content_low and _has_posthog_personal_key():
         return (
@@ -4881,6 +5203,357 @@ def _build_preinv_url_reflex(transcript_path_str: str) -> str:
         "👁️✋ [WBC Live Chrome Reflex]: If this URL is already open or authenticated in Google Chrome, "
         "inspect it via `uv run body eyes --app \"Google Chrome\" --max-elements 120` before spawning an isolated `browser` subagent."
     )
+
+
+CSI_WARN_BUCKET_KB = 320.0
+
+
+def _resolve_transcript_metrics_for_hook(
+    payload: Dict[str, Any],
+    conv_id: str,
+) -> tuple[str, float]:
+    """Resolve `(transcript_path_str, transcript_kb)` from hook payload or conversation logs."""
+    transcript_path_str = str(payload.get("transcriptPath") or payload.get("transcript_path") or "").strip()
+    if not transcript_path_str and conv_id and conv_id not in ("local", "global"):
+        env_brain = os.environ.get("AGY_BRAIN_DIR") or os.environ.get("ANTIGRAVITY_BRAIN_DIR")
+        base_brain = Path(env_brain).expanduser() if env_brain else (Path.home() / ".gemini" / "antigravity" / "brain")
+        logs_dir = base_brain / conv_id / ".system_generated" / "logs"
+        cand_full = logs_dir / "transcript_full.jsonl"
+        cand_tp = logs_dir / "transcript.jsonl"
+        if cand_full.is_file() and not cand_full.is_symlink():
+            transcript_path_str = str(cand_full)
+        elif cand_tp.is_file() and not cand_tp.is_symlink():
+            transcript_path_str = str(cand_tp)
+    elif transcript_path_str:
+        tp_cand = Path(transcript_path_str)
+        if tp_cand.name == "transcript.jsonl":
+            sibling_full = tp_cand.with_name("transcript_full.jsonl")
+            if sibling_full.is_file() and not sibling_full.is_symlink():
+                transcript_path_str = str(sibling_full)
+    transcript_kb = 0.0
+    if transcript_path_str:
+        tp = Path(transcript_path_str)
+        if tp.is_file():
+            try:
+                transcript_kb = round(tp.stat().st_size / 1024.0, 1)
+            except Exception:
+                pass
+    if transcript_kb <= 0.0:
+        try:
+            transcript_kb = float(payload.get("transcript_kb") or payload.get("transcriptKb") or 0.0)
+        except (TypeError, ValueError):
+            transcript_kb = 0.0
+    return (transcript_path_str, transcript_kb)
+
+
+def _inspect_hook_transcript_post_checkpoint(
+    transcript_path_str: str,
+    fallback_kb: float,
+) -> Tuple[int, float, int, bool]:
+    """
+    Stream transcript line-by-line to compute `(active_steps, active_kb, compaction_count, has_side_question)`.
+    Only counts a line as a compaction boundary when `json.loads(line).get("type") == "CHECKPOINT"`,
+    preventing tool outputs mentioning `"CHECKPOINT"` from spoofing a compaction reset.
+    """
+    if not transcript_path_str:
+        return (0, fallback_kb, 0, False)
+    tp = Path(transcript_path_str)
+    if not tp.is_file():
+        return (0, fallback_kb, 0, False)
+
+    total_steps = 0
+    total_bytes = 0
+    compaction_count = 0
+    active_steps = 0
+    active_bytes = 0
+    has_side_question = False
+
+    try:
+        with open(tp, "rb") as fh:
+            for raw_line in fh:
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+                line_len = len(raw_line)
+                total_steps += 1
+                total_bytes += line_len
+
+                if not has_side_question and (
+                    b"<side_question>" in stripped or b"</side_question>" in stripped
+                ):
+                    try:
+                        sq_obj = json.loads(stripped.decode("utf-8", errors="replace"))
+                        if isinstance(sq_obj, dict) and sq_obj.get("type") in (
+                            "USER_INPUT",
+                            "SYSTEM",
+                            "SYSTEM_MESSAGE",
+                            "user",
+                            None,
+                        ):
+                            has_side_question = True
+                    except Exception:
+                        if total_steps <= 10:
+                            has_side_question = True
+
+                is_cp = False
+                if b"CHECKPOINT" in stripped and b"type" in stripped:
+                    try:
+                        cp_obj = json.loads(stripped.decode("utf-8", errors="replace"))
+                        if isinstance(cp_obj, dict) and cp_obj.get("type") == "CHECKPOINT":
+                            is_cp = True
+                    except Exception:
+                        is_cp = False
+
+                if is_cp:
+                    compaction_count += 1
+                    active_steps = 1
+                    active_bytes = line_len
+                else:
+                    active_steps += 1
+                    active_bytes += line_len
+    except Exception:
+        return (0, fallback_kb, 0, False)
+
+    if compaction_count > 0:
+        active_kb = round(active_bytes / 1024.0, 1)
+    else:
+        active_kb = fallback_kb if fallback_kb > 0.0 else round(total_bytes / 1024.0, 1)
+    return (active_steps, active_kb, compaction_count, has_side_question)
+
+
+_BENCH_WORKLOAD_RE = re.compile(
+    r"(benchmarks/|swe[-_]?bench|agentdojo|cyberseceval|os[-_]?harm|"
+    r"qlora|lora|mlx_lm|shadow[-_]?suite|gauntlet|pareto|localbench|muse_benchmark)",
+    re.IGNORECASE,
+)
+_HEAVY_ROOT_MODEL_RE = re.compile(
+    r"(carbon|hydrogen|pro|opus|sonnet|gpt-5)",
+    re.IGNORECASE,
+)
+_LIGHT_MODEL_RE = re.compile(
+    r"(flash_lite|flash|neon|haiku|mini|nano)",
+    re.IGNORECASE,
+)
+_BENCH_POLL_STATE: Dict[str, Dict[str, Any]] = {}
+
+
+def _inspect_root_snowball_metrics(
+    transcript_path_str: str,
+    fallback_kb: float,
+) -> Dict[str, Any]:
+    """Single-pass byte-filtered transcript scanner for root snowball metrics (<3ms on 1MB)."""
+    metrics: Dict[str, Any] = {
+        "active_planner_turns": 0,
+        "latest_ctx": int((fallback_kb * 1024) / 4) if fallback_kb > 0.0 else 0,
+        "max_ctx": 0,
+        "turns_over_100k": 0,
+        "subagent_calls": 0,
+        "active_model": "",
+        "compaction_count": 0,
+    }
+    if not transcript_path_str:
+        return metrics
+    tp = Path(transcript_path_str)
+    if not tp.is_file():
+        return metrics
+
+    active_bytes = 0
+    try:
+        with open(tp, "rb") as fh:
+            for raw_line in fh:
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+                active_bytes += len(raw_line)
+                if b"CHECKPOINT" in stripped and b"type" in stripped:
+                    try:
+                        cp_obj = json.loads(stripped.decode("utf-8", errors="replace"))
+                        if isinstance(cp_obj, dict) and cp_obj.get("type") == "CHECKPOINT":
+                            metrics["compaction_count"] += 1
+                            metrics["active_planner_turns"] = 0
+                            metrics["latest_ctx"] = 0
+                            metrics["subagent_calls"] = 0
+                            active_bytes = len(raw_line)
+                            continue
+                    except Exception:
+                        pass
+
+                if b"PLANNER_RESPONSE" in stripped:
+                    try:
+                        step = json.loads(stripped.decode("utf-8", errors="replace"))
+                        if isinstance(step, dict) and step.get("type") == "PLANNER_RESPONSE":
+                            metrics["active_planner_turns"] += 1
+                            in_tok = int(step.get("input_tokens") or 0)
+                            cache_tok = int(step.get("cache_read_tokens") or 0)
+                            ctx_tok = (
+                                in_tok + cache_tok
+                                if (in_tok + cache_tok) > 0
+                                else int(active_bytes / 4)
+                            )
+                            metrics["latest_ctx"] = ctx_tok
+                            if ctx_tok > metrics["max_ctx"]:
+                                metrics["max_ctx"] = ctx_tok
+                            if ctx_tok > 100_000:
+                                metrics["turns_over_100k"] += 1
+                            if step.get("model"):
+                                metrics["active_model"] = str(step["model"])
+                    except Exception:
+                        pass
+                elif b"invoke_subagent" in stripped or b'"Task"' in stripped or b'"Agent"' in stripped:
+                    metrics["subagent_calls"] += 1
+                elif b"Model Selection" in stripped:
+                    try:
+                        obj = json.loads(stripped.decode("utf-8", errors="replace"))
+                        if isinstance(obj, dict) and obj.get("model"):
+                            metrics["active_model"] = str(obj["model"])
+                    except Exception:
+                        pass
+    except Exception:
+        return metrics
+    return metrics
+
+
+def _evaluate_bench_polling_advisory(
+    *,
+    conv_id: str,
+    tool_name: str,
+    args: Dict[str, Any],
+    payload: Dict[str, Any],
+    is_subagent: bool,
+) -> str:
+    """Detect root carbon/hydrogen benchmark polling loops and return a soft advisory."""
+    if is_subagent:
+        return ""
+    model_str = str(
+        payload.get("model")
+        or payload.get("activeModel")
+        or os.environ.get("WBC_ACTIVE_MODEL", "")
+    ).strip()
+    if not model_str or _LIGHT_MODEL_RE.search(model_str) or not _HEAVY_ROOT_MODEL_RE.search(model_str):
+        return ""
+
+    state = _BENCH_POLL_STATE.setdefault(conv_id, {})
+
+    args_text = json.dumps(args, ensure_ascii=False)
+    matches_bench = bool(_BENCH_WORKLOAD_RE.search(args_text))
+
+    if tool_name in ("run_command", "Bash", "execute_command", "developer__shell"):
+        wait_ms = args.get("WaitMsBeforeAsync")
+        notif_sec = args.get("NotificationTimeoutSeconds")
+        is_async = (wait_ms is not None and int(wait_ms) <= 2000) or (notif_sec is not None)
+        if is_async and matches_bench:
+            state["bench_task_active"] = True
+            return ""
+        cmd_str = str(args.get("CommandLine") or args.get("command") or "").strip()
+        is_probe = bool(re.match(r"^\s*(ps|pgrep|tail|wc\s+-l|ls\s+-l|cat)\b", cmd_str))
+        if not (is_probe and (state.get("bench_task_active") or matches_bench)):
+            return ""
+    elif tool_name == "manage_task":
+        action_val = str(args.get("Action") or args.get("action") or "").strip().lower()
+        if action_val not in ("status", "list"):
+            return ""
+        if not (state.get("bench_task_active") or matches_bench):
+            return ""
+    elif tool_name == "schedule":
+        if not (state.get("bench_task_active") or matches_bench):
+            return ""
+    else:
+        return ""
+
+    poll_count = int(state.get("bench_poll_count", 0)) + 1
+    state["bench_poll_count"] = poll_count
+    if poll_count not in (2, 5, 10):
+        return ""
+
+    return (
+        f"[🏎️ BBB Benchmark Polling Advisory (poll #{poll_count} on {model_str})]: "
+        "Root carbon/hydrogen turns re-ingest full context on every timer/task poll. "
+        "Stop polling via schedule/manage_task and delegate single-flight benchmark, eval, or training runs to "
+        'invoke_subagent(TypeName="wbc-bench", Model="flash_lite", Workspace="inherit") for a <=300-token scorecard.'
+    )
+
+
+def _is_btw_side_thread(
+    payload: Dict[str, Any],
+    transcript_kb: float,
+    raw_initial_steps: int,
+    has_side_question_in_tp: bool = False,
+) -> bool:
+    """Detect ephemeral `/btw` side-question threads so Organ 04 flush nudges never misfire."""
+    if has_side_question_in_tp:
+        return True
+    prompt_str = str(
+        payload.get("lastUserInput")
+        or payload.get("prompt")
+        or payload.get("userPrompt")
+        or ""
+    )
+    if "<side_question>" in prompt_str or "</side_question>" in prompt_str:
+        return True
+    has_explicit_tp = bool(payload.get("transcriptPath") or payload.get("transcript_path"))
+    if raw_initial_steps >= 100 and (
+        0.0 < transcript_kb < 32.0 or (has_explicit_tp and transcript_kb < 32.0)
+    ):
+        return True
+    return False
+
+
+def _parse_csi_watermark(raw: str) -> Tuple[int, int]:
+    """Parse `<epoch>:<bucket>` or legacy `<bucket>` watermark content into `(epoch, bucket)`."""
+    s = (raw or "").strip()
+    if not s:
+        return (0, 0)
+    if ":" in s:
+        ep_s, bk_s = s.split(":", 1)
+        try:
+            return (max(0, int(ep_s.strip() or "0")), max(0, int(bk_s.strip() or "0")))
+        except ValueError:
+            return (0, 0)
+    try:
+        return (0, max(0, int(s)))
+    except ValueError:
+        return (0, 0)
+
+
+def _check_and_mark_csi_bucket(
+    conv_id: str,
+    transcript_kb: float,
+    bucket_kb: float = CSI_WARN_BUCKET_KB,
+    *,
+    steps: int = 0,
+    min_bucket: int = 1,
+    compaction_count: int = 0,
+) -> int:
+    """Return new 320KB/step saturation bucket index (>=min_bucket) once per compaction-epoch crossing."""
+    byte_bucket = int(transcript_kb // bucket_kb) if transcript_kb >= bucket_kb else 0
+    step_bucket = 3 if steps >= 350 else (2 if steps >= 280 else (1 if steps >= 150 else 0))
+    csi_bucket = max(byte_bucket, step_bucket)
+    if csi_bucket < min_bucket:
+        return 0
+    cur_epoch = max(0, int(compaction_count))
+    safe_conv_marker = re.sub(r"[^A-Za-z0-9_-]", "", str(conv_id or "global"))[:64] or "global"
+    marker_path = _get_wbc_run_dir() / f"wbc_csi_warned_{safe_conv_marker}"
+    last_epoch = 0
+    last_bucket = 0
+    try:
+        if marker_path.is_file():
+            last_epoch, last_bucket = _parse_csi_watermark(
+                marker_path.read_text(encoding="utf-8")
+            )
+    except Exception:
+        last_epoch, last_bucket = (0, 0)
+    if cur_epoch > last_epoch:
+        last_bucket = 0
+    elif cur_epoch < last_epoch:
+        return 0
+    if csi_bucket <= last_bucket:
+        return 0
+    try:
+        marker_val = f"{cur_epoch}:{csi_bucket}" if cur_epoch > 0 else str(csi_bucket)
+        marker_path.write_text(marker_val, encoding="utf-8")
+    except Exception:
+        pass
+    return csi_bucket
 
 
 def run_ide_pre_invocation_hook(
@@ -4898,19 +5571,7 @@ def run_ide_pre_invocation_hook(
     t0 = time.perf_counter()
     conv_id = str(payload.get("conversationId") or payload.get("conversation_id") or "local")
     steps = int(payload.get("initialNumSteps", payload.get("stepIdx", 0)) or 0)
-    transcript_path_str = str(payload.get("transcriptPath") or payload.get("transcript_path") or "").strip()
-    if not transcript_path_str and conv_id and conv_id != "local":
-        cand_tp = Path.home() / ".gemini" / "antigravity" / "brain" / conv_id / ".system_generated" / "logs" / "transcript.jsonl"
-        if cand_tp.is_file():
-            transcript_path_str = str(cand_tp)
-    transcript_kb = 0.0
-    if transcript_path_str:
-        tp = Path(transcript_path_str)
-        if tp.is_file():
-            try:
-                transcript_kb = round(tp.stat().st_size / 1024.0, 1)
-            except Exception:
-                pass
+    transcript_path_str, transcript_kb = _resolve_transcript_metrics_for_hook(payload, conv_id)
 
     explicit_streak = int(
         payload.get("exploratory_streak") or payload.get("exploratoryStreak") or 0
@@ -4924,11 +5585,14 @@ def run_ide_pre_invocation_hook(
     is_strict_test = bool(  # [direct-edit]
         os.environ.get("PYTEST_CURRENT_TEST")
         or os.environ.get("VOICEFI_STRICT_TEST_HOOK") == "1"
+    ) and not (
+        os.environ.get("WBC_SUBCONSCIOUS_FIREWALL") == "1"
+        or bool(payload.get("subconscious_firewall"))
     )
     is_subagent = _is_subagent_conversation(conv_id, payload)  # [direct-edit]
     subagent_escalation_nudge = is_strict_test and exploratory_streak > 2 and not is_subagent
 
-    csi_est = round(max(steps / 85.0, transcript_kb / 900.0), 2)
+    csi_est = round(max(steps / 85.0, transcript_kb / 400.0), 2)
     inject_steps: List[Dict[str, Any]] = []
     nudge_emitted = False
     msg_parts: List[str] = []
@@ -4970,28 +5634,158 @@ def run_ide_pre_invocation_hook(
                 "(3) Delegate multi-step cloud work (>2 tool calls) to an ephemeral `flash` or `inherit` subagent "
                 "to avoid main-thread quadratic turn re-ingestion.]"
             )
-    elif not is_strict_test and not is_subagent and transcript_kb >= 900.0:
-        csi_bucket = int(transcript_kb // 900.0)
-        safe_conv_marker = re.sub(r"[^A-Za-z0-9_-]", "", str(conv_id or "global"))[:64] or "global"
-        marker_path = _get_wbc_run_dir() / f"wbc_csi_warned_{safe_conv_marker}"
-        last_bucket = 0
-        try:
-            if marker_path.is_file():
-                last_bucket = int(marker_path.read_text(encoding="utf-8").strip() or "0")
-        except Exception:
-            last_bucket = 0
-        if csi_bucket > last_bucket:
-            try:
-                marker_path.write_text(str(csi_bucket), encoding="utf-8")
-            except Exception:
-                pass
-            nudge_emitted = True
-            msg_parts.append(
-                f"[🔴 Organ 04 Cognitive Saturation Alert (CSI={csi_est:.2f} RED, transcript={transcript_kb:.0f}KB, steps={steps})]: "
-                "This conversation has crossed the RED Context Saturation threshold (>=900KB). "
-                "After completing the current turn, proactively notify the user that Context Saturation is RED "
-                "and offer to run `body flush --auto --goal \"...\" --milestone \"...\" --next-step \"...\"` (or `/compact`) to hand off to a fresh conversation."
+
+    if not is_subagent:
+        inv_raw = payload.get("invocationNum")
+        is_midturn_inv = (
+            inv_raw is not None
+            and not isinstance(inv_raw, bool)
+            and str(inv_raw).strip().isdigit()
+            and int(inv_raw) >= 1
+        )
+        if not is_midturn_inv:
+            raw_steps = steps
+            compaction_count = 0
+            active_kb = transcript_kb
+            has_side_q = False
+            if transcript_path_str and Path(transcript_path_str).is_file():
+                tp_active_steps, tp_active_kb, compaction_count, has_side_q = (
+                    _inspect_hook_transcript_post_checkpoint(transcript_path_str, transcript_kb)
+                )
+                eff_steps = tp_active_steps
+                active_kb = tp_active_kb
+            else:
+                eff_steps = raw_steps
+
+            is_btw = _is_btw_side_thread(
+                payload,
+                transcript_kb=transcript_kb,
+                raw_initial_steps=raw_steps,
+                has_side_question_in_tp=has_side_q,
             )
+            if not is_strict_test:
+                crossed_bucket = (
+                    0
+                    if is_btw
+                    else _check_and_mark_csi_bucket(
+                        conv_id,
+                        active_kb,
+                        steps=eff_steps,
+                        min_bucket=1,
+                        compaction_count=compaction_count,
+                    )
+                )
+                if crossed_bucket > 0:
+                    from whole_body_compute.finops_audit import calculate_csi
+
+                    canon_csi, canon_tier = calculate_csi(
+                        steps=eff_steps,
+                        full_size_kb=active_kb,
+                        compaction_count=compaction_count,
+                    )
+                    csi_est = round(canon_csi, 2)
+                    nudge_emitted = True
+                    conv_flag = (
+                        f" --conv-id {shlex.quote(conv_id)}"
+                        if conv_id and conv_id not in ("local", "global")
+                        else ""
+                    )
+                    if crossed_bucket == 1:
+                        msg_parts.append(
+                            f"[🟡 Organ 04 Cognitive Saturation Soft Nudge (CSI={canon_csi:.2f} YELLOW, transcript={active_kb:.0f}KB, steps={eff_steps})]: "
+                            f"FinOps sweet spot reached (>={int(CSI_WARN_BUCKET_KB)}KB / ~80k tok). "
+                            f"At the end of your reply, add a brief 1-line footer letting the user know they can say `flush` (or `/compact`) at the next phase boundary (or run `body flush --auto{conv_flag}`)."
+                        )
+                    else:
+                        alert_tier = (
+                            "RED"
+                            if (crossed_bucket >= 3 or canon_tier == "RED")
+                            else "HARD-YELLOW"
+                        )
+                        msg_parts.append(
+                            f"[🔴 Organ 04 Cognitive Saturation Alert (CSI={canon_csi:.2f} {alert_tier}, transcript={active_kb:.0f}KB, steps={eff_steps})]: "
+                            f"This conversation has crossed >={crossed_bucket * int(CSI_WARN_BUCKET_KB)}KB (approaching/exceeding the 200k-token pricing & latency cliff). "
+                            "After completing the current turn, proactively notify the user and offer to run "
+                            f'`body flush --auto{conv_flag} --goal "..." --milestone "..." --next-step "..."` (or `/compact`) to hand off to a fresh conversation.'
+                        )
+
+            if not is_btw:
+                snowball_metrics = _inspect_root_snowball_metrics(transcript_path_str, active_kb)
+                try:
+                    from whole_body_compute.local.reflex_gate import evaluate_context_snowball_guard
+
+                    sb_res = evaluate_context_snowball_guard(
+                        latest_ctx=snowball_metrics["latest_ctx"],
+                        active_turns=snowball_metrics["active_planner_turns"],
+                        subagent_calls=snowball_metrics["subagent_calls"],
+                        is_subagent=is_subagent,
+                        is_btw=is_btw,
+                    )
+                except Exception:
+                    sb_res = {"fire": False}
+
+                sb_nudges_delta = 0
+                if sb_res.get("fire") or sb_res.get("should_fire"):
+                    sb_tier = (
+                        2
+                        if (
+                            snowball_metrics["latest_ctx"] >= 150_000
+                            or (
+                                snowball_metrics["active_planner_turns"] >= 45
+                                and snowball_metrics["subagent_calls"] == 0
+                            )
+                        )
+                        else 1
+                    )
+                    safe_marker = re.sub(r"[^a-zA-Z0-9._-]+", "_", conv_id or "local")[:80]
+                    warn_file = _get_wbc_run_dir() / f"wbc_snowball_warned_{safe_marker}"
+                    epoch_key = f"{compaction_count}:{sb_tier}"
+                    prev_epoch = ""
+                    if warn_file.is_file():
+                        try:
+                            prev_epoch = warn_file.read_text(encoding="utf-8").strip()
+                        except Exception:
+                            prev_epoch = ""
+                    if prev_epoch != epoch_key:
+                        try:
+                            warn_file.write_text(epoch_key, encoding="utf-8")
+                        except Exception:
+                            pass
+                        nudge_emitted = True
+                        sb_nudges_delta = 1
+                        conv_flag = (
+                            f" --conv-id {shlex.quote(conv_id)}"
+                            if conv_id and conv_id not in ("local", "global")
+                            else ""
+                        )
+                        if sb_tier >= 2:
+                            msg_parts.append(
+                                f"[🔴 BBB Context Snowball Tier 2 Alert (ctx={snowball_metrics['latest_ctx']:,} tok, turns={snowball_metrics['active_planner_turns']})]: "
+                                f"Approaching 200K cliff. Finish this step and offer `body flush --auto{conv_flag}` immediately."
+                            )
+                        else:
+                            msg_parts.append(
+                                f"[🟡 BBB Context Snowball Guard (ctx={snowball_metrics['latest_ctx']:,} tok, turns={snowball_metrics['active_planner_turns']}, subagents={snowball_metrics['subagent_calls']})]: "
+                                f'Delegate next phase via `invoke_subagent(TypeName="wbc-builder", Model="inherit")` or run `body flush --auto{conv_flag} --goal "..." --milestone "..." --next-step "..."` (or `/compact`).'
+                            )
+                try:
+                    from whole_body_compute.local.telemetry import upsert_session_context_telemetry
+
+                    upsert_session_context_telemetry(
+                        conv_id,
+                        active_model=snowball_metrics.get("active_model") or "",
+                        is_subagent=False,
+                        planner_turns=snowball_metrics["active_planner_turns"],
+                        active_steps=eff_steps,
+                        max_ctx=snowball_metrics["max_ctx"],
+                        latest_ctx=snowball_metrics["latest_ctx"],
+                        turns_over_100k=snowball_metrics["turns_over_100k"],
+                        subagent_calls=snowball_metrics["subagent_calls"],
+                        compaction_count=compaction_count,
+                        snowball_nudges_delta=sb_nudges_delta,
+                    )
+                except Exception:
+                    pass
 
     stashed_preinv = _pop_preinv_context(conv_id)
     if stashed_preinv:
@@ -5000,7 +5794,7 @@ def run_ide_pre_invocation_hook(
     termination_behavior = ""
     cmd_reflex_res: Dict[str, Any] = {}
     if not is_subagent:
-        url_reflex = _build_preinv_url_reflex(transcript_path_str)
+        url_reflex = _build_preinv_url_reflex(transcript_path_str, payload=payload)
         if url_reflex:
             inject_steps.append({"systemMessage": {"systemMessage": url_reflex}})
         try:
@@ -5372,6 +6166,93 @@ def _evaluate_stdout_compaction_reflex(
     )
 
 
+def _maybe_dispatch_idle_edit_shadow(
+    *,
+    tool_name: str,
+    raw_edit_path: Optional[Any],
+    args: Dict[str, Any],
+    payload: Dict[str, Any],
+    pre_info: Dict[str, Any],
+    conv_id: str,
+    step_idx: int,
+) -> bool:
+    """
+    Dispatch idle-only background `:9379` shadow eval on single-file edits (`<= 40` lines)
+    when `WBC_ROUTER_SHADOW=1`. Never spawns unmocked live HTTP calls under headless/testing
+    unless `WBC_ENABLE_EDIT_SHADOW_IN_TESTS=1`.
+    """
+    if os.environ.get("WBC_ROUTER_SHADOW") != "1":
+        return False
+    in_test_or_headless = bool(
+        os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("WBC_TESTING") == "1"
+        or os.environ.get("WBC_HEADLESS") == "1"
+    )
+    if in_test_or_headless and os.environ.get("WBC_ENABLE_EDIT_SHADOW_IN_TESTS") != "1":
+        return False
+    if not raw_edit_path or tool_name not in WRITE_EDIT_TOOL_NAMES:
+        return False
+    if pre_info.get("decision") == "deny":
+        return False
+    if tool_name == "developer__text_editor" and str(args.get("command", "")).strip().lower() in ("view", "read"):
+        return False
+
+    raw_path = str(raw_edit_path).strip()
+    if not raw_path or _is_sensitive_credential_path(raw_path):
+        return False
+    edit_p = Path(os.path.expanduser(raw_path))
+    if edit_p.suffix.lower() in BINARY_MEDIA_EXTENSIONS:
+        return False
+
+    post_code = ""
+    if edit_p.is_file():
+        try:
+            raw_b = edit_p.read_bytes()
+            if len(raw_b) <= 120_000:
+                post_code = raw_b.decode("utf-8", errors="replace")
+        except Exception:
+            post_code = ""
+
+    old_snippet = str(args.get("old_string") or args.get("Target") or "")
+    new_snippet = str(args.get("new_string") or args.get("Replacement") or "")
+    if not old_snippet and not new_snippet and isinstance(args.get("edits"), list) and args["edits"]:
+        first_ed = args["edits"][0]
+        if isinstance(first_ed, dict):
+            old_snippet = str(first_ed.get("old_string") or first_ed.get("Target") or "")
+            new_snippet = str(first_ed.get("new_string") or first_ed.get("Replacement") or "")
+
+    pre_code = str(pre_info.get("pre_code") or "")
+    if not pre_code and post_code and old_snippet and new_snippet and new_snippet in post_code:
+        pre_code = post_code.replace(new_snippet, old_snippet, 1)
+    if not pre_code:
+        return False
+
+    instruction = str(
+        args.get("Instruction")
+        or args.get("instruction")
+        or args.get("summary")
+        or args.get("description")
+        or payload.get("instruction")
+        or ""
+    ).strip()
+
+    try:
+        from whole_body_compute.local.reflex_gate import dispatch_idle_edit_shadow_eval
+
+        return dispatch_idle_edit_shadow_eval(
+            file_path=str(edit_p),
+            pre_code=pre_code,
+            post_code=post_code,
+            instruction=instruction,
+            old_snippet=old_snippet,
+            new_snippet=new_snippet,
+            conv_id=conv_id,
+            step_idx=int(step_idx or 0),
+        )
+    except Exception:
+        return False
+
+
 def run_ide_post_tool_hook(
     payload: Dict[str, Any],
     audit_log_path: Optional[Path | str] = None,
@@ -5397,8 +6278,10 @@ def run_ide_post_tool_hook(
     ).strip()
     args = (
         tool_call.get("args")
+        or tool_call.get("arguments")
         or tool_call.get("input")
         or payload.get("tool_input")
+        or payload.get("arguments")
         or payload.get("args")
         or {}
     )
@@ -5478,73 +6361,111 @@ def run_ide_post_tool_hook(
         except Exception:
             pass
 
-    from whole_body_compute.redaction import contains_secret, count_new_redactions, redact_secrets
+    from whole_body_compute.redaction import count_new_redactions, redact_secrets
 
     scrubbed_resp = None
     redacted_cnt = 0
     secret_detected = bool(_FAST_SECRET_RE.search(tool_resp_str))
+    may_have_secret = secret_detected or (
+        len(tool_resp_str) >= 16
+        and (
+            ":" in tool_resp_str
+            or "=" in tool_resp_str
+            or "-----" in tool_resp_str
+            or " is " in tool_resp_str.lower()
+            or bool(re.search(r"[A-Za-z0-9+/_\-.]{14,}", tool_resp_str))
+        )
+    )
 
     if isinstance(tool_resp, str):
-        if secret_detected or contains_secret(tool_resp):
+        if may_have_secret:
             scrubbed_resp = redact_secrets(tool_resp)
-            redacted_cnt = count_new_redactions(tool_resp, scrubbed_resp)
-            secret_detected = redacted_cnt > 0
+            if scrubbed_resp != tool_resp:
+                redacted_cnt = count_new_redactions(tool_resp, scrubbed_resp)
+                secret_detected = redacted_cnt > 0
             if not secret_detected:
                 scrubbed_resp = None
     elif isinstance(tool_resp, (dict, list)):
-        from whole_body_compute.redaction import _NON_CREDENTIAL_KEY_RE, _SECRET_KEYWORD, REDACTION_PLACEHOLDER
+        if may_have_secret:
+            from whole_body_compute.redaction import _NON_CREDENTIAL_KEY_RE, _SECRET_KEYWORD, REDACTION_PLACEHOLDER
 
-        _kw_key_re = re.compile(rf"(?i)^{_SECRET_KEYWORD}$|{_SECRET_KEYWORD}")
+            _kw_key_re = re.compile(rf"(?i)^{_SECRET_KEYWORD}$|{_SECRET_KEYWORD}")
 
-        def _redact_obj(obj: Any) -> tuple[Any, int]:
-            if isinstance(obj, str):
-                sc = redact_secrets(obj)
-                return sc, count_new_redactions(obj, sc)
-            if isinstance(obj, list):
-                out_list = []
-                tot = 0
-                for item in obj:
-                    new_item, cnt = _redact_obj(item)
-                    out_list.append(new_item)
-                    tot += cnt
-                return out_list, tot
-            if isinstance(obj, dict):
-                out_dict: Dict[str, Any] = {}
-                tot = 0
-                for dk, dv in obj.items():
-                    dk_str = str(dk)
-                    if (
-                        isinstance(dv, str)
-                        and len(dv.strip()) >= 6
-                        and _kw_key_re.search(dk_str)
-                        and not _NON_CREDENTIAL_KEY_RE.match(dk_str)
-                        and dv.strip().lower() not in ("true", "false", "null", "none", "yes", "no")
-                    ):
-                        out_dict[dk] = REDACTION_PLACEHOLDER
-                        tot += 1
-                    else:
-                        new_v, cnt = _redact_obj(dv)
-                        out_dict[dk] = new_v
+            def _redact_obj(obj: Any) -> tuple[Any, int]:
+                if isinstance(obj, str):
+                    sc = redact_secrets(obj)
+                    return sc, count_new_redactions(obj, sc)
+                if isinstance(obj, list):
+                    out_list = []
+                    tot = 0
+                    for item in obj:
+                        new_item, cnt = _redact_obj(item)
+                        out_list.append(new_item)
                         tot += cnt
-                return out_dict, tot
-            return obj, 0
+                    return out_list, tot
+                if isinstance(obj, dict):
+                    out_dict: Dict[str, Any] = {}
+                    tot = 0
+                    for dk, dv in obj.items():
+                        dk_str = str(dk)
+                        if (
+                            isinstance(dv, str)
+                            and len(dv.strip()) >= 6
+                            and _kw_key_re.search(dk_str)
+                            and not _NON_CREDENTIAL_KEY_RE.match(dk_str)
+                            and dv.strip().lower() not in ("true", "false", "null", "none", "yes", "no")
+                        ):
+                            out_dict[dk] = REDACTION_PLACEHOLDER
+                            tot += 1
+                        else:
+                            new_v, cnt = _redact_obj(dv)
+                            out_dict[dk] = new_v
+                            tot += cnt
+                    return out_dict, tot
+                return obj, 0
 
-        raw_json = json.dumps(tool_resp)
-        if secret_detected or contains_secret(raw_json):
-            scrubbed_obj, redacted_cnt = _redact_obj(tool_resp)
-            secret_detected = redacted_cnt > 0
-            if secret_detected:
-                scrubbed_resp = scrubbed_obj
+            if secret_detected or redact_secrets(tool_resp_str) != tool_resp_str:
+                scrubbed_obj, redacted_cnt = _redact_obj(tool_resp)
+                secret_detected = redacted_cnt > 0
+                if secret_detected:
+                    scrubbed_resp = scrubbed_obj
     elif tool_resp is not None:
         raw_str = str(tool_resp)
-        if secret_detected or contains_secret(raw_str):
+        if may_have_secret:
             scrubbed_resp = redact_secrets(raw_str)
-            redacted_cnt = count_new_redactions(raw_str, scrubbed_resp)
-            secret_detected = redacted_cnt > 0
+            if scrubbed_resp != raw_str:
+                redacted_cnt = count_new_redactions(raw_str, scrubbed_resp)
+                secret_detected = redacted_cnt > 0
             if not secret_detected:
                 scrubbed_resp = None
 
     effective_resp = scrubbed_resp if (secret_detected and scrubbed_resp is not None) else tool_resp
+    mcp_resp_quarantined = False
+    mcp_resp_detections: List[Dict[str, Any]] = []
+    if (
+        effective_resp is not None
+        and (
+            tool_name == "call_mcp_tool"
+            or tool_name.startswith("mcp__")
+            or tool_name.startswith("mcp_")
+        )
+    ):
+        from whole_body_compute.organs.immune_mcp import sanitize_mcp_tool_response
+
+        mcp_srv = str(args.get("ServerName") or "") if isinstance(args, dict) else ""
+        mcp_t = str(args.get("ToolName") or tool_name) if isinstance(args, dict) else tool_name
+        mcp_post = sanitize_mcp_tool_response(
+            mcp_t,
+            effective_resp,
+            server_name=mcp_srv,
+            wrap_untrusted_tags=True,
+            record_antigen=False,
+        )
+        if mcp_post.get("poisoned"):
+            mcp_resp_quarantined = True
+            mcp_resp_detections = list(mcp_post.get("detections") or [])
+            effective_resp = mcp_post.get("sanitized_response")
+            scrubbed_resp = effective_resp
     is_strict_test = _is_legacy_strict_test(payload)
     truncation_offenders = _get_truncation_cascade_offenders() if (
         is_strict_test
@@ -5578,6 +6499,25 @@ def run_ide_post_tool_hook(
     is_shell_post_tool = tool_name in ("run_command", "Bash", "execute_command", "developer__shell") or (
         tool_name.lower() in ("bash", "sh", "zsh")
     )
+    is_unbounded_read_post = bool(
+        tool_name in READ_TOOL_NAMES
+        and not pre_info.get("read_auto_sliced")
+        and not pre_info.get("bounded_slice_read")
+        and not any(
+            args.get(_bk) is not None
+            for _bk in (
+                "StartLine",
+                "EndLine",
+                "start_line",
+                "end_line",
+                "start_line_one_indexed",
+                "end_line_one_indexed_inclusive",
+                "offset",
+                "limit",
+                "view_range",
+            )
+        )
+    )
     auto_slice_tools = set(SEARCH_DIR_TOOL_NAMES + DB_RESOURCE_WEB_BROWSER_TOOL_NAMES) | {
         "call_mcp_tool",
         "take_snapshot",
@@ -5595,6 +6535,7 @@ def run_ide_post_tool_hook(
             or os.environ.get("WBC_POST_OUTPUT_SLICE") == "1"
             or tool_name in auto_slice_tools
             or is_shell_post_tool
+            or is_unbounded_read_post
             or any(
                 k in tool_name.lower()
                 for k in ("snapshot", "execute_sql", "query_database", "read_resource", "list_resources", "webfetch", "fetch_web")
@@ -5602,19 +6543,9 @@ def run_ide_post_tool_hook(
         )
     )
     if effective_resp is not None and should_slice_post:
-        # Phase 1 Semantic CLI Digests (`pytest`, `git diff`, `rg`) use the 250L / 8KB threshold
-        # even in GREEN_ELASTIC so noisy test/diff/search outputs are compacted on Turn 1.
-        eff_line_cap = (
-            int(payload.get("maxLines", 250 if is_shell_post_tool else default_max_lines))
-            if "maxLines" not in payload
-            else int(payload.get("maxLines", default_max_lines) or default_max_lines)
-        )
-        eff_byte_cap = (
-            int(payload.get("maxBytes", 8000 if is_shell_post_tool else default_max_bytes))
-            if "maxBytes" not in payload
-            else int(payload.get("maxBytes", default_max_bytes) or default_max_bytes)
-        )
-        preserve_fuller_tail = False
+        shell_cmd_str = ""
+        is_noisy_cli_cmd = False
+        is_pytest_cmd = False
         if is_shell_post_tool:
             shell_cmd_str = str(
                 args.get("CommandLine")
@@ -5623,6 +6554,72 @@ def run_ide_post_tool_hook(
                 or pre_info.get("target")
                 or ""
             ).strip()
+            if shell_cmd_str:
+                _uv_flags = {
+                    "--no-sync", "--frozen", "--offline", "-q", "--quiet",
+                    "-s", "--no-project", "--no-dev", "--all-extras", "--active",
+                }
+                for _seg in re.split(r"\s*(?:&&|\|\||;|\|)\s*", shell_cmd_str):
+                    _cmd_toks = [
+                        t
+                        for t in _seg.split()
+                        if not ("=" in t and not t.startswith("-") and t.split("=", 1)[0].isidentifier())
+                    ]
+                    if not _cmd_toks:
+                        continue
+                    _c0 = Path(_cmd_toks[0]).name.lower()
+                    _c1 = _cmd_toks[1].lower() if len(_cmd_toks) > 1 else ""
+                    _seg_uv = False
+                    if _c0 == "uv" and _c1 == "run" and len(_cmd_toks) >= 3:
+                        _seg_uv = True
+                        _ui = 2
+                        while _ui < len(_cmd_toks) and _cmd_toks[_ui] in _uv_flags:
+                            _ui += 1
+                        if _ui < len(_cmd_toks):
+                            _cmd_toks = _cmd_toks[_ui:]
+                            _c0 = Path(_cmd_toks[0]).name.lower()
+                            _c1 = _cmd_toks[1].lower() if len(_cmd_toks) > 1 else ""
+                    if _c0.startswith("python") and len(_cmd_toks) >= 3 and _cmd_toks[1] == "-m":
+                        _c0 = Path(_cmd_toks[2]).name.lower()
+                        _c1 = _cmd_toks[3].lower() if len(_cmd_toks) > 3 else ""
+                    if _c0 == "pytest":
+                        is_pytest_cmd = True
+                    elif (
+                        _c0 in ("rg", "grep", "egrep", "fgrep", "ls", "ruff")
+                        or (_c0 == "git" and _c1 in ("diff", "status", "show", "log"))
+                        or _seg_uv
+                    ):
+                        is_noisy_cli_cmd = True
+        # Noisy CLI commands (`rg`, `grep`, `git diff`, `git status`, `ls`, `ruff`, non-pytest `uv run`)
+        # compact above 80L / 4KB; `pytest` / `uv run pytest` compacts above 120L / 6KB via
+        # `_build_test_suite_stdout_digest` (preserving 100% of failure tracebacks & exit codes);
+        # other shell commands keep 250L / 8KB; whole-file `read_file` uses regime post ceilings.
+        if is_pytest_cmd:
+            _shell_line_target = 120
+            _shell_byte_target = 6000
+        elif is_noisy_cli_cmd:
+            _shell_line_target = 80
+            _shell_byte_target = 4000
+        else:
+            _shell_line_target = 250
+            _shell_byte_target = 8000
+        eff_line_cap = (
+            int(payload.get("maxLines", min(_shell_line_target, default_max_lines) if is_shell_post_tool else default_max_lines))
+            if "maxLines" not in payload
+            else int(payload.get("maxLines", default_max_lines) or default_max_lines)
+        )
+        eff_byte_cap = (
+            int(
+                payload.get(
+                    "maxBytes",
+                    min(_shell_byte_target, default_max_bytes) if is_shell_post_tool else default_max_bytes,
+                )
+            )
+            if "maxBytes" not in payload
+            else int(payload.get("maxBytes", default_max_bytes) or default_max_bytes)
+        )
+        preserve_fuller_tail = False
+        if is_shell_post_tool:
             if shell_cmd_str and (
                 not os.environ.get("PYTEST_CURRENT_TEST")
                 or os.environ.get("WBC_ENABLE_REFLEX_GATE_IN_TESTS") == "1"
@@ -5652,8 +6649,12 @@ def run_ide_post_tool_hook(
             max_lines=eff_line_cap,
             max_bytes=eff_byte_cap,
             step_idx=int(step_idx or 0),
-            head_lines=35 if is_shell_post_tool else 30,
-            tail_lines=140 if preserve_fuller_tail else (45 if is_shell_post_tool else 15),
+            head_lines=(25 if (is_noisy_cli_cmd and not is_pytest_cmd) else (35 if is_shell_post_tool else 30)),
+            tail_lines=(
+                140
+                if preserve_fuller_tail
+                else (30 if (is_noisy_cli_cmd and not is_pytest_cmd) else (45 if is_shell_post_tool else 15))
+            ),
             preserve_fuller_tail=preserve_fuller_tail,
         )
         if (
@@ -5765,6 +6766,11 @@ def run_ide_post_tool_hook(
             merged_post_cue = active_reflex_cue
         out_dict["ephemeralMessage"] = merged_post_cue
         out_dict["injectSteps"].append({"ephemeralMessage": merged_post_cue})
+
+    if mcp_resp_quarantined:
+        out_dict["toolResponse"] = effective_resp
+        out_dict["mcpResponseQuarantined"] = True
+        out_dict["mcpDetections"] = mcp_resp_detections
 
     if secret_detected and scrubbed_resp is not None and redacted_cnt > 0:
         out_dict["toolResponse"] = scrubbed_resp
@@ -5969,6 +6975,74 @@ def run_ide_post_tool_hook(
             out_dict["ephemeralMessage"] = f"{prev_eph}\n{venv_hint}" if prev_eph else venv_hint
             out_dict["injectSteps"].append({"ephemeralMessage": venv_hint})
 
+    if (
+        not is_strict_test
+        and not _is_subagent_conversation(conv_id, payload)
+        and not (active_reflex_cue and "body flush --auto" in active_reflex_cue)
+    ):
+        post_tp_str, post_transcript_kb = _resolve_transcript_metrics_for_hook(payload, conv_id)
+        post_raw_steps = int(payload.get("stepIdx") or payload.get("step_idx") or 0)
+        post_compaction_count = 0
+        post_active_kb = post_transcript_kb
+        post_side_q = False
+        if (
+            post_tp_str
+            and Path(post_tp_str).is_file()
+            and (post_transcript_kb >= 110.0 or post_raw_steps >= 60)
+        ):
+            post_active_steps, post_active_kb, post_compaction_count, post_side_q = (
+                _inspect_hook_transcript_post_checkpoint(post_tp_str, post_transcript_kb)
+            )
+        else:
+            post_active_steps = post_raw_steps
+
+        post_is_btw = _is_btw_side_thread(
+            payload,
+            transcript_kb=post_transcript_kb,
+            raw_initial_steps=post_raw_steps,
+            has_side_question_in_tp=post_side_q,
+        )
+        crossed_post = (
+            0
+            if post_is_btw
+            else _check_and_mark_csi_bucket(
+                conv_id,
+                post_active_kb,
+                steps=post_active_steps,
+                min_bucket=2,
+                compaction_count=post_compaction_count,
+            )
+        )
+        if crossed_post >= 2:
+            conv_flag = (
+                f" --conv-id {shlex.quote(conv_id)}"
+                if conv_id and conv_id not in ("local", "global")
+                else ""
+            )
+            csi_midturn_cue = (
+                f"[🔴 CSI RED ({post_active_kb:.0f}KB): Finish turn, then run `body flush --auto{conv_flag}`.]"
+            )
+            out_dict["csiBucketAlert"] = True
+            out_dict["csiPreinvStash"] = (
+                f"[🔴 Organ 04 Mid-Turn Cognitive Saturation Alert ({post_active_kb:.0f}KB, bucket {crossed_post})]: "
+                f"Context crossed >={crossed_post * int(CSI_WARN_BUCKET_KB)}KB during tool execution. "
+                "In your final response for this turn, proactively notify the user that context saturation is high "
+                f'and offer to run `body flush --auto{conv_flag} --goal "..." --milestone "..." --next-step "..."` '
+                "(or say `flush` / `/compact`) to hand off cleanly."
+            )
+            prev_eph = out_dict.get("ephemeralMessage")
+            out_dict["ephemeralMessage"] = f"{prev_eph}\n{csi_midturn_cue}" if prev_eph else csi_midturn_cue
+            out_dict["injectSteps"].append({"ephemeralMessage": csi_midturn_cue})
+
+    _maybe_dispatch_idle_edit_shadow(
+        tool_name=tool_name,
+        raw_edit_path=raw_edit_path,
+        args=args,
+        payload=payload,
+        pre_info=pre_info,
+        conv_id=conv_id,
+        step_idx=int(step_idx or 0),
+    )
     return out_dict
 
 
@@ -6301,6 +7375,72 @@ class BloodBrainBarrier:
         res = self.audit_shell_command(command)
         return res["decision"] == "allow", res["reason"]
 
+    def audit_interpreter_request(self, prompt: str) -> Dict[str, Any]:
+        """Inspect a code-interpreter prompt before sandbox/code execution."""
+        return VascularTrafficMonitor.inspect_interpreter_request(prompt, record_antigen_on_block=False)
+
+    def inspect_mcp_tool_schema(
+        self,
+        server_name: str,
+        tool_def: Dict[str, Any],
+        *,
+        trusted_server_map: Optional[Dict[str, Set[str]]] = None,
+    ) -> Dict[str, Any]:
+        """Inspect and neutralize an MCP `tools/list` schema via Organ 05 `immune_mcp`."""
+        from whole_body_compute.organs.immune_mcp import inspect_mcp_tool_schema
+
+        return inspect_mcp_tool_schema(
+            server_name, tool_def, trusted_server_map=trusted_server_map
+        )
+
+    def verify_mcp_schema_pin(
+        self,
+        server_name: str,
+        tools_list: List[Dict[str, Any]],
+        *,
+        pin_store: Optional[Dict[str, Any]] = None,
+        pin_store_path: Optional[Path | str] = None,
+    ) -> Dict[str, Any]:
+        """Verify SHA-256 canonical MCP schema pins and detect rug-pull mutations."""
+        from whole_body_compute.organs.immune_mcp import verify_mcp_schema_pin
+
+        return verify_mcp_schema_pin(
+            server_name,
+            tools_list,
+            pin_store=pin_store,
+            pin_store_path=pin_store_path,
+        )
+
+    def inspect_mcp_tool_call(
+        self,
+        tool_name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        *,
+        server_name: str = "",
+    ) -> Dict[str, Any]:
+        """Pre-call secret-leak and confused-deputy guard for MCP `tools/call`."""
+        from whole_body_compute.organs.immune_mcp import inspect_mcp_tool_call
+
+        return inspect_mcp_tool_call(tool_name, arguments, server_name=server_name)
+
+    def sanitize_mcp_tool_response(
+        self,
+        tool_name: str,
+        response_text: Any,
+        *,
+        server_name: str = "",
+        wrap_untrusted_tags: bool = True,
+    ) -> Dict[str, Any]:
+        """Post-call untrusted MCP `tools/call` output quarantine."""
+        from whole_body_compute.organs.immune_mcp import sanitize_mcp_tool_response
+
+        return sanitize_mcp_tool_response(
+            tool_name,
+            response_text,
+            server_name=server_name,
+            wrap_untrusted_tags=wrap_untrusted_tags,
+        )
+
     def get_scorecard(self, window_seconds: Optional[float] = None) -> Dict[str, Any]:
         """Retrieve Organ 05 Context Shield & Immune Scorecard telemetry."""
         return get_immune_pre_post_scorecard(audit_log_path=self.audit_log_path, window_seconds=window_seconds)
@@ -6312,27 +7452,37 @@ def _handle_fast_slice_milestone(
     target: str = "",
     total_lines: int = 0,
     saved_tokens: int = 0,
+    session_id: str = "",
 ) -> int:
     """Detached background helper invoked by POSIX sh fast-path to record shield ledger & milestone telemetry. [direct-edit]"""
     try:
         if saved_tokens > 0 and target:
             try:
-                from whole_body_compute.shield import record_shield_event
-
-                raw_est = max(saved_tokens + 1600, total_lines * 10)
-                comp_est = max(160, raw_est - saved_tokens)
-                bot_map = {"claude_code": "claude-code", "antigravity": "antigravity"}
-                record_shield_event(
-                    event_type="ast_slice_gate",
-                    target=target,
-                    raw_tokens_est=raw_est,
-                    compressed_tokens_est=comp_est,
-                    tokens_saved=saved_tokens,
-                    secrets_blocked=0,
-                    latency_ms=4.2,
-                    bot_name=bot_map.get(harness, harness or "antigravity"),
-                    action_mode="fast_sh_slice",
+                from whole_body_compute.shield import (
+                    get_harness_file_token_ceiling,
+                    record_shield_event,
                 )
+
+                bot_map = {"claude_code": "claude-code", "antigravity": "antigravity"}
+                resolved_bot = bot_map.get(harness, harness or "antigravity")
+                ceil_tok = get_harness_file_token_ceiling(bot_name=resolved_bot)
+                comp_est = 1600
+                raw_est = min(ceil_tok, max(saved_tokens + comp_est, total_lines * 10))
+                capped_saved = max(0, raw_est - comp_est)
+                if capped_saved > 0:
+                    clean_sid = str(session_id or "").strip()
+                    record_shield_event(
+                        event_type="ast_slice_gate",
+                        target=target,
+                        raw_tokens_est=raw_est,
+                        compressed_tokens_est=comp_est,
+                        tokens_saved=capped_saved,
+                        secrets_blocked=0,
+                        latency_ms=4.2,
+                        bot_name=resolved_bot,
+                        session_id=clean_sid if clean_sid and clean_sid != "global" else None,
+                        action_mode="fast_sh_slice",
+                    )
             except Exception:
                 pass
 
@@ -6380,8 +7530,8 @@ def _handle_fast_slice_milestone(
                         "events_24h": int(sav.get("total_events", 0)),
                         "direct_tokens_saved_24h": int(sav.get("direct_tokens_saved", 0)),
                         "cumulative_tokens_saved_24h": int(sav.get("cumulative_tokens_saved", 0)),
-                        "estimated_usd_saved_24h": float(sav.get("estimated_usd_saved", 0.0)),
-                        "secrets_scrubbed_24h": int(sav.get("secrets_scrubbed", 0)),
+                        "estimated_usd_saved_24h": float(sav.get("api_dollars_saved_est", 0.0)),
+                        "secrets_scrubbed_24h": int(sav.get("secrets_blocked", 0)),
                         "last_tool_name": "fast_sh_auto_slice",
                         "last_decision": "allow",
                         "read_auto_sliced": True,
@@ -6421,6 +7571,7 @@ def cli_hook_main(argv: Optional[List[str]] = None) -> int:
         m_target = ""
         m_lines = 0
         m_saved = 0
+        m_session_id = ""
         if "--count" in args_list:
             c_idx = args_list.index("--count")
             if c_idx + 1 < len(args_list):
@@ -6450,12 +7601,17 @@ def cli_hook_main(argv: Optional[List[str]] = None) -> int:
                     m_saved = int(args_list[s_idx + 1])
                 except Exception:
                     m_saved = 0
+        if "--session-id" in args_list:
+            sid_idx = args_list.index("--session-id")
+            if sid_idx + 1 < len(args_list):
+                m_session_id = args_list[sid_idx + 1].strip()
         return _handle_fast_slice_milestone(
             m_cnt,
             m_harness,
             target=m_target,
             total_lines=m_lines,
             saved_tokens=m_saved,
+            session_id=m_session_id,
         )
 
     try:
@@ -6488,6 +7644,7 @@ def cli_hook_main(argv: Optional[List[str]] = None) -> int:
                     is_post_tactile_fault = bool(
                         res_obj.get("astSyntaxValid") is False
                         or res_obj.get("assertionsPreserved") is False
+                        or res_obj.get("csiBucketAlert") is True
                     )
                     if (
                         (is_post_tactile_fault or bool(os.environ.get("PYTEST_CURRENT_TEST")))
@@ -6511,6 +7668,9 @@ def cli_hook_main(argv: Optional[List[str]] = None) -> int:
                         crash_cue = res_obj.get("crashFrameFusion")
                         if isinstance(crash_cue, str) and crash_cue.strip():
                             _stash_preinv_context(post_conv_id, crash_cue.strip())
+                        csi_stash = res_obj.get("csiPreinvStash")
+                        if isinstance(csi_stash, str) and csi_stash.strip():
+                            _stash_preinv_context(post_conv_id, csi_stash.strip())
                     filtered_post: Dict[str, Any] = {"injectSteps": res_obj.get("injectSteps", [])}
                     for keep_k in ("toolResponse", "scrubbed", "postOutputSliced", "formatDetected", "airlockBlobId"):
                         if keep_k in res_obj:
@@ -6623,6 +7783,7 @@ def cli_hook_main(argv: Optional[List[str]] = None) -> int:
             _rg_default = getattr(_rg_mod, "_DEFAULT_REFLEX_GATE", None)
             if _rg_default is not None:
                 try:
+                    _rg_default.flush_shadow_evaluations(timeout=1.5)
                     _rg_default.flush_background_retrains(timeout=1.5)
                 except Exception:
                     pass

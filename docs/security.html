@@ -341,12 +341,12 @@ body begin</code></pre>
       <ul>
         <li><strong>Strictly Optional:</strong> Leave Accessibility OFF unless you actively want an agent to inspect or drive live macOS GUI apps via <code>body eyes</code> / <code>body hands</code>.</li>
         <li><strong>Deterministic Vault, Origin &amp; Field Blindfolds:</strong> Even when enabled, <code>body eyes</code> hard-blocks DOM extraction on password managers (<code>1Password</code>, <code>Bitwarden</code>, <code>Apple Passwords</code>, <code>LastPass</code>, <code>KeePassXC</code>, <code>Keychain Access</code>, <code>Dashlane</code>, <code>NordPass</code>, <code>Authy</code>, <code>YubiKey</code>), returning <code>[BLOCKED_SECURE_VAULT]</code> with zero elements. Browser tabs on web vaults or root IAM consoles (<code>my.1password.com</code>, <code>vault.bitwarden.com</code>, <code>console.aws.amazon.com/iam</code>) return <code>[BLOCKED_SENSITIVE_ORIGIN]</code>. Any <code>AXSecureTextField</code> is masked to <code>[REDACTED_PASSWORD]</code> before serialization.</li>
-        <li><strong>Engine-Level Actuation Denylists:</strong> <code>FovealVisionEngine</code> (<code>actuate</code>, <code>click_element</code>, <code>click_xy</code>, <code>type_text</code>, <code>paste_element</code>, <code>trigger_menu_item</code>, <code>dispatch_hotkey</code>), <code>ax_act</code>, and <code>PalWorkflow</code> reject clicks/keystrokes into password vaults, macOS <code>System Settings</code> / <code>SecurityAgent</code> TCC dialogs, sensitive web vault origins, or <code>AXSecureTextField</code> password fields.</li>
+        <li><strong>Engine-Level Actuation Denylists &amp; GUI-Terminal Guards:</strong> <code>FovealVisionEngine</code> (<code>actuate</code>, <code>click_element</code>, <code>click_xy</code>, <code>type_text</code>, <code>paste_element</code>, <code>attach_file</code>, <code>trigger_menu_item</code>, <code>dispatch_hotkey</code>), <code>ax_act</code>, and <code>PalWorkflow</code> reject clicks/keystrokes into password vaults, macOS <code>System Settings</code> / <code>SecurityAgent</code> TCC dialogs, OS partition/account tools (<code>Disk Utility</code>, <code>GParted</code>, <code>Users &amp; Groups</code>), anti-bot CAPTCHA surfaces (<code>reCAPTCHA</code>, <code>hCaptcha</code>, <code>Turnstile</code>), sensitive web vault origins, or <code>AXSecureTextField</code> password fields - and block GUI keystroke/paste smuggling of <code>sudo rm -rf</code>, <code>.bashrc</code> persistence, or live vendor secrets into Terminal windows.</li>
       </ul>
 
       <h3>Q2: "How is <code>body eyes</code> safer than screenshot-based Computer Use agents?"</h3>
       <p>
-        Screenshot-loop agents upload full-screen PNGs every 1-2 seconds to cloud vision APIs - leaking Slack banners, <code>.env</code> terminal splits, and password toasts as raw pixels before any redactor can touch them. By contrast, <code>body eyes</code> parses structured <code>AXUIElement</code> nodes locally in <code>&lt;15ms</code> with zero screenshots, scrubs 23+ secret vendor formats (<code>sk-</code>, <code>ghp_</code>, <code>AKIA</code>, <code>ya29.</code>, DB URIs, Base64 tokens, SSNs, cards) in <code>&lt;1ms</code>, and neutralizes DOM prompt-injection breakouts via <code>EpithelialScreenFilter</code> before any token reaches an LLM.
+        Screenshot-loop agents upload full-screen PNGs every 1-2 seconds to cloud vision APIs - leaking Slack banners, <code>.env</code> terminal splits, and password toasts as raw pixels before any redactor can touch them. By contrast, <code>body eyes</code> parses structured <code>AXUIElement</code> nodes locally in <code>&lt;15ms</code> with zero screenshots, scrubs 23+ secret vendor formats (<code>sk-</code>, <code>ghp_</code>, <code>AKIA</code>, <code>ya29.</code>, DB URIs, Base64 tokens, SSNs, cards) in <code>&lt;1ms</code>, and neutralizes DOM prompt-injection breakouts (including invisible Plane-14 Unicode Tags, Base64/Hex/Binary/Caesar smuggling, and <code>#</code>-wrapped multi-line comments) via <code>EpithelialScreenFilter</code> before any token reaches an LLM.
       </p>
 
       <h3>Q3: "If I grant Accessibility to my Terminal or IDE, doesn't every child process inherit it?"</h3>
@@ -370,7 +370,7 @@ body begin</code></pre>
     <section>
       <h2>3. Empirical Security Scorecard &amp; 60-Second Local Verification</h2>
       <p>
-        Live choke-point and verbatim upstream benchmarks across <strong>AgentDojo</strong>, <strong>CyberSecEval 3</strong>, <strong>InjecAgent</strong> (<code>2,108</code> IPI cases + <code>1,066</code> benign controls), and <strong>RedCode-Exec</strong> (<code>1,410</code> Python/Bash payloads) executing the real <code>bin/body-immune-hook</code> binary and in-process organ gates (<a href="https://github.com/wholebodycompute/whole-body-compute/blob/main/benchmarks/AGENTDOJO_CYBERSECEVAL_REPORT_2026_11_10.md">choke-point receipts</a> &bull; <a href="https://github.com/wholebodycompute/whole-body-compute/blob/main/benchmarks/UPSTREAM_REDCODE_INJECAGENT_REPORT_2026_11_26.md">4,584-case upstream receipts</a>):
+        Live A/B and verbatim upstream benchmarks across <strong>AgentDojo</strong> (live <code>36</code>-pair / <code>72</code>-trial A/B + choke-point), <strong>MCPTox</strong> (<code>485</code> poisoned MCP tools across <code>45</code> real servers + <code>1,348</code> server bundles + <code>100</code> schema rug-pulls + <code>386</code> benign MCP schemas), <strong>OS-Harm</strong> (<code>51</code> GUI/DOM IPI + <code>83</code> boundary + <code>375</code> benign), Meta <strong>CyberSecEval 3/4</strong> (<code>500</code> Interpreter + <code>1,255</code> PI + <code>750</code> <code>MITRE-FRR</code> benign), <strong>InjecAgent</strong> (<code>2,108</code> IPI cases + <code>1,066</code> benign controls), and <strong>RedCode-Exec</strong> (<code>1,410</code> Python/Bash payloads) executing the real <code>bin/body-immune-hook</code> binary and in-process organ gates (<a href="https://github.com/wholebodycompute/whole-body-compute/blob/main/benchmarks/AGENTDOJO_LIVE_AB_REPORT_2026_11_26.md">live AgentDojo A/B receipts</a> &bull; <a href="https://github.com/wholebodycompute/whole-body-compute/blob/main/benchmarks/UPSTREAM_MCPTOX_SECURITY_REPORT_2026_11_27.md">MCPTox MCP security receipts</a> &bull; <a href="https://github.com/wholebodycompute/whole-body-compute/blob/main/benchmarks/UPSTREAM_OSHARM_CYBERSECEVAL_REPORT_2026_11_26.md">OS-Harm + CyberSecEval receipts</a> &bull; <a href="https://github.com/wholebodycompute/whole-body-compute/blob/main/benchmarks/UPSTREAM_REDCODE_INJECAGENT_REPORT_2026_11_26.md">InjecAgent + RedCode receipts</a>):
       </p>
       <div class="table-wrap">
         <table>
@@ -383,9 +383,24 @@ body begin</code></pre>
           </thead>
           <tbody>
             <tr>
+              <td><strong>Live Upstream AgentDojo A/B (72 trials: Workspace, Slack, Banking)</strong></td>
+              <td><code>0.0% ASR</code> (0/36) &bull; <code>91.7%</code> Utility (33/36) on Gemini 3.8 Flash</td>
+              <td><strong><code>0.0% ASR</code> (0/36) &bull; <code>91.7%</code> Utility parity (33/36) &bull; <code>36/36</code> neutralized at ingress in <code>0.148ms</code></strong></td>
+            </tr>
+            <tr>
               <td><strong>AgentDojo + CyberSecEval 3 Choke-Point (12 attacks / 6 benign)</strong></td>
               <td><code>100.0% ASR</code> (12/12 compromised)</td>
               <td><strong><code>0.0% ASR</code> (12/12 blocked &bull; 0.0% FPR)</strong></td>
+            </tr>
+            <tr>
+              <td><strong>Verbatim Upstream OS-Harm GUI/DOM &amp; Boundary (51 IPI / 83 boundary)</strong></td>
+              <td><code>0%</code> deterministic Foveal/OS gate</td>
+              <td><strong><code>0.0% ASR</code> (51/51 GUI IPI &amp; 83/83 boundary blocked &bull; <code>375/375</code> 0.0% FPR)</strong></td>
+            </tr>
+            <tr>
+              <td><strong>Verbatim Upstream CyberSecEval 3/4 (500 Interpreter / 55 EN Indirect)</strong></td>
+              <td><code>25.45% ASR</code> (14/55 live local LLM) &bull; <code>0%</code> AST/egress gate</td>
+              <td><strong><code>97.6%</code> Interpreter blocked (488/500) &bull; <code>0.0% ASR</code> (55/55 EN PI neutralized &amp; defended)</strong></td>
             </tr>
             <tr>
               <td><strong>Verbatim Upstream InjecAgent (2,108 IPI cases / 1,066 benign)</strong></td>
@@ -398,9 +413,14 @@ body begin</code></pre>
               <td><strong><code>94.53%</code> blocked (709/750 &bull; benign /proc &amp; JSON preserved)</strong></td>
             </tr>
             <tr>
-              <td><strong>Benign Developer &amp; User Tool Utility (1,072 total controls)</strong></td>
+              <td><strong>Verbatim Upstream MCPTox Tool-Poisoning, Rug-Pulls &amp; Shadowing (485 tools / 1,348 bundles / 100 rug-pulls)</strong></td>
+              <td><code>0.82%</code> pre-hardening (4/485) &bull; <code>50.0% ASR</code> (10/20 live local LLM)</td>
+              <td><strong><code>100.0%</code> Neutralized (485/485 tools &amp; 1,348/1,348 bundles &bull; 100/100 rug-pulls &bull; <code>386/386</code> 0.0% FPR in <code>0.28ms</code>) &bull; <code>50% &rarr; 5%</code> live LLM ASR</strong></td>
+            </tr>
+            <tr>
+              <td><strong>Combined Benign Developer &amp; User Utility (2,583 total controls)</strong></td>
               <td><code>100.0%</code></td>
-              <td><strong><code>100.0%</code> (1,072/1,072 allowed &bull; <code>0.0%</code> FPR)</strong></td>
+              <td><strong><code>100.0%</code> (2,583/2,583 allowed &bull; <code>0.0%</code> FPR)</strong></td>
             </tr>
           </tbody>
         </table>
@@ -410,16 +430,22 @@ body begin</code></pre>
       <pre><code># 1. Run the live 18-scenario AgentDojo + CyberSecEval 3 choke-point benchmark (&lt;1s)
 uv run python3 benchmarks/agentdojo_wbc_security_suite.py
 
-# 2. Run the 4,584-evaluation verbatim upstream InjecAgent + RedCode-Exec sweep (~11s, $0)
-uv run python3 benchmarks/upstream_redcode_injecagent_suite.py</code></pre>
+# 1b. Run the 4,584-evaluation verbatim upstream InjecAgent + RedCode-Exec sweep (~11s, $0)
+uv run python3 benchmarks/upstream_redcode_injecagent_suite.py
+
+# 1c. Run the 3,031-evaluation verbatim upstream OS-Harm + CyberSecEval 3/4 sweep (~3s, $0)
+uv run python3 benchmarks/upstream_osharm_cyberseceval_suite.py
+
+# 1d. Run the 2,361-evaluation verbatim upstream MCPTox + rug-pull + shadowing sweep (~2s, $0)
+uv run python3 benchmarks/upstream_mcptox_security_suite.py
 
 # 2. Verify WBC Eyes.app Hardened Runtime, Kill Switch, Accessibility vault blocking &amp; actuation gates
 WBC_HEADLESS=1 WBC_TESTING=1 uv run pytest -q tests/test_wbc_eyes_helper.py tests/test_bbb_computer_use_wiring.py tests/test_hands_zero_cursor_background.py
 
 # 3. Verify AST SecGate, APFS symlink escape blocks, Keychain/SSH guards &amp; hook symlink checks
-WBC_HEADLESS=1 WBC_TESTING=1 uv run pytest -q tests/test_red_team_hardened.py tests/test_safeagents_organ5_upgrades.py tests/test_neon_xhigh_audit_hardening.py
+WBC_HEADLESS=1 WBC_TESTING=1 uv run pytest -q tests/test_red_team_hardened.py tests/test_safeagents_organ5_upgrades.py tests/test_neon_xhigh_audit_hardening.py tests/test_agentdojo_live_ab_suite.py tests/test_upstream_osharm_cyberseceval_suite.py
 
-# 4. Run the 10-organ adversarial chaos &amp; concurrency fuzzer
+# 4. Run the 5-organ adversarial chaos &amp; concurrency fuzzer
 uv run body chaos</code></pre>
     </section>
 

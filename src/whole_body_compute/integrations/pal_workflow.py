@@ -509,6 +509,12 @@ class PalWorkflowRunner:
         if telemetry_path is not None:
             path = telemetry_path
         else:
+            if (
+                (os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("WBC_TESTING") == "1")
+                and not os.environ.get("WBC_DATA_DIR")
+                and not os.environ.get("WBC_USAGE_STATS_PATH")
+            ):
+                return
             try:
                 from whole_body_compute.procedural_telemetry import get_wbc_data_dir
 
@@ -1499,7 +1505,7 @@ class PalWorkflowRunner:
     def _extract_params_via_local_reflex(
         cls, prompt: str, unmatched_defs: Dict[str, str]
     ) -> Dict[str, Any]:
-        """Use sub-200ms local `tev1:0.8b` (:11434) to extract missing voice parameters."""
+        """Use sub-200ms local `body-coder-mlx` (:9379) / `:9380` / Ollama fallback to extract missing voice parameters."""
         import json
         import urllib.request
 
@@ -1522,7 +1528,7 @@ class PalWorkflowRunner:
             f"Command: {prompt!r}\nJSON:"
         )
         # 1. Resolve model via HybridRouter
-        resolved_model = "tev1:0.8b"
+        resolved_model = "body-coder:1.5b"
         try:
             from whole_body_compute.local.router import default_router
 
@@ -1532,10 +1538,10 @@ class PalWorkflowRunner:
         except Exception:
             pass
 
-        # 2. Try :9380 SpecialistRouter & :9379 MLX endpoints first
+        # 2. Try :9379 MLX (body-coder-mlx) first for sub-200ms JSON reflex, then :9380 SpecialistRouter
         for endpoint, model_name in (
+            ("http://127.0.0.1:9379/v1/chat/completions", "body-coder-mlx"),
             ("http://127.0.0.1:9380/v1/chat/completions", "gemma4-26b"),
-            ("http://127.0.0.1:9379/v1/chat/completions", "voicefi-coder-mlx"),
         ):
             try:
                 body = json.dumps(
@@ -1567,7 +1573,16 @@ class PalWorkflowRunner:
                 continue
 
         # 3. Fallback to Ollama (:11434) using resolved model
-        for model_name in (resolved_model, "tev1:0.8b", "qwen2.5-coder:1.5b"):
+        ollama_resolved = (
+            "body-coder:1.5b"
+            if resolved_model in ("body-coder-mlx", "voicefi-coder-mlx")
+            else resolved_model
+        )
+        ollama_candidates: List[str] = []
+        for cand in (ollama_resolved, "body-coder:1.5b", "tev1:0.8b", "qwen2.5-coder:1.5b"):
+            if cand and cand not in ollama_candidates:
+                ollama_candidates.append(cand)
+        for model_name in ollama_candidates:
             try:
                 body = json.dumps(
                     {
@@ -1608,7 +1623,7 @@ class PalWorkflowRunner:
         """
         Attempt 100% on-device self-healing when a workflow step fails due to schema or UI drift:
         1. For RUN_SHELL steps invoking a local Python script (.py), invokes ReconImplementer
-           (voicefi-coder-mlx :9379 -> Qwen2.5-Coder-14B :8080) guarded by the 3-Stage AST SecGate.
+           (body-coder-mlx :9379 -> Qwen2.5-Coder-14B :8080) guarded by the 3-Stage AST SecGate.
         2. For AXUIElement CLICK steps that drifted but retain fallback coordinates, falls back cleanly.
         """
         if os.getenv("VOICEFI_PAL_DISABLE_SELF_HEAL") == "1":
@@ -1652,7 +1667,7 @@ class PalWorkflowRunner:
                             f"Keep all existing `assert` precondition/postcondition statements intact."
                         )
                         for model_id in (
-                            "voicefi-coder-mlx",
+                            "body-coder-mlx",
                             "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit",
                         ):
                             impl = ReconImplementer(

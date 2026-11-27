@@ -991,6 +991,12 @@ class ZeroCopySharedSlab:
             try:
                 self._shm = shared_memory.SharedMemory(name=self.name, create=False)
                 self._created = False
+                try:
+                    from multiprocessing import resource_tracker
+
+                    resource_tracker.unregister(self._shm._name, "shared_memory")
+                except Exception:
+                    pass
                 # Honor the actual backing shm segment size to prevent OOB reads/writes
                 if self._shm.size >= self.data_offset + self.page_size:
                     self.total_bytes = int(self._shm.size)

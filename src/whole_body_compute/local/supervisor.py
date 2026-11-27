@@ -52,7 +52,7 @@ DEFAULT_MODEL_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
         "min_free_ram_gb": 20.0,
         "max_load_avg": 12.0,
         "disallow_swap": True,
-        "recommended_fallback": "voicefi-coder-mlx",
+        "recommended_fallback": "body-coder-mlx",
         "speculative_draft_model": "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit",
         "num_draft_tokens": 4,
         "speculative_decode_tok_s": 30.9,
@@ -61,13 +61,13 @@ DEFAULT_MODEL_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
         "min_free_ram_gb": 20.0,
         "max_load_avg": 12.0,
         "disallow_swap": True,
-        "recommended_fallback": "voicefi-coder-mlx",
+        "recommended_fallback": "body-coder-mlx",
     },
     "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit": {
         "min_free_ram_gb": 9.5,
         "max_load_avg": 12.0,
         "disallow_swap": False,
-        "recommended_fallback": "voicefi-coder-mlx",
+        "recommended_fallback": "body-coder-mlx",
         "speculative_draft_model": "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit",
         "num_draft_tokens": 5,
         "speculative_decode_tok_s": 50.5,
@@ -76,7 +76,7 @@ DEFAULT_MODEL_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
         "min_free_ram_gb": 6.0,
         "max_load_avg": 14.0,
         "disallow_swap": False,
-        "recommended_fallback": "voicefi-coder-mlx",
+        "recommended_fallback": "body-coder-mlx",
     },
     # Frontier 70B Tier: 42.5 GB weights + 3.5 GB KV cache
     "llama3.3:70b": {
@@ -130,6 +130,19 @@ DEFAULT_MODEL_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
         "disallow_swap": False,
         "recommended_fallback": "voicefi-coder:1.5b",
     },
+    # Composite Specialist Router (`gemma4-2b` 1.9GB + `body-coder-mlx` 1.1GB + Python AST Sieve)
+    "localbench-specialist-router": {
+        "min_free_ram_gb": 3.2,
+        "max_load_avg": 14.0,
+        "disallow_swap": False,
+        "recommended_fallback": "gemma4-2b",
+    },
+    "specialist-router": {
+        "min_free_ram_gb": 3.2,
+        "max_load_avg": 14.0,
+        "disallow_swap": False,
+        "recommended_fallback": "gemma4-2b",
+    },
     # Small Scouts & Intent Distillers (0.8B - 2.6B)
     "gemma2:2b": {
         "min_free_ram_gb": 2.5,
@@ -143,11 +156,25 @@ DEFAULT_MODEL_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
         "disallow_swap": False,
         "recommended_fallback": None,
     },
+    "body-coder-mlx": {
+        "min_free_ram_gb": 1.5,
+        "max_load_avg": 14.0,
+        "disallow_swap": False,
+        "recommended_fallback": "body-coder:1.5b",
+        "is_tier0": True,
+    },
+    "body-coder:1.5b": {
+        "min_free_ram_gb": 2.0,
+        "max_load_avg": 14.0,
+        "disallow_swap": False,
+        "recommended_fallback": None,
+        "is_tier0": True,
+    },
     "voicefi-coder-mlx": {
         "min_free_ram_gb": 1.5,
         "max_load_avg": 14.0,
         "disallow_swap": False,
-        "recommended_fallback": "voicefi-coder:1.5b",
+        "recommended_fallback": "body-coder:1.5b",
         "is_tier0": True,
     },
     "voicefi-coder:1.5b": {
@@ -2034,7 +2061,7 @@ class ThermalSupervisor:
           - 'voicefi tray' -> 'voicefi tray'
           - 'mlx_metal_worker' -> 'mlx_metal_worker'
           - 'litert_openai_server.py' -> 'litert_openai_server (:9379/:9380)'
-          - 'whole_body_compute.cli' and 'telemetry' -> 'wbc telemetry (:9381)'
+          - 'whole_body_compute.cli' and 'telemetry' -> 'wbc telemetry (:9383)'
           - Python scripts: 'python (<script_basename>)'
         """
         cmd_str = (cmd or "").strip()
@@ -2048,7 +2075,7 @@ class ThermalSupervisor:
         if "litert_openai_server.py" in cmd_str:
             return "litert_openai_server (:9379/:9380)"
         if "whole_body_compute.cli" in cmd_str and "telemetry" in cmd_str:
-            return "wbc telemetry (:9381)"
+            return "wbc telemetry (:9383)"
 
         python_match = re.search(r'(?:^|\s|\/)(python[0-9.]*)\b', cmd_str)
         if python_match:
@@ -2155,7 +2182,13 @@ class ThermalSupervisor:
 
             # Check if an active benchmark script or Steam game is currently running
             benchmark_active = any(
-                ("eval_localbench.py" in ln or "eval_models.py" in ln or "qa_and_uat_harness" in ln)
+                (
+                    "eval_localbench.py" in ln
+                    or "eval_models.py" in ln
+                    or "qa_and_uat_harness" in ln
+                    or "memo_v1_eval" in ln
+                    or "run_live_4way_eval" in ln
+                )
                 and "grep" not in ln
                 for ln in raw_lines
             )
@@ -2214,26 +2247,36 @@ class ThermalSupervisor:
                 elapsed_sec = self._parse_etime_seconds(etime)
 
                 # Rule 0: Autonomic Tachycardia Sentinel & Broader Dev Runaway Process Sentinel
-                is_autonomic = any(tok in cmd for tok in ("voicefi tray", "mlx_metal_worker"))
+                is_autonomic = any(tok in cmd for tok in ("voicefi tray", "mlx_metal_worker", "foveal_memory"))
                 is_other_dev = (
                     any(tok in cmd for tok in ("vifi", "voicefi", "python", "uv"))
                     and not any(
                         tok in cmd
                         for tok in (
                             "mlx_lm.server",
+                            "mlx_lm.lora",
                             "llama-server",
                             "ollama",
                             "telemetry_server",
                             "foveal_memory",
                             "foveal-vision-mcp",
                             "foveal_vision",
+                            "whole_body_compute.memory",
+                            "memo_daemon",
+                            "memo_v1_eval",
+                            "run_e2e_sync_build",
+                            "run_live_4way_eval",
                         )
                     )
                 )
 
                 is_runaway = False
                 if is_autonomic:
-                    if (elapsed_sec >= 120 and pcpu >= 120.0) or ("voicefi tray" in cmd and rss_mb >= 4096.0):
+                    if (
+                        (elapsed_sec >= 120 and pcpu >= 120.0)
+                        or ("voicefi tray" in cmd and rss_mb >= 4096.0)
+                        or ("foveal_memory" in cmd and rss_mb >= 750.0)
+                    ):
                         is_runaway = True
                 elif is_other_dev:
                     is_tmp_script = "/tmp/" in cmd and any(tok in cmd for tok in ("python", "uv"))
@@ -3002,7 +3045,7 @@ class ThermalSupervisor:
             if policy.get("total_invocations", 0) == 0:
                 is_tier0 = bool(req.get("is_tier0", False)) or any(
                     k in model_name.lower()
-                    for k in ("qwen2.5-coder:1.5b", "voicefi-coder:1.5b", "tev1:0.8b", "reflex")
+                    for k in ("body-coder", "qwen2.5-coder:1.5b", "voicefi-coder:1.5b", "tev1:0.8b", "reflex")
                 )
                 if default_keep_alive == "auto":
                     def_sec = 1800.0 if is_tier0 else 300.0
@@ -3022,15 +3065,33 @@ class ThermalSupervisor:
                     policy["recommended_keep_alive"] = (
                         "3m" if policy["recommended_ttl_sec"] == 180.0 else f"{int(policy['recommended_ttl_sec'])}s"
                     )
+                elif (
+                    is_tier0
+                    and default_keep_alive == "auto"
+                    and thermal_st.lower() in ("normal", "nominal")
+                    and free_ram >= 24.0
+                ):
+                    policy["recommended_ttl_sec"] = -1.0
+                    policy["recommended_keep_alive"] = -1
+                    policy["should_pin_warm"] = True
                 else:
                     policy["recommended_ttl_sec"] = def_sec
                     policy["recommended_keep_alive"] = def_str
+            elif (
+                any(k in model_name.lower() for k in ("body-coder", "qwen2.5-coder:1.5b", "voicefi-coder:1.5b", "tev1:0.8b", "reflex"))
+                and default_keep_alive == "auto"
+                and thermal_st.lower() in ("normal", "nominal")
+                and free_ram >= 24.0
+            ):
+                policy["recommended_ttl_sec"] = -1.0
+                policy["recommended_keep_alive"] = -1
+                policy["should_pin_warm"] = True
             return policy
         except Exception as exc:
             logger.debug(f"Failed to calculate adaptive keep alive for {model_name}: {exc}")
             is_tier0 = any(
                 k in model_name.lower()
-                for k in ("qwen2.5-coder:1.5b", "voicefi-coder:1.5b", "tev1:0.8b", "reflex")
+                for k in ("body-coder", "qwen2.5-coder:1.5b", "voicefi-coder:1.5b", "tev1:0.8b", "reflex")
             )
             if default_keep_alive == "auto":
                 def_sec = 1800.0 if is_tier0 else 300.0

@@ -5,10 +5,12 @@ Blood-Brain Barrier (Organ 05): AST SecGate, Predictive AST Slicer, Fast Log Dig
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import re
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -137,18 +139,125 @@ def _fast_extract_ast_summary(tree: ast.AST, source_code: str = "") -> Dict[str,
     unsafe_calls: List[str] = []
     unsafe_spans: List[Tuple[str, str]] = []
     alias_map: Dict[str, str] = {}
+    str_vars: Dict[str, str] = {}
+    saw_socket_import = False
+    saw_socket_recv_or_dup2 = False
+    saw_subprocess_call = False
+    saw_psutil_process_iter = False
+    saw_proc_kill_call = False
 
-    # Seed module-level aliases in O(len(tree.body)) before single-pass iterative DFS
+    def _is_sensitive_os_literal(val_str: str, *, is_write_or_delete: bool = False) -> bool:
+        if not val_str or len(val_str) > 260:
+            return False
+        s = val_str.strip().replace("\\", "/")
+        low = s.lower()
+        if any(
+            tok in low
+            for tok in (
+                "/etc/passwd",
+                "/etc/shadow",
+                "/etc/gshadow",
+                "/etc/group",
+                "/etc/master.passwd",
+                "/etc/sudoers",
+                "/etc/crontab",
+                "/etc/fstab",
+                "/etc/login.defs",
+                "/etc/subuid",
+                "/etc/subgid",
+                "/etc/hosts.allow",
+                "/etc/hosts.deny",
+                "/etc/security/",
+                "/etc/pam",
+                "/etc/ssh/",
+                "/etc/wgetrc",
+                "/etc/apt/",
+                "/etc/default/",
+                "/etc/init",
+                "/etc/systemd/",
+                "/etc/sysctl",
+                "/etc/ld.so",
+                "/etc/modprobe",
+                "/etc/network/",
+                "/etc/netplan/",
+                "/etc/ufw/",
+                "/etc/firewalld/",
+                "/etc/apparmor",
+                "/etc/selinux/",
+                "/etc/audit/",
+                "/etc/rsyslog",
+                "/usr/share/base-passwd/",
+                "/var/lib/pam/",
+                "/var/log/lastlog",
+                "/var/log/auth",
+                "/var/log/secure",
+                "/var/log/wtmp",
+                "/var/log/btmp",
+                "/var/log/faillog",
+                "../etc/",
+                "../root/",
+                "../proc/",
+                "../sys/",
+                "../var/",
+            )
+        ):
+            return True
+        if low.startswith("/etc/") and not any(
+            low.startswith(ok_etc)
+            for ok_etc in ("/etc/os-release", "/etc/lsb-release", "/etc/localtime", "/etc/resolv.conf", "/etc/ssl/certs", "/etc/hosts")
+        ):
+            return True
+        if low.startswith("/root/") or low == "/root":
+            return True
+        if any(
+            low.endswith(rc) or f"/{rc}" in low
+            for rc in (".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile")
+        ) and (is_write_or_delete or low.startswith(("/root/", "~/", "../"))):
+            return True
+        if is_write_or_delete and low.startswith(("/etc/", "/boot/", "/sbin/", "/bin/", "/lib/", "/lib64/", "/usr/", "/var/log/")):
+            return True
+        return False
+
+    def _extract_str_expr(expr: ast.AST) -> str:
+        if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+            return expr.value
+        if isinstance(expr, ast.Name) and expr.id in str_vars:
+            return str_vars[expr.id]
+        if isinstance(expr, ast.Call):
+            if isinstance(expr.func, ast.Name) and expr.func.id in ("Path", "PosixPath", "PurePath", "PurePosixPath") and expr.args:
+                return _extract_str_expr(expr.args[0])
+            if isinstance(expr.func, ast.Attribute) and expr.func.attr in ("Path", "expanduser", "resolve") and expr.args:
+                return _extract_str_expr(expr.args[0])
+            if isinstance(expr.func, ast.Attribute) and expr.func.attr == "join":
+                parts = [_extract_str_expr(a) for a in expr.args]
+                if any(parts):
+                    return "/".join(p for p in parts if p)
+        if isinstance(expr, ast.BinOp) and isinstance(expr.op, (ast.Add, ast.Div)):
+            lp = _extract_str_expr(expr.left)
+            rp = _extract_str_expr(expr.right)
+            if lp or rp:
+                return f"{lp}/{rp}" if isinstance(expr.op, ast.Div) else f"{lp}{rp}"
+        return ""
+
+    # Seed module-level aliases and simple string path constants in O(len(tree.body))
     for stmt in getattr(tree, "body", ()):
         if isinstance(stmt, ast.Import):
             for n in stmt.names:
+                if n.name == "socket" or n.name.startswith("socket."):
+                    saw_socket_import = True
                 if n.asname:
                     alias_map[n.asname] = n.name
         elif isinstance(stmt, ast.ImportFrom):
             mod = stmt.module or ""
+            if mod == "socket" or mod.startswith("socket."):
+                saw_socket_import = True
             for n in stmt.names:
                 local_name = n.asname or n.name
                 alias_map[local_name] = f"{mod}.{n.name}" if mod else n.name
+        elif isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+            sv = _extract_str_expr(stmt.value)
+            if sv:
+                str_vars[stmt.targets[0].id] = sv
 
     stack: List[ast.AST] = [tree]
     pop_node = stack.pop
@@ -157,6 +266,7 @@ def _fast_extract_ast_summary(tree: ast.AST, source_code: str = "") -> Dict[str,
     Import_cls = ast.Import
     ImportFrom_cls = ast.ImportFrom
     Assert_cls = ast.Assert
+    Assign_cls = ast.Assign
     Func_cls = (ast.FunctionDef, ast.AsyncFunctionDef)
     Call_cls = ast.Call
 
@@ -170,13 +280,21 @@ def _fast_extract_ast_summary(tree: ast.AST, source_code: str = "") -> Dict[str,
         n_cls = node.__class__
         if n_cls is Import_cls:
             for n in node.names:
+                if n.name == "socket" or n.name.startswith("socket."):
+                    saw_socket_import = True
                 if n.asname:
                     alias_map[n.asname] = n.name
         elif n_cls is ImportFrom_cls:
             mod = node.module or ""
+            if mod == "socket" or mod.startswith("socket."):
+                saw_socket_import = True
             for n in node.names:
                 local_name = n.asname or n.name
                 alias_map[local_name] = f"{mod}.{n.name}" if mod else n.name
+        elif n_cls is Assign_cls and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            sv = _extract_str_expr(node.value)
+            if sv:
+                str_vars[node.targets[0].id] = sv
         elif n_cls is Assert_cls:
             assert_count += 1
             if _fast_is_tautological(node.test):
@@ -197,10 +315,34 @@ def _fast_extract_ast_summary(tree: ast.AST, source_code: str = "") -> Dict[str,
                 if resolved in ("eval", "exec", "compile", "__import__", "os.system", "os.popen", "pty.spawn"):
                     matched_label = resolved
                 elif resolved in ("subprocess.Popen", "subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output"):
+                    saw_subprocess_call = True
                     for kw in node.keywords:
                         if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and bool(kw.value.value) is True:
                             matched_label = f"{resolved}(shell=True)"
                             break
+                elif resolved in ("pickle.loads", "pickle.load", "_pickle.loads", "_pickle.load", "cPickle.loads", "cPickle.load", "marshal.loads", "marshal.load", "yaml.unsafe_load", "yaml.full_load", "jsonpickle.decode"):
+                    # Allow in-memory round-trip tests like pickle.loads(pickle.dumps(obj))
+                    arg0 = node.args[0] if node.args else None
+                    is_roundtrip = (
+                        isinstance(arg0, ast.Call)
+                        and isinstance(arg0.func, ast.Attribute)
+                        and arg0.func.attr in ("dumps", "dump")
+                    )
+                    if not is_roundtrip:
+                        matched_label = f"unsafe_deserialization:{resolved}"
+                elif resolved == "open" and node.args:
+                    p_str = _extract_str_expr(node.args[0])
+                    mode_str = _extract_str_expr(node.args[1]) if len(node.args) >= 2 else ""
+                    for kw in node.keywords:
+                        if kw.arg == "mode":
+                            mode_str = _extract_str_expr(kw.value)
+                    is_w = any(ch in mode_str for ch in ("w", "a", "+", "x"))
+                    if _is_sensitive_os_literal(p_str, is_write_or_delete=is_w):
+                        matched_label = f"sensitive_os_file_open:{p_str[:48]}"
+                elif resolved in ("os.remove", "os.unlink", "os.rmdir") and node.args:
+                    p_str = _extract_str_expr(node.args[0])
+                    if _is_sensitive_os_literal(p_str, is_write_or_delete=True):
+                        matched_label = f"sensitive_os_delete:{p_str[:48]}"
                 elif node.func.id == "getattr" and len(node.args) >= 2:
                     arg0 = node.args[0]
                     arg1 = node.args[1]
@@ -216,24 +358,71 @@ def _fast_extract_ast_summary(tree: ast.AST, source_code: str = "") -> Dict[str,
                 raw_id = val.id if isinstance(val, ast.Name) else ("call()" if isinstance(val, ast.Call) else "")
                 val_repr = alias_map.get(raw_id, raw_id) if raw_id else ""
                 qual = f"{val_repr}.{attr}" if val_repr else attr
+                if attr in ("recv", "recvfrom") or qual == "os.dup2":
+                    saw_socket_recv_or_dup2 = True
+                if qual == "psutil.process_iter":
+                    saw_psutil_process_iter = True
+                if attr in ("kill", "terminate") or qual in ("os.kill", "os.killpg"):
+                    saw_proc_kill_call = True
                 if (
                     qual in ("os.system", "os.popen", "pty.spawn")
                     or attr in ("system", "popen", "spawn", "posix_spawn", "execl", "execle", "execclp", "execv", "execve", "execvp")
                 ) and qual != "platform.system":
                     matched_label = qual
-                elif qual in ("subprocess.Popen", "subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output"):
+                elif qual in ("subprocess.Popen", "subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output", "subprocess.getoutput", "subprocess.getstatusoutput"):
+                    saw_subprocess_call = True
                     for kw in node.keywords:
                         if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and bool(kw.value.value) is True:
                             matched_label = f"{qual}(shell=True)"
                             break
+                elif qual in ("pickle.loads", "pickle.load", "_pickle.loads", "_pickle.load", "cPickle.loads", "cPickle.load", "marshal.loads", "marshal.load", "yaml.unsafe_load", "yaml.full_load", "jsonpickle.decode", "shelve.open"):
+                    arg0 = node.args[0] if node.args else None
+                    is_roundtrip = (
+                        isinstance(arg0, ast.Call)
+                        and isinstance(arg0.func, ast.Attribute)
+                        and arg0.func.attr in ("dumps", "dump")
+                    )
+                    if not is_roundtrip:
+                        matched_label = f"unsafe_deserialization:{qual}"
+                elif qual == "yaml.load":
+                    has_safe_loader = False
+                    for kw in node.keywords:
+                        if kw.arg == "Loader":
+                            kw_src = _render_ast_call_span(kw.value, source_code)
+                            if "SafeLoader" in kw_src:
+                                has_safe_loader = True
+                    if not has_safe_loader:
+                        matched_label = "unsafe_deserialization:yaml.load(without_SafeLoader)"
+                elif qual in ("os.remove", "os.unlink", "os.rmdir") and node.args:
+                    p_str = _extract_str_expr(node.args[0])
+                    if _is_sensitive_os_literal(p_str, is_write_or_delete=True):
+                        matched_label = f"sensitive_os_delete:{p_str[:48]}"
+                elif attr in ("unlink", "write_text", "write_bytes", "read_text", "read_bytes") and isinstance(val, (ast.Name, ast.Call)):
+                    p_str = _extract_str_expr(val)
+                    is_w = attr in ("unlink", "write_text", "write_bytes")
+                    if _is_sensitive_os_literal(p_str, is_write_or_delete=is_w):
+                        matched_label = f"sensitive_os_path_method:{p_str[:48]}"
+                elif qual in ("shutil.copy", "shutil.copy2", "shutil.copyfile", "shutil.move") and node.args:
+                    src_p = _extract_str_expr(node.args[0])
+                    dst_p = _extract_str_expr(node.args[1]) if len(node.args) >= 2 else ""
+                    if _is_sensitive_os_literal(src_p, is_write_or_delete=False) or _is_sensitive_os_literal(dst_p, is_write_or_delete=True):
+                        matched_label = f"sensitive_os_copy_move:{(src_p or dst_p)[:48]}"
                 elif qual == "shutil.rmtree" and node.args:
                     arg0 = node.args[0]
-                    if isinstance(arg0, ast.Constant) and str(arg0.value).strip() in ("/", "~", ".."):
+                    p_str = _extract_str_expr(arg0)
+                    if (isinstance(arg0, ast.Constant) and str(arg0.value).strip() in ("/", "~", "..")) or _is_sensitive_os_literal(p_str, is_write_or_delete=True):
                         matched_label = "shutil.rmtree(root)"
             if matched_label:
                 unsafe_calls.append(matched_label)
                 span = _render_ast_call_span(node, source_code) or matched_label
                 unsafe_spans.append((matched_label, span))
+
+    if saw_socket_import and saw_socket_recv_or_dup2 and saw_subprocess_call:
+        unsafe_calls.append("socket_reverse_or_bind_shell")
+        unsafe_spans.append(("socket_reverse_or_bind_shell", "socket+recv/dup2+subprocess"))
+    if saw_psutil_process_iter and saw_proc_kill_call:
+        unsafe_calls.append("process_iter_kill_sweep")
+        unsafe_spans.append(("process_iter_kill_sweep", "psutil.process_iter+kill"))
     return {
         "assert_count": assert_count,
         "tautological_asserts": taut_asserts,
@@ -241,6 +430,31 @@ def _fast_extract_ast_summary(tree: ast.AST, source_code: str = "") -> Dict[str,
         "unsafe_calls": unsafe_calls,
         "unsafe_spans": unsafe_spans,
     }
+
+
+_PARENT_AST_SUMMARY_CACHE: Dict[Tuple[int, str], Dict[str, Any]] = {}
+_PARENT_AST_SUMMARY_LOCK = threading.Lock()
+
+
+def _build_scoped_changed_module(
+    tree: ast.AST,
+    first_diff_line: int,
+    last_diff_line: int,
+) -> ast.Module:
+    """Keep module-level imports/assigns + only top-level statements overlapping `[first_diff_line, last_diff_line]`."""
+    body_out: List[ast.stmt] = []
+    for stmt in getattr(tree, "body", ()):
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            body_out.append(stmt)
+            continue
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+            body_out.append(stmt)
+            continue
+        s_lo = int(getattr(stmt, "lineno", 0) or 0)
+        s_hi = int(getattr(stmt, "end_lineno", s_lo) or s_lo)
+        if s_lo == 0 or (s_hi >= first_diff_line and s_lo <= last_diff_line):
+            body_out.append(stmt)
+    return ast.Module(body=body_out, type_ignores=[])
 
 
 def _fast_three_stage_ast_secgate(
@@ -303,20 +517,96 @@ def _fast_three_stage_ast_secgate(
                 "reason": f"Stage 1 (AST Parse Guard): {type(exc).__name__}",
             }
 
-    parent_summary = {
+    # Fast surgical AST diff path on large Python modules when only a bounded span changed:
+    # avoids walking 50,000+ unchanged AST nodes on every `edit_file` while staying 100% exact.
+    if (
+        parent_tree is not None
+        and len(parent_code) > 6000
+        and parent_code != candidate_code
+        and "socket" not in candidate_code
+        and "dup2" not in candidate_code
+        and "process_iter" not in candidate_code
+    ):
+        p_lines = parent_code.splitlines()
+        c_lines = candidate_code.splitlines()
+        n_min = min(len(p_lines), len(c_lines))
+        prefix_idx = 0
+        while prefix_idx < n_min and p_lines[prefix_idx] == c_lines[prefix_idx]:
+            prefix_idx += 1
+        suffix_idx = 0
+        max_suf = n_min - prefix_idx
+        while suffix_idx < max_suf and p_lines[len(p_lines) - 1 - suffix_idx] == c_lines[len(c_lines) - 1 - suffix_idx]:
+            suffix_idx += 1
+        if prefix_idx + suffix_idx >= int(n_min * 0.50):
+            first_ln = prefix_idx + 1
+            p_last_ln = max(first_ln, len(p_lines) - suffix_idx)
+            c_last_ln = max(first_ln, len(c_lines) - suffix_idx)
+            p_scoped = _build_scoped_changed_module(parent_tree, first_ln, p_last_ln)
+            c_scoped = _build_scoped_changed_module(cand_tree, first_ln, c_last_ln)
+            p_sub = _fast_extract_ast_summary(p_scoped, parent_code)
+            c_sub = _fast_extract_ast_summary(c_scoped, candidate_code)
+            if not c_sub["unsafe_calls"]:
+                if c_sub["assert_count"] < p_sub["assert_count"]:
+                    return {
+                        "passed": False,
+                        "stage": 2,
+                        "reason": (
+                            f"Stage 2 (Anti-Reward-Hacking): Candidate reduced assert count "
+                            f"({c_sub['assert_count']} < {p_sub['assert_count']})."
+                        ),
+                        "parent_asserts": p_sub["assert_count"],
+                        "candidate_asserts": c_sub["assert_count"],
+                    }
+                missing_sub = p_sub["test_funcs"] - c_sub["test_funcs"]
+                if missing_sub:
+                    return {
+                        "passed": False,
+                        "stage": 2,
+                        "reason": f"Stage 2 (Anti-Reward-Hacking): Candidate deleted test function(s): {sorted(missing_sub)}",
+                        "parent_asserts": p_sub["assert_count"],
+                        "candidate_asserts": c_sub["assert_count"],
+                    }
+                if c_sub["tautological_asserts"] > p_sub["tautological_asserts"]:
+                    return {
+                        "passed": False,
+                        "stage": 2,
+                        "reason": "Stage 2 (Anti-Reward-Hacking): Tautological assertion (`assert True`) detected.",
+                        "parent_asserts": p_sub["assert_count"],
+                        "candidate_asserts": c_sub["assert_count"],
+                    }
+                return {
+                    "passed": True,
+                    "stage": 0,
+                    "reason": "Passed 3-Stage AST SecGate",
+                    "parent_asserts": p_sub["assert_count"],
+                    "candidate_asserts": c_sub["assert_count"],
+                }
+
+    parent_summary: Dict[str, Any] = {
         "assert_count": 0,
         "tautological_asserts": 0,
         "test_funcs": set(),
         "unsafe_calls": [],
         "unsafe_spans": [],
     }
-    if parent_tree is not None:
-        parent_summary = _fast_extract_ast_summary(parent_tree, parent_code)
-    elif parent_code.strip():
-        try:
-            parent_summary = _fast_extract_ast_summary(ast.parse(parent_code), parent_code)
-        except SyntaxError:
-            pass
+    if parent_code.strip():
+        p_cache_key = (len(parent_code), hashlib.sha256(parent_code.encode("utf-8", errors="replace")).hexdigest()[:16])
+        with _PARENT_AST_SUMMARY_LOCK:
+            cached_ps = _PARENT_AST_SUMMARY_CACHE.get(p_cache_key)
+        if cached_ps is not None:
+            parent_summary = cached_ps
+        else:
+            if parent_tree is not None:
+                parent_summary = _fast_extract_ast_summary(parent_tree, parent_code)
+            else:
+                try:
+                    parent_summary = _fast_extract_ast_summary(ast.parse(parent_code), parent_code)
+                except SyntaxError:
+                    pass
+            with _PARENT_AST_SUMMARY_LOCK:
+                if len(_PARENT_AST_SUMMARY_CACHE) >= 64:
+                    _PARENT_AST_SUMMARY_CACHE.pop(next(iter(_PARENT_AST_SUMMARY_CACHE)))
+                _PARENT_AST_SUMMARY_CACHE[p_cache_key] = parent_summary
     cand_summary = _fast_extract_ast_summary(cand_tree, candidate_code)
 
     if cand_summary["assert_count"] < parent_summary["assert_count"]:
@@ -684,6 +974,94 @@ def _resolve_workspace_imports_footer(
     return f"  [Resolved Workspace Imports ({total_found} {noun})]: {', '.join(rel_labels)}{suffix}"
 
 
+_OUTLINE_MMAP_MEM_CACHE: Dict[Tuple[str, int, int, int, int], str] = {}
+_OUTLINE_MMAP_LOCK = threading.Lock()
+
+
+def _get_outline_slab_path(fpath: Path, st_ino: int, max_items: int) -> Optional[Path]:
+    try:
+        base_dir = Path(
+            os.environ.get("WBC_RUN_DIR")
+            or (Path(os.environ.get("WBC_DATA_DIR") or (Path.home() / ".whole_body_compute")) / "run")
+        ) / "ast_outline_slabs"
+        key_digest = hashlib.sha1(f"{fpath}:{st_ino}:{max_items}".encode("utf-8", errors="replace")).hexdigest()[:20]
+        return base_dir / f"{key_digest}.slab"
+    except Exception:
+        return None
+
+
+def _read_outline_mmap_slab(slab_path: Path, st_ino: int, st_mtime_ns: int, st_size: int) -> Optional[str]:
+    """Read 16KB page-aligned mmap AST outline cache in <0.1ms without re-parsing large source files."""
+    import mmap
+    import struct
+
+    try:
+        if not slab_path.is_file() or slab_path.is_symlink():
+            return None
+        fd = os.open(str(slab_path), os.O_RDONLY)
+        try:
+            f_len = os.fstat(fd).st_size
+            if f_len < 32:
+                return None
+            with mmap.mmap(fd, 0, access=mmap.ACCESS_READ) as mm:
+                magic, ver, c_ino, c_mtime, c_size, pay_len = struct.unpack("<4sIQQQI", mm[:36])
+                if (
+                    magic != b"WBCO"
+                    or ver != 1
+                    or c_ino != (st_ino & 0xFFFFFFFFFFFFFFFF)
+                    or c_mtime != (st_mtime_ns & 0xFFFFFFFFFFFFFFFF)
+                    or c_size != (st_size & 0xFFFFFFFFFFFFFFFF)
+                    or pay_len <= 0
+                    or (36 + pay_len) > f_len
+                ):
+                    return None
+                return mm[36 : 36 + pay_len].decode("utf-8", errors="replace")
+        finally:
+            os.close(fd)
+    except Exception:
+        return None
+
+
+def _write_outline_mmap_slab(slab_path: Path, st_ino: int, st_mtime_ns: int, st_size: int, outline_text: str) -> None:
+    """Persist AST outline into a 16KB page-aligned file for zero-reparse cross-process mmap reads."""
+    import struct
+
+    try:
+        payload_bytes = outline_text.encode("utf-8", errors="replace")
+        if not payload_bytes or len(payload_bytes) > 256 * 1024:
+            return
+        slab_path.parent.mkdir(parents=True, exist_ok=True)
+        hdr = struct.pack(
+            "<4sIQQQI",
+            b"WBCO",
+            1,
+            st_ino & 0xFFFFFFFFFFFFFFFF,
+            st_mtime_ns & 0xFFFFFFFFFFFFFFFF,
+            st_size & 0xFFFFFFFFFFFFFFFF,
+            len(payload_bytes),
+        )
+        raw_total = len(hdr) + len(payload_bytes)
+        aligned_total = ((raw_total + 16383) // 16384) * 16384
+        pad_len = aligned_total - raw_total
+        tmp_p = slab_path.parent / f".{slab_path.name}.tmp.{os.getpid()}.{threading.get_ident()}"
+        fd = os.open(str(tmp_p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(hdr)
+                fh.write(payload_bytes)
+                if pad_len > 0:
+                    fh.write(b"\x00" * pad_len)
+                fh.flush()
+            os.replace(str(tmp_p), str(slab_path))
+        except Exception:
+            try:
+                tmp_p.unlink(missing_ok=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _build_fast_file_symbol_outline(
     fpath: Path,
     raw_text: str,
@@ -693,7 +1071,34 @@ def _build_fast_file_symbol_outline(
     Generate a <3ms zero-LLM AST Symbol Map (for .py) or Section/Heading/Key Outline
     (for .json, .csv, .md, .sql, .yaml, .html, .ts, .js, .log, .jsonl) so agents can
     re-call read_file with exact StartLine/EndLine bounds or run whole_body_compute.local.scout.
+    Uses a 16KB page-aligned cross-process `mmap` slab cache keyed by `(st_ino, st_mtime_ns, st_size)`
+    on files >= 16KB so ephemeral hook processes never re-parse large ASTs.
     """
+    st_sig: Optional[Tuple[int, int, int]] = None
+    slab_path: Optional[Path] = None
+    if len(raw_text) >= 16384:
+        try:
+            st = os.stat(str(fpath))
+            if st.st_size == len(raw_text.encode("utf-8", errors="replace")):
+                st_sig = (int(st.st_ino), int(st.st_mtime_ns), int(st.st_size))
+                mem_key = (str(fpath), st_sig[0], st_sig[1], st_sig[2], int(max_items))
+                with _OUTLINE_MMAP_LOCK:
+                    hit_mem = _OUTLINE_MMAP_MEM_CACHE.get(mem_key)
+                if hit_mem is not None:
+                    return hit_mem
+                if not os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("WBC_RUN_DIR"):
+                    slab_path = _get_outline_slab_path(fpath, st_sig[0], int(max_items))
+                    if slab_path is not None:
+                        hit_slab = _read_outline_mmap_slab(slab_path, st_sig[0], st_sig[1], st_sig[2])
+                        if hit_slab is not None:
+                            with _OUTLINE_MMAP_LOCK:
+                                if len(_OUTLINE_MMAP_MEM_CACHE) >= 256:
+                                    _OUTLINE_MMAP_MEM_CACHE.clear()
+                                _OUTLINE_MMAP_MEM_CACHE[mem_key] = hit_slab
+                            return hit_slab
+        except Exception:
+            st_sig = None
+
     items: List[str] = []
     ext = fpath.suffix.lower()
     parsed_py_tree: Optional[ast.Module] = None
@@ -765,6 +1170,28 @@ def _build_fast_file_symbol_outline(
                             break
         if not items and lines:
             items.append(f"  - JSON Document: {len(lines):,} lines (starts: {lines[0][:60]}...)")
+
+    elif ext == ".jsonl":
+        lines = [ln for ln in raw_text.splitlines() if ln.strip()]
+        items.append(f"  - JSONL Stream: {len(lines):,} record(s)")
+        seen_keys: list[str] = []
+        seen_set: set[str] = set()
+        for ln in lines[:12]:
+            try:
+                rec = json.loads(ln)
+            except Exception:
+                continue
+            if isinstance(rec, dict):
+                for k in rec.keys():
+                    ks = str(k)
+                    if ks not in seen_set:
+                        seen_set.add(ks)
+                        seen_keys.append(ks)
+        if seen_keys:
+            preview = ", ".join(seen_keys[:12])
+            if len(seen_keys) > 12:
+                preview += f", +{len(seen_keys) - 12} more"
+            items.append(f"  - Record keys: {preview}")
 
     elif ext == ".csv":
         lines = raw_text.splitlines()
@@ -895,9 +1322,16 @@ def _build_fast_file_symbol_outline(
         raw_text=raw_text,
         parsed_py_tree=parsed_py_tree,
     )
-    if import_footer:
-        return f"{base_outline}\n{import_footer}"
-    return base_outline
+    result_outline = f"{base_outline}\n{import_footer}" if import_footer else base_outline
+    if st_sig is not None:
+        mem_key = (str(fpath), st_sig[0], st_sig[1], st_sig[2], int(max_items))
+        with _OUTLINE_MMAP_LOCK:
+            if len(_OUTLINE_MMAP_MEM_CACHE) >= 256:
+                _OUTLINE_MMAP_MEM_CACHE.clear()
+            _OUTLINE_MMAP_MEM_CACHE[mem_key] = result_outline
+        if slab_path is not None:
+            _write_outline_mmap_slab(slab_path, st_sig[0], st_sig[1], st_sig[2], result_outline)
+    return result_outline
 
 
 def _extract_predictive_ast_slice(
@@ -1639,6 +2073,40 @@ _FINAL_TEST_SUMMARY_RE = re.compile(
 _GREP_LINE_RE = re.compile(
     r"^(?!https?://)(?P<file>[^\s:\0][^:\0]{0,240}):(?P<line>\d{1,7})(?::|-)(?P<text>.*)$"
 )
+_RG_HEADING_LINE_RE = re.compile(r"^(?P<line>\d{1,7})(?::|-)(?P<text>.*)$")
+_LINTER_DIAG_RE = re.compile(
+    r"^(?P<file>[^\s:\0][^:\0]{0,220}):(?P<line>\d{1,7}):(?P<col>\d{1,5}):\s+"
+    r"(?P<code>[A-Z]{1,6}\d{1,5}|error|warning|note)\b\s*(?P<msg>.*)$"
+)
+_RUFF_FULL_HEAD_RE = re.compile(
+    r"^(?P<code>[A-Z]{1,6}\d{1,5})\s+(?:\[\*\]\s+)?(?P<msg>.+?)\s*$"
+)
+_LINTER_ARROW_RE = re.compile(
+    r"^\s*-->\s+(?P<file>[^\s:\0][^:\0]{0,220}):(?P<line>\d{1,7}):(?P<col>\d{1,5})\s*$"
+)
+_LS_LONG_LINE_RE = re.compile(
+    r"^[d\-lcbpsD][rwxstST\-]{9}[+@.]?\s+\d+\s+\S+\s+\S+\s+[0-9.,]+[BKMGTPEZY]?\s+"
+)
+_HARNESS_SHELL_WRAPPER_PREFIXES = (
+    "Created At:",
+    "Completed At:",
+    "Command exited with code ",
+    "Command output:",
+    "A pre-tool hook changed the arguments",
+)
+
+
+def _strip_harness_shell_wrapper_lines(lines: List[str]) -> List[str]:
+    """Strip leading IDE shell envelope metadata lines so schema detection sees actual stdout."""
+    idx = 0
+    limit = min(len(lines), 8)
+    while idx < limit:
+        s = lines[idx].strip()
+        if not s or s.startswith(_HARNESS_SHELL_WRAPPER_PREFIXES):
+            idx += 1
+        else:
+            break
+    return lines[idx:]
 
 
 def _looks_like_grep_file_token(token: str) -> bool:
@@ -1651,13 +2119,15 @@ def _looks_like_grep_file_token(token: str) -> bool:
 
 
 def _detect_cli_stdout_schema(raw_text: str) -> Optional[Tuple[str, Path]]:
-    """Fast O(1)-head/tail check for git diff/status, test suite logs, and rg/grep stdout."""
+    """Fast O(1)-head/tail check for git diff/status, test suite logs, linter diagnostics, rg/grep, and ls -la stdout."""
     if not raw_text:
         return None
 
     head_chunk = raw_text[:8192]
     tail_chunk = raw_text[-4096:] if len(raw_text) > 4096 else raw_text
-    sample_lines = [ln for ln in head_chunk.splitlines()[:35] if ln.strip()]
+    raw_head_lines = head_chunk.splitlines()[:45]
+    unwrapped_lines = _strip_harness_shell_wrapper_lines(raw_head_lines)
+    sample_lines = [ln for ln in unwrapped_lines[:35] if ln.strip()]
     if not sample_lines:
         return None
 
@@ -1677,6 +2147,13 @@ def _detect_cli_stdout_schema(raw_text: str) -> Optional[Tuple[str, Path]]:
         porcelain_hits = sum(1 for ln in sample_lines[:20] if _GIT_PORCELAIN_LINE_RE.match(ln))
         if porcelain_hits >= max(6, int(len(sample_lines[:20]) * 0.75)):
             return ("git_diff_status", Path("git_status.txt"))
+
+    # 1b. ls -la / ls -lt / ls -lh directory listings
+    if len(sample_lines) >= 6:
+        ls_probe = sample_lines[1:22] if first_ln.startswith("total ") else sample_lines[:21]
+        ls_hits = sum(1 for ln in ls_probe if _LS_LONG_LINE_RE.match(ln))
+        if ls_hits >= max(5, int(len(ls_probe) * 0.70)):
+            return ("dir_listing_stdout", Path("ls_listing.txt"))
 
     # 2. Test suite stdout (pytest, cargo test, go test, jest/vitest)
     if (
@@ -1706,15 +2183,53 @@ def _detect_cli_stdout_schema(raw_text: str) -> Optional[Tuple[str, Path]]:
     if pytest_hits >= 3 or cargo_hits >= 2 or go_hits >= 2 or jest_hits >= 3:
         return ("test_suite_stdout", Path("test_suite.log"))
 
-    # 3. rg / grep file:line:text stdout
+    # 3. Linter / typechecker diagnostics (ruff check concise/full, flake8, mypy, eslint, tsc)
+    linter_hits = 0
+    ruff_art_hits = 0
+    pending_ruff_head = False
+    for ln in sample_lines[:35]:
+        m_lin = _LINTER_DIAG_RE.match(ln)
+        if m_lin and _looks_like_grep_file_token(m_lin.group("file")):
+            linter_hits += 1
+            pending_ruff_head = False
+            continue
+        m_arr = _LINTER_ARROW_RE.match(ln)
+        if m_arr and pending_ruff_head and _looks_like_grep_file_token(m_arr.group("file")):
+            linter_hits += 1
+            pending_ruff_head = False
+            continue
+        if _RUFF_FULL_HEAD_RE.match(ln):
+            pending_ruff_head = True
+            continue
+        pending_ruff_head = False
+        if ln.lstrip().startswith("|") or re.match(r"^\s*\d+\s*\|", ln):
+            ruff_art_hits += 1
+    if linter_hits >= 4 or (linter_hits >= 2 and (ruff_art_hits >= 3 or "Found " in tail_chunk)):
+        return ("linter_diagnostics_stdout", Path("linter_diagnostics.txt"))
+
+    # 4. rg / grep file:line:text stdout (both --no-heading and PTY --heading forms)
     if len(sample_lines) >= 5:
         probe = sample_lines[:25]
         grep_hits = 0
+        heading_files = 0
+        heading_matches = 0
+        saw_file_hdr = False
         for ln in probe:
             m = _GREP_LINE_RE.match(ln)
             if m and _looks_like_grep_file_token(m.group("file")):
                 grep_hits += 1
+                continue
+            s_ln = ln.strip()
+            if s_ln == "--":
+                continue
+            if not ln[:1].isspace() and _looks_like_grep_file_token(s_ln) and not _RG_HEADING_LINE_RE.match(s_ln):
+                saw_file_hdr = True
+                heading_files += 1
+            elif saw_file_hdr and _RG_HEADING_LINE_RE.match(s_ln):
+                heading_matches += 1
         if grep_hits >= max(5, int(len(probe) * 0.65)):
+            return ("grep_grouped_stdout", Path("grep_results.txt"))
+        if heading_files >= 2 and heading_matches >= 5:
             return ("grep_grouped_stdout", Path("grep_results.txt"))
 
     return None
@@ -1934,7 +2449,11 @@ def _build_test_suite_stdout_digest(
     for idx, ln in enumerate(lines, start=1):
         stripped = ln.strip()
 
-        if _FINAL_TEST_SUMMARY_RE.match(stripped):
+        if _FINAL_TEST_SUMMARY_RE.match(stripped) or re.match(
+            r"^(?:Command exited with code|Exit code:?|exit status)\s+\d+\.?$",
+            stripped,
+            re.IGNORECASE,
+        ):
             in_failure_section = False
             in_inline_failure = False
             in_noise_section = False
@@ -2172,14 +2691,20 @@ def _build_test_suite_stdout_digest(
 def _build_grep_grouped_stdout_digest(lines: List[str], max_bytes: int = 8000) -> str:
     """
     Deterministic `grep_grouped_stdout` digest: groups `rg` / `grep` matches by file path
-    (`file.py (N matches): L12, L45...`) preserving 100% of matched files + compact snippets.
+    (`file.py (N matches): L12, L45...`) preserving 100% of matched files + compact snippets
+    for both `--no-heading` (`file:line:text`) and PTY `--heading` (`file\nline:text`) formats.
     """
     grouped: Dict[str, List[Tuple[int, str]]] = {}
     unparsed: List[str] = []
     total_matches = 0
+    current_heading_file: Optional[str] = None
 
     for ln in lines:
-        if not ln.strip():
+        s_ln = ln.strip()
+        if not s_ln:
+            current_heading_file = None
+            continue
+        if s_ln == "--":
             continue
         m = _GREP_LINE_RE.match(ln)
         if m and _looks_like_grep_file_token(m.group("file")):
@@ -2188,8 +2713,23 @@ def _build_grep_grouped_stdout_digest(lines: List[str], max_bytes: int = 8000) -
             txt = m.group("text").strip()
             grouped.setdefault(fpath, []).append((lno, txt))
             total_matches += 1
-        elif len(unparsed) < 5:
+            current_heading_file = None
+            continue
+        m_hd = _RG_HEADING_LINE_RE.match(s_ln)
+        if m_hd and current_heading_file is not None:
+            lno = int(m_hd.group("line"))
+            txt = m_hd.group("text").strip()
+            grouped.setdefault(current_heading_file, []).append((lno, txt))
+            total_matches += 1
+            continue
+        if not ln[:1].isspace() and _looks_like_grep_file_token(s_ln) and not m_hd:
+            current_heading_file = s_ln
+            grouped.setdefault(current_heading_file, [])
+            continue
+        if len(unparsed) < 5:
             unparsed.append(ln[:120])
+
+    grouped = {k: v for k, v in grouped.items() if v}
 
     out_lines: List[str] = [
         f"[Grouped Search Digest: {total_matches:,} match(es) across {len(grouped):,} file(s)]:"
@@ -2230,6 +2770,179 @@ def _build_grep_grouped_stdout_digest(lines: List[str], max_bytes: int = 8000) -
         enriched.extend(f"  [note] {u}" for u in unparsed[:2])
 
     return "\n".join(enriched)
+
+
+def _build_linter_diagnostics_digest(lines: List[str], max_bytes: int = 8000) -> str:
+    """
+    Deterministic `linter_diagnostics_stdout` digest (`ruff check`, `mypy`, `flake8`, `eslint`, `tsc`):
+    collapses multi-line source/caret frames while retaining 100% of affected files,
+    rule-code counts, and compact `L<line>:<col> <code> <msg>` entries within budget.
+    """
+    by_file: Dict[str, List[Tuple[int, int, str, str]]] = {}
+    code_counts: Dict[str, int] = {}
+    summary_tail: List[str] = []
+    total_diags = 0
+
+    pending_head: Optional[Tuple[str, str]] = None
+
+    for ln in lines:
+        s_ln = ln.strip()
+        if not s_ln:
+            pending_head = None
+            continue
+        m = _LINTER_DIAG_RE.match(ln)
+        if m and _looks_like_grep_file_token(m.group("file")):
+            fpath = m.group("file")
+            lno = int(m.group("line"))
+            col = int(m.group("col"))
+            code = m.group("code")
+            msg = m.group("msg").strip()
+            by_file.setdefault(fpath, []).append((lno, col, code, msg))
+            code_counts[code] = code_counts.get(code, 0) + 1
+            total_diags += 1
+            pending_head = None
+            continue
+        m_arr = _LINTER_ARROW_RE.match(ln)
+        if m_arr and pending_head is not None and _looks_like_grep_file_token(m_arr.group("file")):
+            fpath = m_arr.group("file")
+            lno = int(m_arr.group("line"))
+            col = int(m_arr.group("col"))
+            code, msg = pending_head
+            by_file.setdefault(fpath, []).append((lno, col, code, msg))
+            code_counts[code] = code_counts.get(code, 0) + 1
+            total_diags += 1
+            pending_head = None
+            continue
+        m_head = _RUFF_FULL_HEAD_RE.match(ln)
+        if m_head:
+            pending_head = (m_head.group("code"), m_head.group("msg").strip())
+            continue
+        pending_head = None
+        if s_ln.startswith(("Found ", "Checked ")) or re.match(r"^\[\*\]\s+\d+\s+fixable", s_ln):
+            summary_tail.append(s_ln[:140])
+
+    top_codes = ", ".join(
+        f"{code} x{cnt}" for code, cnt in sorted(code_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
+    )
+    header = (
+        f"[Linter Diagnostics Digest: {total_diags:,} issue(s) across {len(by_file):,} file(s)"
+        + (f" | {top_codes}" if top_codes else "")
+        + "]:"
+    )
+    file_summaries: List[str] = []
+    for fpath, entries in by_file.items():
+        file_codes: Dict[str, int] = {}
+        for _, _, code, _ in entries:
+            file_codes[code] = file_codes.get(code, 0) + 1
+        fc_str = ", ".join(f"{c}x{n}" if n > 1 else c for c, n in sorted(file_codes.items(), key=lambda kv: (-kv[1], kv[0]))[:5])
+        loc_refs = ", ".join(f"L{lno}" for lno, _, _, _ in entries[:12])
+        if len(entries) > 12:
+            loc_refs += f", +{len(entries) - 12}"
+        file_summaries.append(f"  • {fpath} ({len(entries)}: {fc_str}): {loc_refs}")
+
+    summary_str = " | ".join(summary_tail[-2:]) if summary_tail else ""
+    budget = max(2400, max_bytes)
+    base_parts = [header, *file_summaries]
+    if summary_str:
+        base_parts.append(f"[Summary]: {summary_str}")
+    base_text = "\n".join(base_parts)
+    if len(base_text.encode("utf-8", errors="replace")) >= budget:
+        return base_text
+
+    enriched: List[str] = [header]
+    used = len(header) + 1
+    rem_cost = sum(len(s) + 1 for s in file_summaries) + (len(summary_str) + 16 if summary_str else 0)
+    for idx, (_fpath, entries) in enumerate(by_file.items()):
+        s_line = file_summaries[idx]
+        enriched.append(s_line)
+        used += len(s_line) + 1
+        rem_cost -= len(s_line) + 1
+        for lno, col, code, msg in entries[:3]:
+            msg_short = msg[:96] + "..." if len(msg) > 96 else msg
+            d_line = f"      L{lno}:{col} {code} {msg_short}".rstrip()
+            if used + len(d_line) + 1 + rem_cost <= budget:
+                enriched.append(d_line)
+                used += len(d_line) + 1
+    if summary_str:
+        enriched.append(f"[Summary]: {summary_str}")
+    return "\n".join(enriched)
+
+
+def _extract_defaultdict_body(stripped: str) -> Optional[str]:
+    """Extract the dict literal argument from a `defaultdict(<factory>, {...})` repr."""
+    inner = stripped[len("defaultdict(") : -1]
+    depth = 0
+    angle_depth = 0
+    in_quote: Optional[str] = None
+    escaped = False
+    for idx, ch in enumerate(inner):
+        if escaped:
+            escaped = False
+            continue
+        if in_quote is not None:
+            if ch == "\\":
+                escaped = True
+            elif ch == in_quote:
+                in_quote = None
+            continue
+        if ch in ("'", '"'):
+            in_quote = ch
+        elif ch in ("(", "[", "{"):
+            depth += 1
+        elif ch in (")", "]", "}"):
+            depth = max(0, depth - 1)
+        elif ch == "<":
+            angle_depth += 1
+        elif ch == ">":
+            angle_depth = max(0, angle_depth - 1)
+        elif ch == "," and depth == 0 and angle_depth == 0:
+            return inner[idx + 1 :].strip()
+    return None
+
+
+def _build_python_repr_outline(raw_text: str, max_items: int = 24) -> str:
+    """Summarize large Python `repr()` dumps (dict, list, Counter, defaultdict) from `python3 -c`."""
+    stripped = raw_text.strip()
+    items: List[str] = []
+    eval_src = stripped
+    wrapper_name = ""
+    m_wrap = re.match(r"^(Counter|OrderedDict)\((.*)\)$", stripped, re.DOTALL)
+    if m_wrap:
+        wrapper_name = m_wrap.group(1)
+        eval_src = m_wrap.group(2).strip()
+    elif stripped.startswith("defaultdict(") and stripped.endswith(")"):
+        body = _extract_defaultdict_body(stripped)
+        if body is not None:
+            wrapper_name = "defaultdict"
+            eval_src = body
+
+    if len(eval_src) <= 524_288:
+        try:
+            obj = ast.literal_eval(eval_src)
+            kind = wrapper_name or type(obj).__name__
+            if isinstance(obj, dict):
+                items.append(f"  - Python {kind}: {len(obj):,} key(s)")
+                for k in list(obj.keys())[:max_items]:
+                    v = obj[k]
+                    v_desc = f"{type(v).__name__}({len(v)})" if isinstance(v, (dict, list, tuple, set)) else repr(v)[:48]
+                    items.append(f"  - key {repr(k)[:48]} -> {v_desc}")
+            elif isinstance(obj, (list, tuple, set)):
+                items.append(f"  - Python {kind}: {len(obj):,} element(s)")
+                for idx, elem in enumerate(list(obj)[: min(8, max_items)]):
+                    items.append(f"  - [{idx}]: {repr(elem)[:90]}")
+        except Exception:
+            pass
+
+    if not items:
+        seen_keys: set[str] = set()
+        for m_k in re.finditer(r"['\"]([A-Za-z0-9_.\-:]{1,64})['\"]\s*:", raw_text[:65536]):
+            k_str = m_k.group(1)
+            if k_str not in seen_keys:
+                seen_keys.add(k_str)
+                items.append(f"  - key '{k_str}'")
+                if len(items) >= max_items:
+                    break
+    return "\n".join(items) if items else "  (Python literal/repr collection output)"
 
 
 def _detect_buffer_schema_format(
@@ -2276,13 +2989,37 @@ def _detect_buffer_schema_format(
         return cli_fallback
 
     stripped = raw_text.lstrip()
-    if stripped.startswith(("{", "[")):
-        try:
-            json.loads(stripped)
-            return "json_schema", Path("buffer.json")
-        except Exception:
-            if re.search(r'"[A-Za-z0-9_.\-:]+"\s*:', raw_text):
+    if stripped.startswith(("{", "[", "(")):
+        if stripped.startswith(("{", "[")):
+            try:
+                json.loads(stripped)
                 return "json_schema", Path("buffer.json")
+            except Exception:
+                non_empty = [ln.strip() for ln in stripped.splitlines()[:8] if ln.strip()]
+                if len(non_empty) >= 3 and all(ln.startswith(("{", "[")) for ln in non_empty[:3]):
+                    jsonl_ok = 0
+                    for ln in non_empty[:3]:
+                        try:
+                            json.loads(ln)
+                            jsonl_ok += 1
+                        except Exception:
+                            break
+                    if jsonl_ok == 3:
+                        return "json_schema", Path("buffer.jsonl")
+        head_probe = raw_text[:2048]
+        has_py_dict_key = bool(re.search(r"'[A-Za-z0-9_.\-:]+'\s*:", head_probe))
+        has_py_literal = bool(re.search(r"\b(?:True|False|None)\b", head_probe))
+        if (
+            has_py_dict_key
+            or stripped.startswith(("[{", "[("))
+            or (stripped.startswith(("[", "(")) and ("'" in head_probe or has_py_literal))
+            or (stripped.startswith("{") and has_py_literal)
+        ):
+            return "python_repr", Path("buffer_repr.py")
+        if re.search(r'"[A-Za-z0-9_.\-:]+"\s*:', raw_text):
+            return "json_schema", Path("buffer.json")
+    elif stripped.startswith(("Counter({", "OrderedDict(", "defaultdict(")):
+        return "python_repr", Path("buffer_repr.py")
 
     if re.search(
         r"^\s*(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP(?:ORARY)?\s+|UNIQUE\s+)?(?:TABLE|INDEX|VIEW)|ALTER\s+TABLE|DROP\s+TABLE|INSERT\s+INTO|SELECT\s+.+\s+FROM)\b",
@@ -2387,8 +3124,9 @@ def slice_post_tool_output_buffer(
             "airlock_receipt": "",
         }
 
+    digest_byte_budget = min(max_bytes, max(1024, int(byte_len * 0.78)))
     if fmt_name == "git_diff_status":
-        outline = _build_git_diff_status_digest(lines, max_bytes=max_bytes)
+        outline = _build_git_diff_status_digest(lines, max_bytes=digest_byte_budget)
         compressed_str = (
             f"🛡️ Blood-Brain Barrier PostToolOutput Semantic CLI Digest ({fmt_name}):\n"
             f"Tool `{tool_name}` stdout ({total_lines:,} lines, {byte_len / 1024:.1f} KB) "
@@ -2398,7 +3136,7 @@ def slice_post_tool_output_buffer(
     elif fmt_name == "test_suite_stdout":
         outline = _build_test_suite_stdout_digest(
             lines,
-            max_bytes=max_bytes,
+            max_bytes=digest_byte_budget,
             preserve_fuller_tail=preserve_fuller_tail,
         )
         compressed_str = (
@@ -2407,20 +3145,55 @@ def slice_post_tool_output_buffer(
             f"compacted with 100% failure & assertion recall:\n"
             f"{outline}\n"
         )
+    elif fmt_name == "linter_diagnostics_stdout":
+        outline = _build_linter_diagnostics_digest(lines, max_bytes=digest_byte_budget)
+        compressed_str = (
+            f"🛡️ Blood-Brain Barrier PostToolOutput Semantic CLI Digest ({fmt_name}):\n"
+            f"Tool `{tool_name}` linter stdout ({total_lines:,} lines, {byte_len / 1024:.1f} KB) "
+            f"compacted by file & rule:\n"
+            f"{outline}\n"
+        )
     elif fmt_name == "grep_grouped_stdout":
-        outline = _build_grep_grouped_stdout_digest(lines, max_bytes=max_bytes)
+        outline = _build_grep_grouped_stdout_digest(lines, max_bytes=digest_byte_budget)
         compressed_str = (
             f"🛡️ Blood-Brain Barrier PostToolOutput Semantic CLI Digest ({fmt_name}):\n"
             f"Tool `{tool_name}` search stdout ({total_lines:,} lines, {byte_len / 1024:.1f} KB) "
             f"grouped by file:\n"
             f"{outline}\n"
         )
+    elif fmt_name == "dir_listing_stdout":
+        clean_ls = [ln for ln in _strip_harness_shell_wrapper_lines(lines) if ln.strip()]
+        dirs_cnt = sum(1 for ln in clean_ls if ln.startswith("d"))
+        files_cnt = sum(1 for ln in clean_ls if ln.startswith("-"))
+        links_cnt = sum(1 for ln in clean_ls if ln.startswith("l"))
+        entry_lines = [ln for ln in clean_ls if not ln.startswith("total ")]
+        head_n = min(20, len(entry_lines))
+        tail_n = min(15, max(0, len(entry_lines) - head_n))
+        ls_parts = [
+            f"[Directory Listing Digest: {len(entry_lines):,} entries ({dirs_cnt} dirs, {files_cnt} files, {links_cnt} symlinks)]:"
+        ]
+        ls_parts.extend(f"  {ln[:160]}" for ln in entry_lines[:head_n])
+        if len(entry_lines) > head_n + tail_n:
+            ls_parts.append(f"  ... [{len(entry_lines) - head_n - tail_n:,} middle entries omitted] ...")
+        if tail_n > 0:
+            ls_parts.extend(f"  {ln[:160]}" for ln in entry_lines[-tail_n:])
+        outline = "\n".join(ls_parts)[: max(800, digest_byte_budget)]
+        compressed_str = (
+            f"🛡️ Blood-Brain Barrier PostToolOutput Semantic CLI Digest ({fmt_name}):\n"
+            f"Tool `{tool_name}` directory listing ({total_lines:,} lines, {byte_len / 1024:.1f} KB) "
+            f"compacted with head/tail + entry summary:\n"
+            f"{outline}\n"
+        )
     else:
-        outline = _build_fast_file_symbol_outline(virtual_path, raw_text, max_items=30)
+        outline = (
+            _build_python_repr_outline(raw_text, max_items=30)
+            if fmt_name == "python_repr"
+            else _build_fast_file_symbol_outline(virtual_path, raw_text, max_items=30)
+        )
         eff_tail_lines = max(tail_lines, 120) if preserve_fuller_tail else tail_lines
-        max_head_chars = max(300, min(2000, max_bytes // 4))
+        max_head_chars = min(max(300, min(2000, max_bytes // 4)), max(300, int(byte_len * 0.20)))
         max_tail_chars = (
-            max(6000, min(16000, max_bytes * 2))
+            min(max(6000, min(16000, max_bytes * 2)), max(1200, int(byte_len * 0.60)))
             if preserve_fuller_tail
             else max_head_chars
         )

@@ -17,9 +17,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-SWIFT_PKG_DIR="${REPO_ROOT}/macos/WBCEyes"
+SWIFT_PKG_DIR="${REPO_ROOT}/macos/WholeBodyCompute"
 INFO_PLIST_SRC="${SWIFT_PKG_DIR}/Info.plist"
-ENTITLEMENTS_SRC="${SWIFT_PKG_DIR}/WBCEyes.entitlements"
+ENTITLEMENTS_SRC="${SWIFT_PKG_DIR}/WholeBodyCompute.entitlements"
 
 OUTPUT_DIR="${REPO_ROOT}/dist"
 APP_NAME="Whole Body Compute.app"

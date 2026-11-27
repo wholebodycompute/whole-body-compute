@@ -1344,6 +1344,18 @@ class SovereignDuetBriefingEngine:
                 spoken_script = _clean_for_speech(llm_text, max_words=MAX_SPOKEN_WORDS)
                 model_used = llm_model
                 engine_used = llm_engine
+        elif os.environ.get("WBC_ROUTER_SHADOW") == "1":
+            self._schedule_shadow_brief_evaluation(
+                channel=channel,
+                eyes=eyes,
+                hippocampus=hippocampus,
+                workspace=workspace,
+                finops_vitals=finops_vitals,
+                suggested_actions=suggested_actions,
+                github=github,
+                linear=linear,
+                timeout_sec=max(timeout_sec, 2.5),
+            )
 
         spoken_script = _clean_for_speech(spoken_script, max_words=MAX_SPOKEN_WORDS)
         word_count = len(spoken_script.split())
@@ -1421,9 +1433,11 @@ class SovereignDuetBriefingEngine:
         elif needs_rev_cnt > 0:
             standup_phrase = f"You have {_plural(needs_rev_cnt, 'pull request')} awaiting review."
 
-        # Beat 2: What you just finished & what is up next on the roadmap
+        # Beat 2: What you just finished & what is up next on the roadmap (compact for 72-word SLA)
         last_done = workspace.get("last_completed_milestone") or "Phase 18.12"
-        up_next = workspace.get("up_next_summary") or "continuing your active pipeline"
+        raw_up_next = workspace.get("up_next_summary") or "continuing your active pipeline"
+        up_next_words = str(raw_up_next).split()
+        up_next = " ".join(up_next_words[:10]).rstrip(",;:-") if len(up_next_words) > 10 else raw_up_next
         if standup_phrase:
             beat2 = f"{last_done} is complete. {standup_phrase} Up next on your roadmap is {up_next}."
         else:
@@ -1477,6 +1491,10 @@ class SovereignDuetBriefingEngine:
         if github_info.get("needs_review_count", 0) > 0:
             standup_context += f" {github_info['needs_review_count']} PRs awaiting review."
 
+        sys_prompt = (
+            "You are an executive business writing and spoken briefing synthesizer. "
+            "Respond ONLY with plain conversational spoken sentences suitable for TTS playback."
+        )
         prompt = (
             f"Write a warm, clear 4-sentence spoken morning executive briefing (strictly 45 to 65 words, "
             f"plain conversational English for TTS, no markdown, no parentheses, no decimals) for '{channel}'. "
@@ -1487,15 +1505,35 @@ class SovereignDuetBriefingEngine:
             f"4) Last 24 hours on local Metal saved {spoken_usd} and {spoken_tokens} cloud tokens."
         )
 
-        for port, default_model, eng_name in (
-            (9380, "gemma4-26b", "mlx_metal_9380"),
-            (9379, "voicefi-coder-mlx", "mlx_metal_9379"),
-        ):
+        preferred_model = "localbench-specialist-router"
+        try:
+            from whole_body_compute.local.router import default_router
+
+            dec = default_router.resolve_model(task_type="brief", prefer_warm_reflex=False)
+            if dec.is_local and dec.selected_model:
+                preferred_model = dec.selected_model
+        except Exception:
+            pass
+
+        candidates = (
+            (9380, preferred_model, "specialist_router_9380"),
+            (9379, preferred_model, "specialist_router_9379"),
+            (9379, "gemma4-2b", "litert_metal_9379"),
+            (9379, "body-coder-mlx", "mlx_metal_9379"),
+        )
+        seen_endpoints = set()
+        for port, target_model, eng_name in candidates:
+            if (port, target_model) in seen_endpoints:
+                continue
+            seen_endpoints.add((port, target_model))
             url = f"http://127.0.0.1:{port}/v1/chat/completions"
             payload = json.dumps(
                 {
-                    "model": default_model,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "model": target_model,
+                    "messages": [
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
                     "max_tokens": 110,
                     "temperature": 0.2,
                 }
@@ -1513,11 +1551,78 @@ class SovereignDuetBriefingEngine:
                     if choices:
                         content = (choices[0].get("message") or {}).get("content", "").strip()
                         if content:
-                            return content, str(data.get("model", default_model)), eng_name
+                            return content, str(data.get("model", target_model)), eng_name
             except Exception:
                 continue
 
         return None, "tier0-deterministic-template", "deterministic_local_template"
+
+    def _schedule_shadow_brief_evaluation(
+        self,
+        channel: str,
+        eyes: Dict[str, Any],
+        hippocampus: Dict[str, Any],
+        workspace: Dict[str, Any],
+        finops_vitals: Dict[str, Any],
+        suggested_actions: List[Dict[str, Any]],
+        github: Optional[Dict[str, Any]] = None,
+        linear: Optional[Dict[str, Any]] = None,
+        timeout_sec: float = 2.5,
+        shadow_log_path: Optional[Path] = None,
+    ) -> None:
+        """
+        Fire a non-blocking background shadow evaluation against `localbench-specialist-router`
+        when `WBC_ROUTER_SHADOW=1`, logging latency, guardrail pass rate, and word count to
+        `~/.whole_body_compute/telemetry/specialist_router_shadow.jsonl` without delaying UX.
+        """
+        import threading
+
+        from whole_body_compute.local.shadow_ledger import (
+            is_shadow_target_safe_for_test,
+            record_shadow_eval,
+        )
+
+        if os.environ.get("PYTEST_CURRENT_TEST") and not is_shadow_target_safe_for_test(
+            shadow_log_path
+        ):
+            return
+
+        def _run_shadow() -> None:
+            t_start = time.perf_counter()
+            llm_text, llm_model, llm_engine = self._try_local_metal_completion(
+                channel=channel,
+                eyes=eyes,
+                hippocampus=hippocampus,
+                workspace=workspace,
+                finops_vitals=finops_vitals,
+                suggested_actions=suggested_actions,
+                github=github,
+                linear=linear,
+                timeout_sec=timeout_sec,
+            )
+            elapsed_ms = round((time.perf_counter() - t_start) * 1000.0, 2)
+            valid = bool(llm_text and _is_valid_spoken_briefing(llm_text))
+            cleaned = _clean_for_speech(llm_text or "", max_words=MAX_SPOKEN_WORDS) if llm_text else ""
+            word_count = len(cleaned.split()) if cleaned else 0
+            record_shadow_eval(
+                task_type="brief",
+                engine=llm_engine,
+                model=llm_model,
+                latency_ms=elapsed_ms,
+                valid_guardrail=valid,
+                baseline_used="tier0-deterministic-template",
+                tokens_saved_est=max(0, len(cleaned) // 4) if valid else 0,
+                sla_ms=30000.0,
+                shadow_log_path=shadow_log_path,
+                extra={
+                    "channel": channel,
+                    "word_count": word_count,
+                    "within_30s_sla": valid and word_count <= 75,
+                    "preview": cleaned[:160],
+                },
+            )
+
+        threading.Thread(target=_run_shadow, daemon=True, name="BriefSpecialistShadow").start()
 
     # ------------------------------------------------------------------
     # Full 4-Pillar Briefing Assembly

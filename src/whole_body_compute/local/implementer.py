@@ -574,8 +574,8 @@ def resolve_best_local_coder_endpoint(
     t0 = time.perf_counter()
     req_clean = (preferred_model or "").strip()
 
-    # If caller explicitly requested voicefi-coder-mlx or 2b, check :9379 first
-    if req_clean in ("voicefi-coder-mlx", "gemma4-2b"):
+    # If caller explicitly requested body-coder-mlx / voicefi-coder-mlx or 2b, check :9379 first
+    if req_clean in ("body-coder-mlx", "body-coder:1.5b", "voicefi-coder-mlx", "gemma4-2b"):
         if _is_tcp_port_open("127.0.0.1", 9379, timeout=timeout_sec):
             return {
                 "available": True,
@@ -587,6 +587,8 @@ def resolve_best_local_coder_endpoint(
 
     # If caller explicitly requested an MLX :8080 model (30B-A3B / 32B / 14B) or auto when :8080 is online
     if _is_tcp_port_open("127.0.0.1", 8080, timeout=timeout_sec) and req_clean not in (
+        "body-coder-mlx",
+        "body-coder:1.5b",
         "voicefi-coder-mlx",
         "gemma4-2b",
         "gemma4-26b",
@@ -617,13 +619,13 @@ def resolve_best_local_coder_endpoint(
             "latency_ms": round((time.perf_counter() - t0) * 1000.0, 2),
         }
 
-    # Priority 2: :9379 (voicefi-coder-mlx)
+    # Priority 2: :9379 (body-coder-mlx, aliased as voicefi-coder-mlx)
     if _is_tcp_port_open("127.0.0.1", 9379, timeout=timeout_sec):
         return {
             "available": True,
             "provider": "metal",
             "endpoint": "http://127.0.0.1:9379/v1/chat/completions",
-            "model": "voicefi-coder-mlx",
+            "model": "body-coder-mlx",
             "latency_ms": round((time.perf_counter() - t0) * 1000.0, 2),
         }
 
@@ -676,6 +678,7 @@ def _resolve_ollama_fallback(requested_model: str) -> Optional[str]:
     # Tier-aware mapping when gemma4-2b (scout) or gemma4-26b / auto (coder) is requested
     if "2b" in clean_req or "scout" in clean_req or "0.8b" in clean_req:
         candidates = [
+            "body-coder:1.5b",
             "voicefi-coder:1.5b",
             "qwen2.5-coder:1.5b",
             "tev1:0.8b",
@@ -685,6 +688,7 @@ def _resolve_ollama_fallback(requested_model: str) -> Optional[str]:
         ]
     else:
         candidates = [
+            "body-coder:1.5b",
             "qwen2.5-coder:1.5b",
             "voicefi-coder:1.5b",
             "gemma4:26b",
@@ -727,6 +731,7 @@ def resolve_available_ollama_coder_models(timeout: float = 0.05) -> List[str]:
         installed = []
 
     preferred = [
+        "body-coder:1.5b",
         "qwen2.5-coder:1.5b",
         "voicefi-coder:1.5b",
         "nimble:latest",
@@ -753,7 +758,7 @@ def resolve_available_ollama_coder_models(timeout: float = 0.05) -> List[str]:
         return ordered
 
     # Fallback to standard local coder tiers if port is open but tags could not be enumerated
-    return ["qwen2.5-coder:1.5b", "voicefi-coder:1.5b", "nimble:latest"]
+    return ["body-coder:1.5b", "qwen2.5-coder:1.5b", "voicefi-coder:1.5b", "nimble:latest"]
 
 
 async def query_ollama(
@@ -867,8 +872,8 @@ async def query_model(
                 f"HTTP MLX :8080 server query failed for {model_name} ({e}), checking fallback."
             )
 
-    # 1b. Query dedicated warm local Metal GPU HTTP servers (9379 for voicefi-coder-mlx & 2b, 9380 for 26b)
-    if model_name in ("voicefi-coder-mlx", "gemma4-2b", "gemma4-26b"):
+    # 1b. Query dedicated warm local Metal GPU HTTP servers (9379 for body-coder-mlx / voicefi-coder-mlx & 2b, 9380 for 26b)
+    if model_name in ("body-coder-mlx", "body-coder:1.5b", "voicefi-coder-mlx", "gemma4-2b", "gemma4-26b"):
         server_url = (
             "http://127.0.0.1:9380/v1/chat/completions"
             if model_name == "gemma4-26b"
@@ -988,7 +993,7 @@ HARNESS_PROFILES: Dict[str, Dict[str, Any]] = {
     },
     "wbc_ast_slice": {
         "profile_id": "wbc_ast_slice",
-        "matched_prefixes": ("qwen", "voicefi-coder", "gemma", "tev"),
+        "matched_prefixes": ("body-coder", "qwen", "voicefi-coder", "gemma", "tev"),
         "tool_surface": ["ast_slice", "search_replace", "ast_secgate"],
         "max_obs_chars": 2400,
         "compaction_strategy": "ast_symbol_slice",
@@ -1113,8 +1118,8 @@ class ReconImplementer:
 
     def __init__(
         self,
-        model_scout: str = "voicefi-coder-mlx",
-        model_coder: str = "voicefi-coder-mlx",
+        model_scout: str = "body-coder-mlx",
+        model_coder: str = "body-coder-mlx",
         dot_store: Optional[Any] = None,
     ):
         self.model_scout = model_scout
@@ -1169,6 +1174,90 @@ class ReconImplementer:
         """
         Execute full on-device scout -> implement -> diff workflow.
         """
+        start_total = time.perf_counter()
+        run_id = ""
+        try:
+            from whole_body_compute.local.run_events import record_local_run_start
+
+            run_id = record_local_run_start(
+                role="Local Implementer",
+                task_type="implement",
+                model=self.model_coder,
+                engine="local_implementer",
+                mode="live",
+                summary=f"Implement {Path(str(target_path)).name}: {instruction[:100]}",
+                workspace=str(target_path),
+            )
+        except Exception:
+            run_id = ""
+
+        try:
+            res = await self._implement_impl(
+                target_path=target_path,
+                instruction=instruction,
+                apply=apply,
+                diff_only=diff_only,
+                max_file_bytes=max_file_bytes,
+            )
+        except Exception as exc:
+            if run_id:
+                try:
+                    from whole_body_compute.local.run_events import record_local_run_end
+
+                    record_local_run_end(
+                        run_id,
+                        status="error",
+                        latency_ms=round((time.perf_counter() - start_total) * 1000.0, 2),
+                        valid_guardrail=False,
+                        tokens_saved_est=0,
+                        detail_ref={
+                            "target": str(target_path),
+                            "applied": False,
+                            "diff_preview": "",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        },
+                    )
+                except Exception:
+                    pass
+            raise
+
+        if run_id:
+            try:
+                from whole_body_compute.local.run_events import record_local_run_end
+
+                err = res.error or ""
+                if err.startswith("Security Gate blocked") or err.startswith("ResourceGate Blocked:"):
+                    status = "guardrail_blocked"
+                elif res.error is None:
+                    status = "pass"
+                else:
+                    status = "error"
+                record_local_run_end(
+                    run_id,
+                    status=status,
+                    latency_ms=round((time.perf_counter() - start_total) * 1000.0, 2),
+                    valid_guardrail=(status == "pass"),
+                    tokens_saved_est=int(res.tokens_saved or 0),
+                    detail_ref={
+                        "target": str(res.target_path),
+                        "applied": bool(res.applied),
+                        "diff_preview": (res.diff or "")[:4000],
+                        "error": err,
+                    },
+                )
+            except Exception:
+                pass
+        return res
+
+    async def _implement_impl(
+        self,
+        target_path: Union[str, Path],
+        instruction: str,
+        apply: bool = True,
+        diff_only: bool = True,
+        max_file_bytes: int = 500_000,
+    ) -> ImplementResult:
+        """Inner implementation for `implement`."""
         start_total = time.perf_counter()
         path = Path(os.path.expanduser(str(target_path))).resolve()
         if ".git" in path.parts or path.suffix.lower() == ".pth":
@@ -1561,15 +1650,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--model-scout",
         type=str,
-        default="voicefi-coder-mlx",
-        help="Scout model name (default: voicefi-coder-mlx)",
+        default="body-coder-mlx",
+        help="Scout model name (default: body-coder-mlx)",
     )
     parser.add_argument(
         "--model-coder",
         "-m",
         type=str,
         default="auto",
-        help="Coder model name or 'auto' (default: auto -> :9380 gemma4-26b / :9379 voicefi-coder-mlx / Ollama)",
+        help="Coder model name or 'auto' (default: auto -> :9380 gemma4-26b / :9379 body-coder-mlx / Ollama)",
     )
     parser.add_argument(
         "--no-apply",

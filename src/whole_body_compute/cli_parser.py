@@ -81,6 +81,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sovereign telemetry consent tier (0=Local 100%% on-device, 1=Vitals daily rollup, 2=Procedural DNA learning cards)",
     )
     p_beg.add_argument("--no-daemon", action="store_true", dest="no_daemon", help="Skip auto-installing background LaunchAgents")
+    p_beg.add_argument(
+        "--ci",
+        action="store_true",
+        default=None,
+        dest="ci_mode",
+        help="Force zero-dependency headless CI/container bootstrap mode (<200ms)",
+    )
+    p_beg.add_argument(
+        "--no-ci",
+        action="store_false",
+        dest="ci_mode",
+        help="Disable headless CI/container auto-detection even when CI env vars are set",
+    )
+    p_beg.add_argument(
+        "--headless-claude",
+        action="store_true",
+        dest="headless_claude",
+        help="Alias for --ci: wire headless Claude Code hooks & emit CI FinOps receipt",
+    )
+    p_beg.add_argument(
+        "--claude-desktop",
+        action="store_true",
+        dest="claude_desktop",
+        help="Wire ultra-lean (<450-tok) MCP Quota Bouncer into Claude Desktop config",
+    )
     p_beg.add_argument("--json", action="store_true", help="Output structured JSON")
 
     # body doctor (aliases: status, organs)
@@ -92,6 +117,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc.add_argument("--json", action="store_true", help="Output structured JSON")
     p_doc.add_argument("--exercise", action="store_true", help="Also run closed-loop 5-step reflex exercise")
     p_doc.add_argument("--chaos", "--gauntlet", dest="chaos", action="store_true", help="Also run adversarial ChaosOrganFuzzer stress suite")
+
+    # body tips (aliases: pro-tips, guide, playbook)
+    p_tips = subparsers.add_parser(
+        "tips",
+        aliases=["pro-tips", "guide", "playbook"],
+        help="[Setup] Power-user Pro Tips playbook, CLAUDE.md rules snippet & web docs link",
+    )
+    p_tips.add_argument(
+        "topic",
+        nargs="?",
+        default=None,
+        help="Optional topic filter (git, context, desktop, voice, metal, bbb, workflows, skills)",
+    )
+    p_tips.add_argument("--random", "-r", action="store_true", help="Show a single random Pro Tip")
+    p_tips.add_argument("--rules", action="store_true", help="Print copy-paste CLAUDE.md / agent rules snippet")
+    p_tips.add_argument("--open", action="store_true", help="Open https://wholebodycompute.com/docs in default browser")
+    p_tips.add_argument("--json", action="store_true", help="Output structured JSON")
 
     # body exercise (aliases: reflex) - hidden (use `body doctor --exercise` or `body reflex stats`)
     p_ex = subparsers.add_parser(
@@ -124,7 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
         aliases=["candidate", "recipes"],
         help="[Workflow] Inspect, discover, or promote staged ambient workflow candidates",
     )
-    p_cand.add_argument("--discover", action="store_true", help="Run on-demand motif discovery across ambient transitions journal & Screenpipe OCR")
+    p_cand.add_argument("--discover", action="store_true", help="Run on-demand motif discovery across ambient transitions journal & Foveal Memory OCR")
     p_cand.add_argument("--promote", metavar="CANDIDATE_ID", help="Validate and promote a candidate YAML into active recipes/")
     p_cand.add_argument("--as-skill", action="store_true", dest="as_skill", help="Also export the promoted recipe as a portable Skill Bundle (.agents/skills/ + .skill.zip)")
     p_cand.add_argument("--share", action="store_true", help="Also harvest & export sanitized Procedural DNA learning card to telemetry outbox")
@@ -259,7 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=7,
         help="Retention window in days for compact (default: 7)",
     )
-    p_dna.add_argument("--port", type=int, default=9381, help="Dashboard server port (default: 9381)")
+    p_dna.add_argument("--port", type=int, default=9383, help="Dashboard server port (default: 9383)")
     p_dna.add_argument("--host", default="127.0.0.1", help="Dashboard server host (default: 127.0.0.1)")
     p_dna.add_argument(
         "--cloud",
@@ -375,20 +417,35 @@ def build_parser() -> argparse.ArgumentParser:
     p_ears.add_argument("--uninstall", action="store_true", help="Stop & remove com.wholebodycompute.ears background LaunchAgent")
     p_ears.add_argument("--silence", type=float, default=1.4, help="Silence timeout in seconds for one-shot mic capture (default: 1.4)")
     p_ears.add_argument("--max-seconds", type=float, default=30.0, help="Maximum utterance duration in seconds (default: 30)")
+    p_ears.add_argument("--no-highlight", action="store_true", help="Disable the visual highlight border around the active text box or window while dictating")
+    p_ears.add_argument("--highlight-target", choices=["auto", "text_box", "window"], default="auto", help="Highlight target mode: focused text box with window fallback ('auto') or always window ('window')")
     p_ears.add_argument("--json", action="store_true", help="Output structured JSON receipt including AST snap proofs")
 
     # body hud (aliases: dashboard) # [direct-edit]
     p_tel = subparsers.add_parser(
         "hud",
         aliases=["dashboard"],
-        help="[Setup] Launch living health telemetry dashboard & WebSocket server (:9381)",
+        help="[Setup] Launch living health telemetry dashboard & WebSocket server (:9383)",
     )
-    p_tel.add_argument("--port", type=int, default=9381, help="Server port (default: 9381)")
+    p_tel.add_argument("--port", type=int, default=9383, help="Server port (default: 9383)")
     p_tel.add_argument("--host", default="127.0.0.1", help="Server host (default: 127.0.0.1)")
     p_tel.add_argument("--open", action="store_true", help="Automatically open dashboard in default browser")
     p_tel.add_argument("--logs", action="store_true", help="Print historical Readiness & Biometric state logs")
     p_tel.add_argument("--limit", type=int, default=20, help="Number of log entries to display")
     p_tel.add_argument("--json", action="store_true", help="Output structured JSON")
+
+    # body coach (aliases: progress)
+    p_coach = subparsers.add_parser(
+        "coach",
+        aliases=["progress"],
+        help="[Metrics] Adaptive Progress & Coach scorecard (Trial vs Power Builder, Zero-RAM safe)",
+    )
+    p_coach.add_argument("--mode", choices=["auto", "trial", "power"], default="auto", help="Coach mode (default: auto)")
+    p_coach.add_argument("--days", type=int, default=30, help="Historical audit lookback days (default: 30)")
+    p_coach.add_argument("--window", default="all", help="Shield savings window (all, 24h, 7d, 30d; default: all)")
+    p_coach.add_argument("--hours", type=float, default=5.0, help="Coverage gap lookback hours (default: 5.0)")
+    p_coach.add_argument("--include-benchmarks", action="store_true", help="Include benchmark/test artifacts")
+    p_coach.add_argument("--json", action="store_true", help="Output structured JSON")
 
     # body logs (aliases: history)
     p_hist = subparsers.add_parser(
@@ -473,23 +530,60 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep.add_argument("--receipt", action="store_true", help="Print compact End-of-Session Handoff Receipt format")
     p_rep.add_argument("--json", action="store_true", help="Output structured JSON")
 
-    # body audit-spend (aliases: audit, roi, finops) - 30-day Historical FinOps Invoice & Model-Opportunity Insights
+    # body audit-spend (aliases: audit, roi, finops) - Cross-Harness Spend, Shield Sync & Opportunity Audit
     p_fin = subparsers.add_parser(
         "audit-spend",
         aliases=["audit", "roi", "finops"],
-        help="[Metrics] 30-day historical token waste, model-opportunity insights & FinOps ROI invoice",
+        help="[Metrics] Cross-harness agent spend, verified WBC shield & opportunity audit",
     )
     p_fin.add_argument("--days", type=int, default=30, help="Historical window in days to scan (default: 30)")
-    p_fin.add_argument("--price-per-m", type=float, default=5.0, dest="price_per_m", help="Frontier input USD per 1M tokens (default: 5.0)")
-    p_fin.add_argument("--seats", type=int, default=10, help="Number of team seats for annual projection (default: 10)")
-    p_fin.add_argument("--top", type=int, default=5, help="Number of top expensive threads to display (default: 5)")
+    p_fin.add_argument(
+        "--price-per-m",
+        type=float,
+        default=None,
+        dest="price_per_m",
+        help="Override input USD per 1M tokens (default: logged per-model API rates, $5/1M fallback)",
+    )
+    p_fin.add_argument(
+        "--seats",
+        type=int,
+        default=None,
+        help="Number of seats for team annual projection (default: 1 personal; pass >1 for team rows)",
+    )
+    p_fin.add_argument("--top", type=int, default=5, help="Number of costliest sessions to display (default: 5)")
+    p_fin.add_argument(
+        "--unshielded-only",
+        action="store_true",
+        dest="unshielded_only",
+        help="Analyze only unshielded sessions as if WBC were not yet active",
+    )
+    p_fin.add_argument(
+        "--include-benchmarks",
+        action="store_true",
+        dest="include_benchmarks",
+        help="Include synthetic benchmark, SWE-bench, AgentDojo, and /tmp test sessions in spend audit",
+    )
+    p_fin.add_argument("--no-color", action="store_true", dest="no_color", help="Disable ANSI terminal colors")
+    p_fin.add_argument(
+        "--no-telemetry",
+        "--offline",
+        action="store_true",
+        dest="no_telemetry",
+        help="Skip anonymous audit completion telemetry",
+    )
     p_fin.add_argument(
         "--import",
         dest="import_paths",
         action="append",
         default=[],
         metavar="PATH",
-        help="Opt-in offline cloud export to include (`conversations.json`, `.zip`, or Anthropic billing `.csv`)",
+        help="Opt-in offline cloud export to include (`conversations.json`, `.zip`, Anthropic billing `.csv`, or `auto`)",
+    )
+    p_fin.add_argument(
+        "--auto-downloads",
+        dest="auto_downloads",
+        action="store_true",
+        help="Opt-in: auto-discover recent Claude.ai `.zip`/`conversations.json` & Anthropic Console `.csv` files in ~/Downloads",
     )
     p_fin.add_argument(
         "--cloud",
@@ -503,8 +597,90 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="KEY",
         help="Anthropic Organization Admin API key for cloud usage/cost report",
     )
+    p_fin.add_argument(
+        "--lowering",
+        action="store_true",
+        help="Analyze deterministic Bash/tool loops for Tier 0/1 code lowering vs WBC Linux Shield savings",
+    )
+    p_fin.add_argument(
+        "--ci-dir",
+        dest="ci_dir",
+        default=None,
+        metavar="PATH",
+        help="Optional path to exported CI Claude Code JSONL transcripts to audit exclusively",
+    )
+    p_fin.add_argument(
+        "--by-client",
+        action="store_true",
+        dest="by_client",
+        help="Include per-client FinOps API Proxy cost, savings & retainer margin breakdown",
+    )
+    p_fin.add_argument(
+        "--client",
+        dest="client_slug",
+        default=None,
+        metavar="SLUG",
+        help="Filter FinOps API Proxy breakdown to a single client slug",
+    )
+    p_fin.add_argument(
+        "--sync-edge",
+        action="store_true",
+        dest="sync_edge",
+        help="Pull zero-prompt numeric usage receipts from gateway.wholebodycompute.com before auditing",
+    )
+    p_fin.add_argument(
+        "--edge-url",
+        dest="edge_url",
+        default="https://gateway.wholebodycompute.com",
+        help="Override FinOps Edge Gateway URL for --sync-edge",
+    )
     p_fin.add_argument("--export-receipt", dest="export_receipt", metavar="PATH", help="Optional path to write a shareable Markdown FinOps ROI receipt")
     p_fin.add_argument("--json", action="store_true", help="Output structured JSON")
+
+    # body lower - Transcript-to-Code Scaffolder
+    p_low = subparsers.add_parser(
+        "lower",
+        help="[FinOps] Lower recurring Claude Code Bash loops into a deterministic Tier 0/1 Python runner",
+    )
+    p_low.add_argument(
+        "session",
+        nargs="?",
+        default=None,
+        help="Optional path to a Claude Code session .jsonl transcript to lower",
+    )
+    p_low.add_argument(
+        "--from-audit",
+        action="store_true",
+        dest="from_audit",
+        help="Scan transcripts via `audit-spend --lowering` and scaffold the top recurring procedural loop",
+    )
+    p_low.add_argument(
+        "--ci-dir",
+        dest="ci_dir",
+        default=None,
+        metavar="PATH",
+        help="Optional path to exported CI Claude Code JSONL transcripts",
+    )
+    p_low.add_argument(
+        "--out",
+        dest="out",
+        default=None,
+        metavar="PATH",
+        help="Output path for the generated Tier 0/1 Python runner (default: scripts/<workflow>_runner.py)",
+    )
+    p_low.add_argument(
+        "--name",
+        dest="name",
+        default=None,
+        help="Optional workflow name/slug override for the generated runner",
+    )
+    p_low.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Preview the generated Python runner without writing to disk",
+    )
+    p_low.add_argument("--json", action="store_true", help="Output structured JSON")
 
     # body team-sync (aliases: hive-sync, share-exemplars)
     p_sync = subparsers.add_parser(
@@ -1032,7 +1208,7 @@ def build_parser() -> argparse.ArgumentParser:
                 "--from-source",
                 dest="from_source",
                 action="store_true",
-                help="Build Whole Body Compute.app locally from macos/WBCEyes during `--install-app`",
+                help="Build Whole Body Compute.app locally from macos/WholeBodyCompute during `--install-app`",
             )
             p_org.add_argument(
                 "--system",
@@ -1122,6 +1298,36 @@ def build_parser() -> argparse.ArgumentParser:
                 default=None,
                 help="1-indexed inclusive line range for --blob recovery (e.g. 120:180; default: 1:160)",
             )
+
+    # body proxy - Local FinOps API Proxy Gateway (127.0.0.1:9381)
+    p_proxy = subparsers.add_parser(
+        "proxy",
+        help="[FinOps] Start or inspect the local 127.0.0.1:9381 Anthropic/OpenAI FinOps API Proxy",
+    )
+    p_proxy.add_argument(
+        "proxy_action",
+        nargs="?",
+        default="start",
+        choices=["start", "serve", "status", "report"],
+        help="Proxy action (default: start)",
+    )
+    p_proxy.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
+    p_proxy.add_argument("--port", type=int, default=9381, help="Bind port (default: 9381)")
+    p_proxy.add_argument("--anti-slop", action="store_true", dest="anti_slop", help="Enable opt-in prose em-dash & invisible-mark hygiene")
+    p_proxy.add_argument("--chore-router", action="store_true", dest="chore_router", help="Enable Pro Bicameral Chore Router (Haiku / $0 Metal)")
+    p_proxy.add_argument("--daemon", action="store_true", help="Install/start com.wholebodycompute.proxy LaunchAgent")
+    p_proxy.add_argument("--tunnel", action="store_true", help="Expose via cloudflared quick tunnel for always-on Mac Studio hosts")
+    p_proxy.add_argument("--window", default="30d", help="Reporting window for `status`/`report` (default: 30d)")
+    p_proxy.add_argument("--client", dest="client_slug", default=None, help="Filter `report` to a single client slug")
+    p_proxy.add_argument("--json", action="store_true", help="Output structured JSON")
+
+    # body claude-desktop-mcp - Ultra-lean stdio MCP server for Claude.app
+    p_cd_mcp = subparsers.add_parser(
+        "claude-desktop-mcp",
+        help="[MCP] Run the <450-tok Claude Desktop Quota Bouncer stdio MCP server",
+    )
+    p_cd_mcp.add_argument("--db-path", default=None, help="Optional shield ledger SQLite path")
+    p_cd_mcp.add_argument("--memory-db", default=None, help="Optional client memory SQLite path")
 
     return parser
 

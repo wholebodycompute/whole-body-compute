@@ -181,12 +181,14 @@ def get_hardware_profile() -> HardwareProfile:
     )
 
 
-def resolve_voicefi_coder_mlx_dir() -> Optional[Path]:
+def resolve_body_coder_mlx_dir() -> Optional[Path]:
     """
-    Resolve the `voicefi-coder-mlx` (839 MB 4-bit MLX) directory across:
-      1. PyInstaller frozen bundle (`sys._MEIPASS` / `Contents/Resources`)
-      2. `~/.whole_body_compute/models/voicefi-coder-mlx` (or `~/.voicefi/models/voicefi-coder-mlx` fallback)
-      3. `~/Projects/Local Models/distillation/fused_model` (or `WBC_FUSED_MODEL_DIR`)
+    Resolve the `body-coder-mlx` (~986 MB 4-bit MLX) directory across:
+      1. `WBC_FUSED_MODEL_DIR` override
+      2. PyInstaller frozen bundle (`sys._MEIPASS` / `Contents/Resources`)
+      3. `~/.whole_body_compute/models/body-coder-mlx` (internal SSD hot tier for unplugged support)
+      4. `~/.whole_body_compute/models/voicefi-coder-mlx` / `~/.voicefi/models/voicefi-coder-mlx`
+      5. `~/Projects/Local Models/distillation/fused_model`
     """
     candidates: List[Path] = []
     env_dir = os.environ.get("WBC_FUSED_MODEL_DIR")
@@ -197,6 +199,7 @@ def resolve_voicefi_coder_mlx_dir() -> Optional[Path]:
         if base_meipass:
             candidates.extend(
                 [
+                    Path(base_meipass) / "models" / "body-coder-mlx",
                     Path(base_meipass) / "voicefi" / "assets" / "models" / "voicefi-coder-mlx",
                     Path(base_meipass) / "models" / "voicefi-coder-mlx",
                 ]
@@ -204,6 +207,7 @@ def resolve_voicefi_coder_mlx_dir() -> Optional[Path]:
         res_dir = Path(sys.executable).parent.parent / "Resources"
         candidates.extend(
             [
+                res_dir / "models" / "body-coder-mlx",
                 res_dir / "voicefi" / "assets" / "models" / "voicefi-coder-mlx",
                 res_dir / "models" / "voicefi-coder-mlx",
             ]
@@ -211,6 +215,7 @@ def resolve_voicefi_coder_mlx_dir() -> Optional[Path]:
 
     candidates.extend(
         [
+            get_wbc_data_dir() / "models" / "body-coder-mlx",
             get_wbc_data_dir() / "models" / "voicefi-coder-mlx",
             Path.home() / ".voicefi" / "models" / "voicefi-coder-mlx",
             Path.home() / "Projects" / "Local Models" / "distillation" / "fused_model",
@@ -221,6 +226,11 @@ def resolve_voicefi_coder_mlx_dir() -> Optional[Path]:
         if c.is_dir() and (c / "model.safetensors").is_file():
             return c
     return None
+
+
+def resolve_voicefi_coder_mlx_dir() -> Optional[Path]:
+    """Backward-compatible zero-copy alias resolver delegating to `resolve_body_coder_mlx_dir()`."""
+    return resolve_body_coder_mlx_dir()
 
 
 EXTERNAL_MODELS_VOLUME = Path("/Volumes/Local Models")
@@ -294,6 +304,14 @@ def ensure_hot_warm_storage_routes() -> Dict[str, Any]:
         except Exception:
             pass
 
+    from whole_body_compute.local.engine import resolve_litert_cache_dir
+
+    litert_gemma4_2b_file = Path.home() / ".litert-lm" / "models" / "gemma4-2b" / "model.litertlm"
+    litert_gemma4_2b_internal = (
+        litert_gemma4_2b_file.is_file()
+        and not str(litert_gemma4_2b_file.resolve()).startswith("/Volumes/")
+    )
+
     return {
         "mode": "docked_external" if docked else "unplugged_hot_internal",
         "external_mounted": docked,
@@ -303,17 +321,19 @@ def ensure_hot_warm_storage_routes() -> Dict[str, Any]:
         "ollama_route_switched": ollama_route_switched,
         "hot_internal_dir": str(wbc_hot_dir),
         "hot_models": hot_models_present,
+        "litert_gemma4_2b_internal": litert_gemma4_2b_internal,
+        "litert_cache_dir": resolve_litert_cache_dir(),
     }
 
 
 def resolve_local_mlx_model_path(repo_id: str) -> Optional[Path]:
     """
-    Resolve an MLX model (`mlx-community/...` or `voicefi-coder-mlx`) preferring the
+    Resolve an MLX model (`mlx-community/...` or `body-coder-mlx` / `voicefi-coder-mlx`) preferring the
     internal Hot Tier (`~/.whole_body_compute/models/<basename>`) first so unplugged inference
     always succeeds, then falling back to `~/.cache/huggingface/hub` (or `/Volumes/Local Models/huggingface/hub`).
     """
-    if repo_id == "voicefi-coder-mlx":
-        return resolve_voicefi_coder_mlx_dir()
+    if repo_id in ("body-coder-mlx", "voicefi-coder-mlx"):
+        return resolve_body_coder_mlx_dir()
 
     short_name = repo_id.split("/")[-1]
     hot_cand = get_wbc_data_dir() / "models" / short_name
@@ -361,23 +381,29 @@ def get_tier_manifest(tier_id: str) -> Dict[str, Any]:
     t = (tier_id or "starter").lower().strip()
     starter_models = [
         {
-            "name": "tev1:0.8b",
-            "aliases": ["tev1:0.8b"],
-            "provider": "ollama",
-            "endpoint": OLLAMA_CHAT_URL,
-            "role": "141ms Spoken Parameter Extraction & HAR API Triage",
-            "size_mb": 811,
-            "runtime_rule": 'POST /api/chat with "think": False (141ms)',
+            "name": "body-coder-mlx",
+            "aliases": [
+                "body-coder-mlx",
+                "body-coder:1.5b",
+                "voicefi-coder-mlx",
+                "voicefi-coder:1.5b",
+                "tev1:0.8b",
+            ],
+            "provider": "mlx_9379",
+            "fallback_ollama": "body-coder:1.5b",
+            "endpoint": MLX_9379_CHAT_URL,
+            "role": "Unified Tier-0/1 Local Coder, Scout & JSON Reflex (~986 MB on :9379)",
+            "size_mb": 986,
+            "runtime_rule": "max_tokens <= 360 & strip <|im_end|> / >>>>>>> REPLACE",
         },
         {
-            "name": "voicefi-coder-mlx",
-            "aliases": ["voicefi-coder-mlx", "voicefi-coder:1.5b"],
-            "provider": "mlx_9379",
-            "fallback_ollama": "voicefi-coder:1.5b",
-            "endpoint": MLX_9379_CHAT_URL,
-            "role": "4.97s Surgical Workflow Self-Healing & Live Voice Edits",
-            "size_mb": 839,
-            "runtime_rule": "max_tokens <= 360 & strip <|im_end|> (4.97s patch)",
+            "name": "tev1:0.8b",
+            "aliases": ["tev1:0.8b", "body-coder-mlx"],
+            "provider": "ollama",
+            "endpoint": OLLAMA_CHAT_URL,
+            "role": "Optional Standalone Ollama Reflex Fallback (Folded into :9379 body-coder-mlx)",
+            "size_mb": 811,
+            "runtime_rule": 'POST /api/chat with "think": False (or route to :9379 body-coder-mlx)',
         },
         {
             "name": "nomic-embed-text",
@@ -481,21 +507,23 @@ def call_tev1_reflex_chat(
     return None
 
 
-def call_voicefi_coder_mlx(
+def call_body_coder_mlx(
     prompt: str,
     max_tokens: int = 360,
     timeout: float = 8.0,
+    model_id: str = "body-coder-mlx",
 ) -> Optional[str]:
     """
     Runtime Invocation Rule #2:
-    Call `voicefi-coder-mlx` on `:9379` with `max_tokens <= 360` and strip `<|im_end|>`
-    so the 1.5B LoRA stops cleanly after emitting the unified diff (4.97s total patch time).
+    Call `body-coder-mlx` (or zero-copy alias `voicefi-coder-mlx`) on `:9379` with
+    `max_tokens <= 360` and strip `<|im_end|>` so the 1.5B LoRA stops cleanly after
+    emitting the unified diff or JSON reflex payload.
     """
     capped_tokens = min(int(max_tokens), 360)
     try:
         body = json.dumps(
             {
-                "model": "voicefi-coder-mlx",
+                "model": model_id,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.0,
                 "max_tokens": capped_tokens,
@@ -521,6 +549,20 @@ def call_voicefi_coder_mlx(
     except Exception:
         pass
     return None
+
+
+def call_voicefi_coder_mlx(
+    prompt: str,
+    max_tokens: int = 360,
+    timeout: float = 8.0,
+) -> Optional[str]:
+    """Backward-compatible alias invoking `call_body_coder_mlx`."""
+    return call_body_coder_mlx(
+        prompt=prompt,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        model_id="body-coder-mlx",
+    )
 
 
 def check_organ_status() -> List[OrganHealth]:

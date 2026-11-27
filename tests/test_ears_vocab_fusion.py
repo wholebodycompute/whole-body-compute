@@ -145,6 +145,8 @@ def test_cli_ears_status_json(capsys, tmp_path: Path):
     payload = json.loads(captured.out)
     assert payload["hotkey"] == "fn"
     assert payload["hands_free_chord"] == "fn+space"
+    assert payload["highlight_enabled"] is True
+    assert payload["highlight_target"] == "auto"
     assert "backend" in payload
     assert "fn_key_check" in payload
 
@@ -212,6 +214,45 @@ def test_live_differential_typer_streams_and_snaps_cleanly():
     assert bs == len("spinal reflex gate")
     assert suf == "SpinalReflexGate "
     assert "".join(buf) == "check SpinalReflexGate "
+
+
+def test_live_differential_typer_preserves_spoken_words_across_ane_reset():
+    from whole_body_compute.organs.ears import LiveDifferentialTyper
+
+    buf: list[str] = []
+
+    def _type(s: str) -> bool:
+        buf.extend(list(s))
+        return True
+
+    def _bs(n: int) -> None:
+        for _ in range(n):
+            if buf:
+                buf.pop()
+
+    typer = LiveDifferentialTyper(type_fn=_type, backspace_fn=_bs)
+
+    # 1. User speaks initial words while holding Fn
+    typer.update("Right before I said this")
+    assert "".join(buf) == "Right before I said this"
+
+    # 2. SFSpeechRecognizer resets its active buffer on a pause and emits a brand-new short partial ("Wiping")
+    bs, suf = typer.update("Wiping")
+    assert bs == 0  # Must NOT backspace previously spoken words!
+    assert suf == " Wiping"
+    assert "".join(buf) == "Right before I said this Wiping"
+
+    # 3. Continues streaming the post-pause phrase
+    typer.update("Wiping what is in the box")
+    assert "".join(buf) == "Right before I said this Wiping what is in the box"
+
+    # 4. Empty partial reset mid-stream also preserves all spoken words
+    assert typer.update("") == (0, "")
+    assert "".join(buf) == "Right before I said this Wiping what is in the box"
+
+    # 5. Finalization preserves both committed pre-reset speech and post-reset speech
+    typer.finalize("Wiping what is in the box")
+    assert "".join(buf) == "Right before I said this Wiping what is in the box "
 
 
 def test_doctor_and_foveal_mcp_transcribe_audio_local(tmp_path: Path):
@@ -311,3 +352,61 @@ def test_cli_ears_add_word_json(capsys, monkeypatch, tmp_path: Path):
     payload2 = json.loads(capsys.readouterr().out)
     assert payload2["added"] is False
     assert payload2["total_terms"] == 1
+
+
+def test_organ_ears_highlight_lifecycle_and_opt_out(monkeypatch, tmp_path: Path):
+    import time
+
+    from whole_body_compute.organs import ears as ears_mod
+    from whole_body_compute.organs.ears import OrganEars
+    from whole_body_compute.stt.local_ears import TranscriptionResult
+
+    calls = []
+
+    def _fake_broker(action: str = "show", *, mode: str = "ptt", target: str = "auto", max_duration_s: float = 95.0):
+        calls.append((action, mode, target))
+        return {"status": "ok", "visible": action != "hide", "mode": mode, "target_kind": "text_box"}
+
+    monkeypatch.setattr(ears_mod, "broker_ears_highlight", _fake_broker)
+    monkeypatch.setattr(ears_mod, "is_voicefi_dictation_active", lambda: False)
+    monkeypatch.setenv("WBC_EARS_DISABLE_MEMORY", "1")
+
+    class _DummySession:
+        def __init__(self):
+            self.bundle = VocabBundle(workspace=str(tmp_path), p0_focus_symbols=["SpinalReflexGate"])
+
+        def finish(self):
+            return TranscriptionResult(
+                text="check SpinalReflexGate",
+                raw_acoustic="check spinal reflex gate",
+                backend="ane_sfspeech",
+                latency_ms=12.0,
+                vocab_bundle=self.bundle,
+            )
+
+    ears = OrganEars(workspace=tmp_path, highlight=True, highlight_target="auto")
+    monkeypatch.setattr(ears.engine, "start_ptt_mic_session", lambda **kw: _DummySession())
+    monkeypatch.setattr(ears_mod, "type_unicode_direct", lambda s: True)
+    monkeypatch.setattr(ears_mod, "_send_backspaces", lambda n: None)
+
+    ears._on_ptt_start("ptt")
+    assert ("show", "ptt", "auto") in calls
+
+    ears._show_highlight(mode="hands_free")
+    assert ("show", "hands_free", "auto") in calls
+
+    ears._on_ptt_stop()
+    deadline = time.time() + 2.0
+    while ("hide", "ptt", "auto") not in calls and time.time() < deadline:
+        time.sleep(0.02)
+    assert ("show", "finalizing", "auto") not in calls
+    assert ("hide", "ptt", "auto") in calls
+
+    # Opt-out (`highlight=False`) emits zero highlight broker calls
+    calls.clear()
+    ears_off = OrganEars(workspace=tmp_path, highlight=False, highlight_target="window")
+    assert ears_off.status()["highlight_enabled"] is False
+    assert ears_off.status()["highlight_target"] == "window"
+    ears_off._show_highlight("ptt")
+    ears_off._hide_highlight()
+    assert calls == []

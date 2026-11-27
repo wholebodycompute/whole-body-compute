@@ -25,6 +25,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -89,13 +90,30 @@ def _resolve_model_rates(
     default_out: float,
     explicit_override: bool = False,
 ) -> Tuple[float, float, bool]:
-    """Return `(input_usd_per_m, output_usd_per_m, matched_known_model)` for a logged model string."""
+    """Return `(input_usd_per_m, output_usd_per_m, matched_known_model)` for a logged model string.
+
+    Input rates for Gemini 4 / Carbon / Argon / Neon / Hydrogen are aligned with
+    `whole_body_compute.shield.MODEL_INPUT_PRICING_PER_M` so `body savings` and `docs/audit.py`
+    never diverge on model pricing.
+    """
     if explicit_override:
         return default_in, default_out, False
     m = (model_name or "").strip().lower()
     if not m or m in ("<synthetic>", "none", "unknown", "inherit", "default"):
         return default_in, default_out, False
-    if any(k in m for k in ("flash-lite", "flash_lite", "hydrogen", "gpt-4.1-nano", "gpt-5-nano")):
+    if any(k in m for k in ("local-metal", "local_metal", "body-coder", "voicefi-coder", "ollama", "mlx-community")):
+        return 0.0, 0.0, True
+    if "hydrogen" in m:
+        return 1.50, 7.50, True
+    if "neon" in m:
+        return 3.00, 15.00, True
+    if any(k in m for k in ("argon", "carbon", "gemini-4", "gemini 4")):
+        # Official Gemini 4 Argon/Carbon intro ($2/$10 thru 2026-11-30 UTC) -> standard ($4/$20 from 2026-12-01 UTC)
+        import time as _time
+        if _time.time() >= 1796083200.0:
+            return 4.00, 20.00, True
+        return 2.00, 10.00, True
+    if any(k in m for k in ("flash-lite", "flash_lite", "gpt-4.1-nano", "gpt-5-nano")):
         return 0.50, 2.50, True
     if any(k in m for k in ("gemini-2.5-flash", "gemini-2.0-flash")):
         return 0.30, 2.50, True
@@ -103,23 +121,24 @@ def _resolve_model_rates(
         return 0.80, 4.00, True
     if any(
         k in m
-        for k in ("haiku", "flash", "argon", "gpt-4o-mini", "gpt-4.1-mini", "gpt-5-mini", "o3-mini", "o4-mini")
+        for k in ("haiku", "flash", "gpt-4o-mini", "gpt-4.1-mini", "gpt-5-mini", "o3-mini", "o4-mini")
     ):
         return 1.00, 5.00, True
+    if "gemini-2.5-pro" in m:
+        return 1.25, 10.00, True
+    if any(k in m for k in ("gemini-3", "gemini 3", "gemini-pro")):
+        return 2.00, 12.00, True
     if "gpt-5" in m and "pro" not in m:
         return 1.25, 10.00, True
-    if "o3" in m and "pro" not in m:
+    if ("gpt-4.1" in m or "o3" in m) and "pro" not in m:
         return 2.00, 8.00, True
     if "gpt-4o" in m:
         return 2.50, 10.00, True
-    if any(k in m for k in ("claude-3-opus", "opus-4-2025", "opus-4-0", "opus-4-1")):
-        return 15.00, 75.00, True
-    if "opus" in m:
+    if any(k in m for k in ("opus-4-5", "opus-4.5", "opus 4.5", "opus-4-6", "opus 4.6", "opus-5", "opus 5")):
         return 5.00, 25.00, True
-    if any(
-        k in m
-        for k in ("sonnet", "carbon", "neon", "gemini-2.5-pro", "gemini-3", "gemini-4", "gemini 3", "gemini 4", "gpt-4.1", "gpt-5", "o3")
-    ):
+    if "opus" in m:
+        return 15.00, 75.00, True
+    if any(k in m for k in ("sonnet", "orchestrator", "gpt-5", "o3")):
         return 3.00, 15.00, True
     return default_in, default_out, False
 
@@ -764,6 +783,10 @@ _WBC_TRANSCRIPT_HOOK_MARKERS = (
     "WBC Pre-Flight",
     "Bounded Slice",
     "body-immune-hook",
+    "[BLOB:",
+    "AST_SLICE",
+    "WBC_BLOOD_BRAIN_BARRIER",
+    "Zero-Turn AST",
 )
 
 
@@ -793,6 +816,209 @@ def _parse_iso_or_epoch_ts(val: Any) -> float:
     return 0.0
 
 
+_BENCHMARK_PATH_TOKENS = (
+    "-swebench-",
+    "_swebench_",
+    "/swebench",
+    "swebench-",
+    "-agentdojo-",
+    "_agentdojo_",
+    "/agentdojo",
+    "agentdojo-",
+    "-vanilla-arm-",
+    "_vanilla_arm_",
+    "-wbc-arm-",
+    "_wbc_arm_",
+    "scratch-claude-live-test",
+    "pytest-of-",
+    "wbc_onboarding_verify",
+)
+
+_AGY_BENCHMARK_PROMPT_MARKERS = (
+    "/tmp/wbc-",
+    "/tmp/wbc_",
+    "/private/tmp/wbc",
+    "princeton-nlp/swe-bench",
+    "swebench",
+    "swe-bench",
+    "agentdojo",
+    "mcptox",
+    "osharm",
+    "os-harm",
+    "cyberseceval",
+    "redcode",
+    "injecagent",
+    "zero_dollar_gauntlet",
+    "uat_break_it",
+    "wbc_onboarding_verify",
+    "scratch-claude-live-test",
+    "vanilla_arm",
+    "vanilla-arm",
+    "wbc_arm",
+    "wbc-arm",
+)
+
+_AGY_HEADLESS_EVAL_TEMPLATES = (
+    "available virtual tools:\n- ",
+    "you are an ai language model who assists the user by using the given tools",
+    "you are a helpful assistant with access to virtual tools in an isolated sandbox",
+)
+
+_AGY_BENCHMARK_TOOL_ARGS_MARKERS = (
+    "/tmp/wbc-",
+    "/tmp/wbc_",
+    "/private/tmp/wbc",
+    "princeton-nlp/swe-bench",
+    "zero_dollar_gauntlet",
+    "uat_break_it",
+    "wbc_onboarding_verify",
+)
+
+
+def _resolve_include_benchmarks(include_benchmarks: bool = False) -> bool:
+    if include_benchmarks:
+        return True
+    env_v = os.environ.get("WBC_AUDIT_INCLUDE_BENCHMARKS", "").strip().lower()
+    return env_v in ("1", "true", "yes")
+
+
+def _bump_excluded_stat(
+    excluded_stats: Optional[Dict[str, int]], harness: str, count: int = 1
+) -> None:
+    if isinstance(excluded_stats, dict) and count > 0:
+        excluded_stats[harness] = int(excluded_stats.get(harness, 0)) + int(count)
+        excluded_stats["_total"] = int(excluded_stats.get("_total", 0)) + int(count)
+
+
+def _is_benchmark_path_or_cwd(path_or_label: str) -> bool:
+    s = str(path_or_label or "").strip().lower().replace("\\", "/")
+    if not s:
+        return False
+    if s.startswith("file://"):
+        s = s[7:]
+    if s in ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders"):
+        return True
+    if s.startswith(
+        (
+            "/tmp/",
+            "/private/tmp/",
+            "/var/folders/",
+            "/private/var/folders/",
+            "tmp/",
+            "private/tmp/",
+            "var/folders/",
+            "private/var/folders/",
+        )
+    ):
+        return True
+    if any(seg in s for seg in ("/tmp/", "/private/tmp/", "/var/folders/")):
+        return True
+    parts = [p for p in s.split("/") if p]
+    if any(
+        p.startswith(("-tmp-", "-private-tmp-", "-var-folders-", "-private-var-folders-"))
+        or p in ("-tmp", "-private-tmp")
+        for p in parts
+    ):
+        return True
+    return any(tok in s for tok in _BENCHMARK_PATH_TOKENS)
+
+
+def _is_rel_transcript_benchmark(
+    fpath: Path, scan_root: Optional[Path] = None, cwd_hint: str = ""
+) -> bool:
+    if scan_root is not None:
+        try:
+            if fpath == scan_root:
+                rel_s = fpath.name
+            else:
+                rel_s = fpath.resolve().relative_to(scan_root.resolve()).as_posix()
+        except Exception:
+            rel_s = fpath.name
+    else:
+        rel_s = fpath.as_posix()
+    if _is_benchmark_path_or_cwd(rel_s):
+        return True
+    if cwd_hint:
+        c_str = str(cwd_hint).strip().replace("\\", "/")
+        if scan_root is not None:
+            try:
+                test_base = scan_root.resolve().parent.as_posix()
+                c_res = Path(c_str).resolve().as_posix() if c_str.startswith("/") else c_str
+                if c_res.startswith(test_base + "/"):
+                    c_str = c_res[len(test_base) + 1 :]
+            except Exception:
+                pass
+        if _is_benchmark_path_or_cwd(c_str):
+            return True
+    return False
+
+
+def _is_agy_conv_direct_benchmark(raw_objs: List[Tuple[Dict[str, Any], int]]) -> bool:
+    if not raw_objs:
+        return False
+    head_objs = raw_objs[:60]
+    is_subagent = str(head_objs[0][0].get("type") or "") == "SYSTEM_MESSAGE"
+    prompt_txt = ""
+    for idx, (obj, _) in enumerate(head_objs):
+        if not isinstance(obj, dict):
+            continue
+        for ws_key in ("workspace_uri", "cwd", "workspace"):
+            ws_val = str(obj.get(ws_key) or "").strip()
+            if ws_val and _is_benchmark_path_or_cwd(ws_val):
+                return True
+        stype = str(obj.get("type") or "")
+        content_str = str(obj.get("content") or "")
+        if stype == "USER_INPUT":
+            if "<ADDITIONAL_METADATA>" in content_str and "Active Workspaces:" in content_str:
+                meta_part = content_str.split("<ADDITIONAL_METADATA>", 1)[1].split(
+                    "</ADDITIONAL_METADATA>", 1
+                )[0]
+                for mln in meta_part.splitlines():
+                    ms = mln.strip()
+                    if ms.startswith("- /") and _is_benchmark_path_or_cwd(ms[2:].strip()):
+                        return True
+            if not prompt_txt:
+                if "<USER_REQUEST>" in content_str and "</USER_REQUEST>" in content_str:
+                    prompt_txt = content_str.split("<USER_REQUEST>", 1)[1].split(
+                        "</USER_REQUEST>", 1
+                    )[0]
+                else:
+                    prompt_txt = content_str
+        elif (
+            is_subagent
+            and idx < 6
+            and stype == "SYSTEM_MESSAGE"
+            and "[Message]" in content_str
+            and "[swarm] new board message" not in content_str
+            and not prompt_txt
+        ):
+            prompt_txt = content_str
+
+        if stype == "PLANNER_RESPONSE":
+            for tc in obj.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
+                args_obj = tc.get("args") or tc.get("arguments") or tc.get("input") or {}
+                try:
+                    args_low = json.dumps(args_obj, ensure_ascii=False).lower()
+                except Exception:
+                    args_low = str(args_obj).lower()
+                if any(mk in args_low for mk in _AGY_BENCHMARK_TOOL_ARGS_MARKERS):
+                    return True
+                if is_subagent and str(tc.get("name") or "") == "run_command":
+                    if "cd /tmp/" in args_low or "cd /private/tmp/" in args_low:
+                        return True
+
+    if prompt_txt:
+        low_p = prompt_txt.lower()
+        if any(tpl in low_p for tpl in _AGY_HEADLESS_EVAL_TEMPLATES):
+            return True
+        is_repo_edit = "allowed files only" in low_p and "src/whole_body_compute/" in low_p
+        if not is_repo_edit and any(mk in low_p for mk in _AGY_BENCHMARK_PROMPT_MARKERS):
+            return True
+    return False
+
+
 def scan_antigravity_harness(
     agy_dir: Path,
     window_seconds: float,
@@ -800,13 +1026,26 @@ def scan_antigravity_harness(
     in_price_per_m: float,
     out_price_per_m: float,
     explicit_price_override: bool = False,
+    include_benchmarks: bool = False,
+    excluded_stats: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     if not agy_dir.is_dir():
         return records
 
+    eff_inc_bench = _resolve_include_benchmarks(include_benchmarks)
+    parsed_convs: List[Tuple[str, List[Tuple[Dict[str, Any], int]], int, int, int, float]] = []
+    spawned_model_by_cid: Dict[str, str] = {}
+    conv_declared_model: Dict[str, str] = {}
+    parent_by_cid: Dict[str, str] = {}
+    sender_re = re.compile(r"sender=([A-Za-z0-9_-]{8,})")
+    cont_re = re.compile(r"Continuing from (?:conversation://)?([0-9a-fA-F\-]{36})")
+
     for c_dir in agy_dir.iterdir():
         if not c_dir.is_dir() or c_dir.name.startswith("."):
+            continue
+        if not eff_inc_bench and _is_benchmark_path_or_cwd(c_dir.name):
+            _bump_excluded_stat(excluded_stats, "antigravity", 1)
             continue
         logs_dir = c_dir / ".system_generated" / "logs"
         compact_p = logs_dir / "transcript.jsonl"
@@ -835,6 +1074,92 @@ def scan_antigravity_harness(
             if not raw_objs:
                 continue
 
+            cid = c_dir.name
+            fallback_sender = ""
+            for step_i, (obj, _) in enumerate(raw_objs):
+                stype = str(obj.get("type") or "")
+                content_str = str(obj.get("content") or "")
+                ms_cand = _extract_model_selection_change(content_str)
+                if ms_cand:
+                    conv_declared_model[cid] = ms_cand
+                if obj.get("model"):
+                    conv_declared_model[cid] = str(obj.get("model"))
+                if stype == "SYSTEM_MESSAGE" and "sender=" in content_str:
+                    m_snd = sender_re.search(content_str)
+                    if m_snd and m_snd.group(1).lower() != "system":
+                        snd_id = m_snd.group(1)
+                        if "[swarm] new board message" in content_str:
+                            if not fallback_sender:
+                                fallback_sender = snd_id
+                        elif cid not in parent_by_cid:
+                            parent_by_cid[cid] = snd_id
+                elif stype == "USER_INPUT" and step_i < 5 and cid not in parent_by_cid:
+                    m_cont = cont_re.search(content_str)
+                    if m_cont and m_cont.group(1) != cid:
+                        parent_by_cid[cid] = m_cont.group(1)
+                if content_str.startswith("{") and "conversation_id" in content_str:
+                    try:
+                        spawn_meta = json.loads(content_str)
+                        if isinstance(spawn_meta, dict) and spawn_meta.get("conversation_id"):
+                            s_model = str(spawn_meta.get("model_display_name") or spawn_meta.get("model") or "").strip()
+                            if s_model:
+                                spawned_model_by_cid[str(spawn_meta["conversation_id"])] = s_model
+                    except Exception:
+                        pass
+            if cid not in parent_by_cid and fallback_sender:
+                parent_by_cid[cid] = fallback_sender
+
+            parsed_convs.append((cid, raw_objs, compact_bytes, full_bytes, conv_bytes, mtime))
+        except Exception:
+            continue
+
+    bench_cids: set[str] = set()
+    if not eff_inc_bench:
+        for cid, raw_objs, *_ in parsed_convs:
+            if _is_agy_conv_direct_benchmark(raw_objs):
+                bench_cids.add(cid)
+        # Also check any parent transcript outside window if referenced by a child in window
+        unchecked_parents = {
+            pid for cid, pid in parent_by_cid.items() if cid not in bench_cids and pid not in bench_cids
+        }
+        parsed_cid_set = {c for c, *_ in parsed_convs}
+        for pid in unchecked_parents:
+            if pid in parsed_cid_set:
+                continue
+            p_logs = agy_dir / pid / ".system_generated" / "logs"
+            p_file = (
+                p_logs / "transcript.jsonl"
+                if (p_logs / "transcript.jsonl").is_file()
+                else (p_logs / "transcript_full.jsonl" if (p_logs / "transcript_full.jsonl").is_file() else None)
+            )
+            if p_file:
+                try:
+                    p_head: List[Tuple[Dict[str, Any], int]] = []
+                    with open(p_file, "r", encoding="utf-8", errors="ignore") as pfh:
+                        for _ in range(60):
+                            pln = pfh.readline()
+                            if not pln:
+                                break
+                            ps = pln.strip()
+                            if ps:
+                                p_head.append((json.loads(ps), len(ps)))
+                    if _is_agy_conv_direct_benchmark(p_head):
+                        bench_cids.add(pid)
+                except Exception:
+                    pass
+        changed = True
+        while changed:
+            changed = False
+            for cid, pid in parent_by_cid.items():
+                if cid not in bench_cids and pid in bench_cids:
+                    bench_cids.add(cid)
+                    changed = True
+
+    for cid, raw_objs, compact_bytes, full_bytes, conv_bytes, mtime in parsed_convs:
+        if not eff_inc_bench and cid in bench_cids:
+            _bump_excluded_stat(excluded_stats, "antigravity", 1)
+            continue
+        try:
             trunc_cnt = sum(1 for obj, _ in raw_objs if obj.get("truncated_fields"))
             overflow_per_trunc = (
                 float(max(0, full_bytes - compact_bytes)) / float(max(1, trunc_cnt))
@@ -844,7 +1169,10 @@ def scan_antigravity_harness(
             step_tuples: List[Tuple[bool, int, bool]] = []
             tool_counts: Dict[str, int] = {}
             first_prompt = ""
-            active_model = ""
+            active_model = (
+                spawned_model_by_cid.get(cid)
+                or conv_declared_model.get(parent_by_cid.get(cid, ""), "")
+            )
             m_turns = m_in = m_cr = m_out = m_matched = typed_prompt_tok = 0
             fresh_usd = cache_usd = out_usd = 0.0
             last_event_ts = 0.0
@@ -931,8 +1259,8 @@ def scan_antigravity_harness(
             rec = _evaluate_step_sequence(
                 step_Tuples=step_tuples,
                 conv_bytes=conv_bytes,
-                short_id=c_dir.name[:8],
-                conv_id=c_dir.name,
+                short_id=cid[:8],
+                conv_id=cid,
                 harness="antigravity",
                 mtime=eff_ts,
                 in_price_per_m=in_price_per_m,
@@ -974,6 +1302,671 @@ def _extract_claude_text(content_val: Any) -> str:
     return ""
 
 
+_AUDIT_SECRET_PATTERNS: Tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"-----BEGIN[ A-Z0-9\-]*PRIVATE KEY[ A-Z0-9\-]*-----.*?-----END[ A-Z0-9\-]*PRIVATE KEY[ A-Z0-9\-]*-----",
+        re.DOTALL | re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:"
+        r"sk-[A-Za-z0-9_\-]{12,}"
+        r"|sk_(?:live|test)_[A-Za-z0-9]{8,}"
+        r"|pk_(?:live|test)_[A-Za-z0-9]{8,}"
+        r"|rk_(?:live|test)_[A-Za-z0-9]{8,}"
+        r"|whsec_[A-Za-z0-9+/=]{8,}"
+        r"|ghp_[A-Za-z0-9]{16,}"
+        r"|gh[osu]_[A-Za-z0-9]{16,}"
+        r"|github_pat_[A-Za-z0-9_]{16,}"
+        r"|glpat-[A-Za-z0-9_\-]{16,}"
+        r"|xox[baprs]-[A-Za-z0-9\-]{10,}"
+        r"|AKIA[0-9A-Z]{16}"
+        r"|ASIA[0-9A-Z]{16}"
+        r"|AIza[0-9A-Za-z_\-]{20,}"
+        r"|ya29\.[0-9A-Za-z_\-]{16,}"
+        r"|ph[cx]_[A-Za-z0-9]{16,}"
+        r"|pypi-[A-Za-z0-9_\-]{20,}"
+        r"|hf_[A-Za-z0-9]{16,}"
+        r"|npm_[A-Za-z0-9]{20,}"
+        r"|eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"
+        r")\b"
+    ),
+    re.compile(r"(?i)(https?://)([^/\s:@]+:[^/\s@]+)@"),
+    re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._\-+/=]{8,}"),
+    re.compile(
+        r"(?i)\b(api[_\-]?key|secret|token|password|passwd|pwd|access[_\-]?key|client[_\-]?secret|"
+        r"anthropic_api_key|openai_api_key|github_token|aws_secret_access_key)"
+        r"(\s*[=:]\s*)(['\"]?)([^\s'\"`&;|]{4,})\3"
+    ),
+    re.compile(r"(?i)(\s(?:--token|--password|--api-key|-p|-u)\s+)(['\"]?)([^\s'\"`&;|]{4,})\2"),
+)
+
+
+def _redact_audit_secrets(text: str) -> str:
+    """Stdlib-only credential redactor for Bash command previews and lowering patterns."""
+    cleaned = str(text or "")
+    if not cleaned:
+        return ""
+    for idx, pat in enumerate(_AUDIT_SECRET_PATTERNS):
+        if idx == 2:
+            cleaned = pat.sub(r"\1[redacted]@", cleaned)
+        elif idx == 3:
+            cleaned = pat.sub(r"\1[redacted]", cleaned)
+        elif idx == 4:
+            cleaned = pat.sub(r"\1\2[redacted]", cleaned)
+        elif idx == 5:
+            cleaned = pat.sub(r"\1[redacted]", cleaned)
+        else:
+            cleaned = pat.sub("[redacted]", cleaned)
+    return cleaned
+
+
+_BASH_ENV_PREFIX_RE = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|\"[^\"]*\"|\S+)\s+)+")
+_BASH_RUNNER_PREFIX_RE = re.compile(
+    r"^(?:uv\s+run\s+|npx\s+|pnpm\s+(?:exec\s+)?|yarn\s+|poetry\s+run\s+|python3?(?:\.\d+)?\s+-m\s+)+"
+)
+_BASH_GIT_PLUMBING_RE = re.compile(
+    r"^git\s+(?:-[Cc]\s+\S+\s+)*(status|diff|add|commit|push|branch|checkout|switch|log|fetch|pull|rebase|merge|stash|rev-parse|show)\b"
+)
+_BASH_GH_PR_RE = re.compile(r"^gh\s+pr\s+(create|view|checks|comment|merge|list|status|diff)\b")
+_BASH_NOISY_TEST_BUILD_RE = re.compile(
+    r"(?:^|\b)(?:pytest|py\.test|vitest|jest|mocha|cargo\s+test|go\s+test|npm\s+test|pnpm\s+test|yarn\s+test|xcodebuild|docker\s+build|make\b)"
+)
+_BASH_DATA_WRANGLE_TOOL_RE = re.compile(r"^(jq|grep|rg|awk|sed|cat|head|tail|wc|curl)\b")
+_BASH_PY_INLINE_RE = re.compile(r"^python3?(?:\.\d+)?\s+-c\b")
+_BASH_PY_DATA_HINT_RE = re.compile(r"(?i)(json|csv|sarif|yaml|xml|load\(|loads\(|dictreader|stdin|open\(|split\(|parse)")
+
+
+def _classify_bash_command(cmd: str) -> Tuple[Optional[str], str, bool]:
+    """Return `(lowering_category, normalized_verb, is_noisy_test_build)` for a Bash command."""
+    raw = str(cmd or "").strip()
+    if not raw:
+        return None, "", False
+    segments = [seg.strip() for seg in re.split(r"(?:&&|\|\||[;\n|])", raw) if seg.strip()]
+    is_noisy = bool(_BASH_NOISY_TEST_BUILD_RE.search(raw))
+
+    detected_cat: Optional[str] = None
+    detected_verb = ""
+    for seg in segments:
+        norm_seg = _BASH_ENV_PREFIX_RE.sub("", seg).strip()
+        runner_seg = _BASH_RUNNER_PREFIX_RE.sub("", norm_seg).strip()
+        low = runner_seg.lower()
+        low_orig = norm_seg.lower()
+
+        if low.startswith("ruff"):
+            return "lint_format_loops", "ruff", is_noisy
+        if low.startswith("black"):
+            return "lint_format_loops", "black", is_noisy
+        if low.startswith("isort"):
+            return "lint_format_loops", "isort", is_noisy
+        if low.startswith("prettier"):
+            return "lint_format_loops", "prettier", is_noisy
+        if low.startswith("eslint"):
+            return "lint_format_loops", "eslint", is_noisy
+        if low.startswith("tsc") and "--noemit" in low:
+            return "lint_format_loops", "tsc:noEmit", is_noisy
+        if low.startswith("gofmt"):
+            return "lint_format_loops", "gofmt", is_noisy
+        if low.startswith("cargo fmt"):
+            return "lint_format_loops", "cargo:fmt", is_noisy
+        if low.startswith("cargo clippy"):
+            return "lint_format_loops", "cargo:clippy", is_noisy
+
+        m_git = _BASH_GIT_PLUMBING_RE.match(low_orig)
+        if m_git and detected_cat is None:
+            detected_cat = "git_pr_plumbing"
+            detected_verb = f"git:{m_git.group(1)}"
+            continue
+        m_gh = _BASH_GH_PR_RE.match(low_orig)
+        if m_gh and detected_cat is None:
+            detected_cat = "git_pr_plumbing"
+            detected_verb = f"gh:pr:{m_gh.group(1)}"
+            continue
+
+        if not is_noisy and detected_cat is None:
+            m_dw = _BASH_DATA_WRANGLE_TOOL_RE.match(low_orig)
+            if m_dw:
+                detected_cat = "data_log_wrangling"
+                detected_verb = m_dw.group(1)
+                continue
+            if _BASH_PY_INLINE_RE.match(low_orig) and _BASH_PY_DATA_HINT_RE.search(norm_seg):
+                detected_cat = "data_log_wrangling"
+                detected_verb = "python:-c"
+                continue
+
+    return detected_cat, detected_verb, is_noisy
+
+
+def _canonical_mcp_server_key(name: str) -> str:
+    norm = re.sub(r"[^a-z0-9]+", "", str(name or "").lower())
+    if norm.endswith("mcp") and len(norm) > 3:
+        norm = norm[:-3]
+    return norm
+
+
+def _is_safe_contained_file(path: Path, root: Path) -> bool:
+    """Return True iff `path` is a non-symlink regular file strictly contained inside `root`."""
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return False
+    cur = root
+    for part in rel.parts:
+        cur = cur / part
+        try:
+            if cur.is_symlink():
+                return False
+        except OSError:
+            return False
+    try:
+        resolved_root = root.resolve()
+        resolved_path = path.resolve()
+        if not resolved_path.is_relative_to(resolved_root):
+            return False
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _collect_lowering_mcp_configs(
+    turn0_static_overhead: Dict[str, Any],
+    ws_dir: Path,
+    h_dir: Path,
+    ci_dir: Optional[Path],
+    session_declared_mcps: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """Collect configured MCP servers from Turn-0 static scan, `.mcp.json`, `.claude/settings*.json`, and session init tools."""
+    servers: Dict[str, Dict[str, Any]] = {}
+
+    def _add_srv(raw_name: str, tokens: int) -> None:
+        disp = _sanitize_turn0_label(raw_name)
+        ckey = _canonical_mcp_server_key(disp)
+        if not ckey:
+            return
+        if ckey not in servers:
+            servers[ckey] = {"name": disp, "tokens": max(0, int(tokens))}
+        elif tokens > int(servers[ckey]["tokens"]):
+            servers[ckey]["tokens"] = int(tokens)
+
+    for srv in turn0_static_overhead.get("mcp_servers", []) or []:
+        if isinstance(srv, dict) and srv.get("name"):
+            _add_srv(str(srv["name"]), int(srv.get("tokens", DEFAULT_DEFERRED_TOKENS_PER_MCP_SERVER)))
+
+    extra_cfgs: List[Path] = [
+        ws_dir / ".claude" / "settings.json",
+        ws_dir / ".claude" / "settings.local.json",
+        h_dir / ".claude" / "settings.json",
+        h_dir / ".claude" / "settings.local.json",
+    ]
+    ci_p: Optional[Path] = Path(ci_dir).expanduser() if ci_dir is not None else None
+    if ci_p is not None:
+        extra_cfgs.extend(
+            [
+                ci_p / ".mcp.json",
+                ci_p / ".claude" / "settings.json",
+                ci_p / ".claude" / "settings.local.json",
+            ]
+        )
+
+    seen_rp: set[str] = set()
+    for cfg_p in extra_cfgs:
+        try:
+            if ci_p is not None:
+                if not _is_safe_contained_file(cfg_p, ci_p):
+                    continue
+            elif not cfg_p.is_file():
+                continue
+            rp = os.path.realpath(cfg_p)
+            if rp in seen_rp:
+                continue
+            seen_rp.add(rp)
+            if os.path.getsize(cfg_p) > 2_000_000:
+                continue
+            parsed = json.loads(cfg_p.read_text(encoding="utf-8", errors="ignore"))
+            if not isinstance(parsed, dict):
+                continue
+            for key_name in ("mcpServers", "servers"):
+                srv_dict = parsed.get(key_name)
+                if isinstance(srv_dict, dict):
+                    for sname, scfg in srv_dict.items():
+                        if isinstance(scfg, dict) and scfg.get("disabled") is True:
+                            continue
+                        _add_srv(str(sname), DEFAULT_DEFERRED_TOKENS_PER_MCP_SERVER)
+            enabled_list = parsed.get("enabledMcpjsonServers")
+            if isinstance(enabled_list, list):
+                for sname in enabled_list:
+                    if isinstance(sname, str) and sname.strip():
+                        _add_srv(sname.strip(), DEFAULT_DEFERRED_TOKENS_PER_MCP_SERVER)
+            perms = parsed.get("permissions")
+            allow_lists: List[Any] = []
+            if isinstance(perms, dict):
+                allow_lists.append(perms.get("allow"))
+            allow_lists.append(parsed.get("allowedTools"))
+            for lst in allow_lists:
+                if isinstance(lst, list):
+                    for entry in lst:
+                        if isinstance(entry, str) and entry.startswith("mcp__"):
+                            parts = entry.split("__", 2)
+                            if len(parts) >= 2 and parts[1]:
+                                _add_srv(parts[1], DEFAULT_DEFERRED_TOKENS_PER_MCP_SERVER)
+        except Exception:
+            continue
+
+    for sname in session_declared_mcps:
+        _add_srv(sname, DEFAULT_DEFERRED_TOKENS_PER_MCP_SERVER)
+
+    return servers
+
+
+def _analyze_claude_lowering_choreography(
+    claude_recs: List[Dict[str, Any]],
+    traces_by_id: Dict[str, Dict[str, Any]],
+    turn0_static_overhead: Dict[str, Any],
+    ws_dir: Path,
+    h_dir: Path,
+    ci_dir: Optional[Path],
+    days: int,
+    in_price: float,
+    total_monthly_usd: float,
+    hook_fired_by_id: Optional[Dict[str, bool]] = None,
+) -> Dict[str, Any]:
+    """Deterministic Bash choreography fingerprinter & multiplicative dual-wedge savings model."""
+    ci_mode = bool(ci_dir is not None)
+    all_event_ts: List[float] = []
+    for rec in claude_recs:
+        cid = str(rec.get("conv_id", ""))
+        trace = traces_by_id.get(cid) or {}
+        for ts_k in ("min_event_ts", "max_event_ts"):
+            ts_v = float(trace.get(ts_k) or 0.0)
+            if ts_v > 0.0:
+                all_event_ts.append(ts_v)
+    if len(all_event_ts) >= 2 and max(all_event_ts) > min(all_event_ts):
+        observed_span_hours = round((max(all_event_ts) - min(all_event_ts)) / 3600.0, 4)
+    else:
+        observed_span_hours = 0.0
+
+    use_monthly = (
+        (not ci_mode)
+        and (days >= 7)
+        and (observed_span_hours == 0.0 or observed_span_hours >= 168.0)
+    )
+    period_unit = "/mo" if use_monthly else " (audited period)"
+    scale = (30.0 / float(max(1, days))) if (use_monthly and days > 0) else 1.0
+
+    claude_period_usd = round(sum(float(r.get("exact_api_spend_usd", 0.0)) for r in claude_recs), 2)
+    claude_monthly_usd = round(claude_period_usd * scale, 2)
+    total_claude_turns = sum(max(1, int(r.get("planner_turns", 0))) for r in claude_recs)
+    if not claude_recs or (total_claude_turns == 0 and claude_monthly_usd <= 0):
+        baseline_period_usd = 0.0
+        baseline_monthly_usd = 0.0
+    else:
+        baseline_period_usd = claude_period_usd if claude_period_usd > 0 else 0.0
+        baseline_monthly_usd = claude_monthly_usd if claude_monthly_usd > 0 else 0.0
+    edit_tools = frozenset({"edit", "write", "multiedit", "notebookedit"})
+
+    candidate_runs: List[Dict[str, Any]] = []
+    invoked_mcp_keys: set[str] = set()
+    session_declared_mcps: List[str] = []
+    unbounded_read_calls = 0
+    noisy_bash_calls = 0
+    session_bloat_flags: Dict[str, Tuple[int, int]] = {}
+
+    for rec in claude_recs:
+        cid = str(rec.get("conv_id", ""))
+        trace = traces_by_id.get(cid) or {}
+        ordered_tools: List[Dict[str, Any]] = list(trace.get("ordered_tools") or [])
+        for dmcp in trace.get("turn0_declared_mcps") or []:
+            session_declared_mcps.append(str(dmcp))
+
+        s_unread = int(trace.get("unbounded_read_calls", 0))
+        s_nbash = int(trace.get("noisy_bash_calls", 0))
+        unbounded_read_calls += s_unread
+        noisy_bash_calls += s_nbash
+        session_bloat_flags[cid] = (s_unread, s_nbash)
+
+        for item in ordered_tools:
+            msrv = str(item.get("mcp_server") or "")
+            if msrv:
+                ck = _canonical_mcp_server_key(msrv)
+                if ck:
+                    invoked_mcp_keys.add(ck)
+
+        # 1. Extract contiguous runs for git_pr_plumbing and data_log_wrangling
+        for cat in ("git_pr_plumbing", "data_log_wrangling"):
+            cur_run: List[Dict[str, Any]] = []
+            for item in ordered_tools:
+                if item.get("cat") == cat:
+                    cur_run.append(item)
+                else:
+                    if cur_run:
+                        verbs = tuple(str(x.get("verb") or cat) for x in cur_run)
+                        sig = (cat, verbs)
+                        candidate_runs.append(
+                            {
+                                "cid": cid,
+                                "cat": cat,
+                                "items": cur_run,
+                                "sig": sig,
+                                "core_calls": len(cur_run),
+                                "total_steps": len(cur_run),
+                            }
+                        )
+                        cur_run = []
+            if cur_run:
+                verbs = tuple(str(x.get("verb") or cat) for x in cur_run)
+                sig = (cat, verbs)
+                candidate_runs.append(
+                    {
+                        "cid": cid,
+                        "cat": cat,
+                        "items": cur_run,
+                        "sig": sig,
+                        "core_calls": len(cur_run),
+                        "total_steps": len(cur_run),
+                    }
+                )
+
+        # 2. Extract lint_format_loops (allowing interleaved Edit/Write between lint runs)
+        n_tools = len(ordered_tools)
+        idx = 0
+        while idx < n_tools:
+            if ordered_tools[idx].get("cat") == "lint_format_loops":
+                run_items: List[Dict[str, Any]] = [ordered_tools[idx]]
+                j = idx + 1
+                while j < n_tools:
+                    nxt = ordered_tools[j]
+                    if nxt.get("cat") == "lint_format_loops":
+                        run_items.append(nxt)
+                        j += 1
+                    elif nxt.get("norm") in edit_tools:
+                        # Look ahead to see if another lint_format_loops follows after Edit/Write(s)
+                        k = j + 1
+                        while k < n_tools and ordered_tools[k].get("norm") in edit_tools:
+                            k += 1
+                        if k < n_tools and ordered_tools[k].get("cat") == "lint_format_loops":
+                            run_items.extend(ordered_tools[j : k + 1])
+                            j = k + 1
+                        else:
+                            break
+                    else:
+                        break
+                lint_core = [x for x in run_items if x.get("cat") == "lint_format_loops"]
+                verbs = tuple(str(x.get("verb") or "lint") for x in lint_core)
+                candidate_runs.append(
+                    {
+                        "cid": cid,
+                        "cat": "lint_format_loops",
+                        "items": run_items,
+                        "sig": ("lint_format_loops", verbs),
+                        "core_calls": len(lint_core),
+                        "total_steps": len(run_items),
+                    }
+                )
+                idx = j
+            else:
+                idx += 1
+
+    # Count recurrence across distinct sessions per signature and per primary verb
+    sig_sessions: Dict[Any, set[str]] = {}
+    sig_calls: Dict[Any, int] = {}
+    verb_sessions: Dict[Tuple[str, str], set[str]] = {}
+    verb_calls: Dict[Tuple[str, str], int] = {}
+    for run in candidate_runs:
+        sig = run["sig"]
+        sig_sessions.setdefault(sig, set()).add(run["cid"])
+        sig_calls[sig] = sig_calls.get(sig, 0) + int(run["core_calls"])
+        for it in run["items"]:
+            if it.get("cat") == run["cat"]:
+                vk = (run["cat"], str(it.get("verb") or run["cat"]))
+                verb_sessions.setdefault(vk, set()).add(run["cid"])
+                verb_calls[vk] = verb_calls.get(vk, 0) + 1
+
+    qualifying_runs: List[Dict[str, Any]] = []
+    for run in candidate_runs:
+        cat = run["cat"]
+        sig = run["sig"]
+        is_consec = (
+            (run["total_steps"] >= 3 and run["core_calls"] >= 2)
+            if cat == "lint_format_loops"
+            else (run["total_steps"] >= 3)
+        )
+        is_recurring_sig = len(sig_sessions.get(sig, set())) >= 2 and (
+            sig_calls.get(sig, 0) >= 3 or run["total_steps"] >= 2
+        )
+        first_v = str(sig[1][0]) if sig[1] else cat
+        is_recurring_verb = (
+            len(verb_sessions.get((cat, first_v), set())) >= 2
+            and verb_calls.get((cat, first_v), 0) >= 3
+        )
+        if is_consec or is_recurring_sig or is_recurring_verb:
+            qualifying_runs.append(run)
+
+    cat_stats: Dict[str, Dict[str, Any]] = {
+        "git_pr_plumbing": {
+            "sequences": 0,
+            "calls": 0,
+            "turns": 0,
+            "patterns": [],
+            "recommendation": "body commit + Python spine",
+            "_turn_keys": set(),
+            "_sigs": set(),
+        },
+        "data_log_wrangling": {
+            "sequences": 0,
+            "calls": 0,
+            "turns": 0,
+            "patterns": [],
+            "recommendation": "Deterministic Python/jq Tier 0/1 script",
+            "_turn_keys": set(),
+            "_sigs": set(),
+        },
+        "lint_format_loops": {
+            "sequences": 0,
+            "calls": 0,
+            "turns": 0,
+            "patterns": [],
+            "recommendation": "Pre-commit / Tier 0 auto-fix loop",
+            "_turn_keys": set(),
+            "_sigs": set(),
+        },
+    }
+
+    session_lowerable_turn_keys: Dict[str, set[str]] = {}
+    distinct_patterns: set[Any] = set()
+
+    for run in qualifying_runs:
+        cat = run["cat"]
+        cs = cat_stats[cat]
+        cs["sequences"] += 1
+        cs["calls"] += int(run["total_steps"])
+        distinct_patterns.add(run["sig"])
+        cs["_sigs"].add(run["sig"])
+        cid = run["cid"]
+        tkeys_set = session_lowerable_turn_keys.setdefault(cid, set())
+        for it in run["items"]:
+            tk = f"{cid}:{it.get('turn_key', '')}"
+            tkeys_set.add(str(it.get("turn_key", "")))
+            cs["_turn_keys"].add(tk)
+        if len(cs["patterns"]) < 5:
+            verbs_str = " -> ".join(list(run["sig"][1])[:5])
+            first_cmd = ""
+            for it in run["items"]:
+                if it.get("cmd"):
+                    first_cmd = _redact_audit_secrets(str(it["cmd"]))
+                    first_cmd = " ".join(first_cmd.split())[:84]
+                    break
+            preview = f"{verbs_str} ({first_cmd})" if first_cmd else verbs_str
+            preview = _redact_audit_secrets(preview)[:120]
+            if preview and preview not in cs["patterns"]:
+                cs["patterns"].append(preview)
+
+    for cs in cat_stats.values():
+        cs["turns"] = len(cs.pop("_turn_keys"))
+        cs["distinct_patterns"] = len(cs.pop("_sigs"))
+
+    fired_map = hook_fired_by_id or {}
+    already_shielded_sessions = sum(
+        1 for rec in claude_recs if bool(fired_map.get(str(rec.get("conv_id", "")), False))
+    )
+
+    total_lowerable_turns = 0
+    raw_code_period_usd = 0.0
+    session_code_ratio_by_id: Dict[str, float] = {}
+
+    for rec in claude_recs:
+        cid = str(rec.get("conv_id", ""))
+        s_turns = max(1, int(rec.get("planner_turns", 0)))
+        low_tkeys = session_lowerable_turn_keys.get(cid, set())
+        low_turns = min(s_turns, len(low_tkeys))
+        total_lowerable_turns += low_turns
+
+        trace = traces_by_id.get(cid) or {}
+        turn_cost_map = trace.get("turn_cost_by_key")
+        total_turn_cost = (
+            sum(float(v) for v in turn_cost_map.values())
+            if isinstance(turn_cost_map, dict) and turn_cost_map
+            else 0.0
+        )
+        if isinstance(turn_cost_map, dict) and turn_cost_map and total_turn_cost > 0.0:
+            low_cost = sum(max(0.0, float(turn_cost_map.get(tk, 0.0))) for tk in low_tkeys)
+            c_ratio = min(0.94, max(0.0, low_cost / total_turn_cost))
+            session_code_ratio_by_id[cid] = c_ratio
+            raw_code_period_usd += min(0.94 * total_turn_cost, max(0.0, low_cost))
+        else:
+            c_ratio = min(0.94, float(low_turns) / float(s_turns)) if s_turns > 0 else 0.0
+            session_code_ratio_by_id[cid] = c_ratio
+            raw_code_period_usd += float(rec.get("exact_api_spend_usd", 0.0)) * c_ratio
+
+    code_lowering_turn_pct = (
+        round(min(100.0, (float(total_lowerable_turns) / float(max(1, total_claude_turns))) * 100.0), 1)
+        if total_claude_turns > 0
+        else 0.0
+    )
+
+    configured_mcps = _collect_lowering_mcp_configs(
+        turn0_static_overhead=turn0_static_overhead,
+        ws_dir=ws_dir,
+        h_dir=h_dir,
+        ci_dir=ci_dir,
+        session_declared_mcps=session_declared_mcps,
+    )
+    dormant_entries = [
+        srv_info
+        for ckey, srv_info in sorted(configured_mcps.items())
+        if ckey not in invoked_mcp_keys
+    ]
+    dormant_mcps = [str(e["name"]) for e in dormant_entries]
+    dormant_mcp_tokens = sum(int(e["tokens"]) for e in dormant_entries)
+
+    # Multiplicative Non-Overlapping Math:
+    # Stage 1: Code lowering savings S_code (exact metered per-turn attribution)
+    # Remaining spend: T_rem = max(0, T - S_code)
+    # Stage 2: WBC Linux Shield savings strictly on remaining unshielded turns T_rem,
+    # scaled quadratically by (1 - c_ratio)^2, capped at empirical 35.0% of T_rem,
+    # and bounded so S_code + S_wbc <= 0.94 * T.
+    max_total_usd = math.floor(0.94 * baseline_monthly_usd * 100.0) / 100.0 if baseline_monthly_usd > 0 else 0.0
+    s_code = round(min(max_total_usd, raw_code_period_usd * scale), 2) if baseline_monthly_usd > 0 else 0.0
+    t_rem = round(max(0.0, baseline_monthly_usd - s_code), 2)
+
+    rem_hal_period_usd = 0.0
+    bonus_bloat_period_usd = 0.0
+    unshielded_recs: List[Dict[str, Any]] = []
+    unshielded_rem_period_usd = 0.0
+    for rec in claude_recs:
+        cid = str(rec.get("conv_id", ""))
+        if bool(fired_map.get(cid, False)):
+            continue
+        unshielded_recs.append(rec)
+        c_ratio = session_code_ratio_by_id.get(cid, 0.0)
+        rem_frac = max(0.0, 1.0 - c_ratio)
+        s_spend = float(rec.get("exact_api_spend_usd", 0.0))
+        s_hal = float(rec.get("hal_saved_usd", 0.0))
+        unshielded_rem_period_usd += s_spend * rem_frac
+        rem_hal_period_usd += s_hal * (rem_frac ** 2)
+        if s_hal <= 0.0 and s_spend > 0.0:
+            s_unread, s_nbash = session_bloat_flags.get(cid, (0, 0))
+            if s_unread > 0 or s_nbash > 0:
+                bonus_bloat_period_usd += (s_spend * (rem_frac ** 2)) * min(0.28, 0.12 * (s_unread + s_nbash))
+
+    dormant_mcp_monthly_usd = 0.0
+    unshielded_turns = sum(max(1, int(r.get("planner_turns", 0))) for r in unshielded_recs)
+    if dormant_mcp_tokens > 0 and t_rem > 0 and unshielded_recs and unshielded_turns > 0:
+        eff_sess = len(unshielded_recs)
+        dormant_tok_period = dormant_mcp_tokens * (eff_sess + max(0, unshielded_turns - eff_sess) * 0.10)
+        dormant_mcp_monthly_usd = ((dormant_tok_period / 1_000_000.0) * max(0.0, float(in_price))) * scale
+        dormant_mcp_monthly_usd = min(t_rem * 0.35, dormant_mcp_monthly_usd)
+
+    raw_s_wbc = (
+        ((rem_hal_period_usd + bonus_bloat_period_usd) * scale + dormant_mcp_monthly_usd)
+        if unshielded_recs
+        else 0.0
+    )
+    eff_t_rem_unshielded = (
+        t_rem
+        if already_shielded_sessions == 0
+        else min(t_rem, round(unshielded_rem_period_usd * scale, 2))
+    )
+    max_wbc_by_rem = (
+        math.floor(0.35 * eff_t_rem_unshielded * 100.0) / 100.0
+        if eff_t_rem_unshielded > 0
+        else 0.0
+    )
+    s_wbc_cap = min(max_wbc_by_rem, max(0.0, max_total_usd - s_code))
+    s_wbc = round(min(s_wbc_cap, max(0.0, raw_s_wbc)), 2) if t_rem > 0 else 0.0
+    s_total = round(s_code + s_wbc, 2)
+
+    wbc_shield_rem_pct = round((s_wbc / t_rem) * 100.0, 1) if t_rem > 0 else 0.0
+    combined_net_pct = round((s_total / baseline_monthly_usd) * 100.0, 1) if baseline_monthly_usd > 0 else 0.0
+    recurring_patterns_count = len(distinct_patterns)
+
+    dormant_cat = {
+        "servers_count": len(dormant_mcps),
+        "servers": dormant_mcps,
+        "tokens_per_session": dormant_mcp_tokens,
+        "recommendation": "body skills prune-mcp",
+    }
+
+    return {
+        "enabled": True,
+        "ci_mode": ci_mode,
+        "observed_span_hours": observed_span_hours,
+        "period_unit": period_unit,
+        "baseline_period_usd": baseline_period_usd,
+        "already_shielded_sessions": already_shielded_sessions,
+        "baseline_monthly_usd": baseline_monthly_usd,
+        "code_lowering_monthly_usd": s_code,
+        "code_lowering_turn_pct": code_lowering_turn_pct,
+        "remaining_monthly_usd": t_rem,
+        "wbc_shield_monthly_usd": s_wbc,
+        "wbc_shield_rem_pct": wbc_shield_rem_pct,
+        "combined_monthly_usd": s_total,
+        "combined_net_pct": combined_net_pct,
+        "total_claude_turns": total_claude_turns,
+        "lowerable_turns": total_lowerable_turns,
+        "recurring_patterns_count": recurring_patterns_count,
+        "tax_breakdown": {
+            "llm_as_interpreter_tax": {
+                "turns": total_lowerable_turns,
+                "monthly_usd": s_code,
+                "turn_pct": code_lowering_turn_pct,
+                "categories": cat_stats,
+            },
+            "context_bloat_tax": {
+                "monthly_usd": s_wbc,
+                "remaining_pct": wbc_shield_rem_pct,
+                "unbounded_read_calls": unbounded_read_calls,
+                "noisy_bash_calls": noisy_bash_calls,
+                "dormant_mcp_schemas": dormant_cat,
+            },
+        },
+        "categories": {
+            "git_pr_plumbing": cat_stats["git_pr_plumbing"],
+            "data_log_wrangling": cat_stats["data_log_wrangling"],
+            "lint_format_loops": cat_stats["lint_format_loops"],
+            "dormant_mcp_schemas": dormant_cat,
+        },
+    }
+
+
 def scan_claude_code_harness(
     claude_dir: Path,
     window_seconds: float,
@@ -981,17 +1974,23 @@ def scan_claude_code_harness(
     in_price_per_m: float,
     out_price_per_m: float,
     explicit_price_override: bool = False,
+    include_benchmarks: bool = False,
+    excluded_stats: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     if not claude_dir.is_dir():
         return records
 
+    eff_inc_bench = _resolve_include_benchmarks(include_benchmarks)
     for jpath in claude_dir.rglob("*.jsonl"):
-        if not jpath.is_file():
+        if not _is_safe_contained_file(jpath, claude_dir):
             continue
         try:
             mtime = os.path.getmtime(jpath)
             if window_seconds > 0 and (now - mtime) > window_seconds:
+                continue
+            if not eff_inc_bench and _is_rel_transcript_benchmark(jpath, claude_dir):
+                _bump_excluded_stat(excluded_stats, "claude_code", 1)
                 continue
             conv_bytes = os.path.getsize(jpath)
             step_tuples: List[Tuple[bool, int, bool]] = []
@@ -1000,12 +1999,22 @@ def scan_claude_code_harness(
             active_model = ""
             m_turns = m_in = m_cc = m_cc_1h = m_cc_5m = m_cr = m_out = m_matched = typed_prompt_tok = 0
             fresh_usd = cache_usd = out_usd = 0.0
+            first_event_ts = 0.0
             last_event_ts = 0.0
             wbc_hook_fired = False
+            skip_benchmark_cwd = False
             model_usage_map: Dict[str, Dict[str, Any]] = {}
             seen_usage_by_msg_key: Dict[Tuple[str, str], Tuple[Dict[str, Any], str]] = {}
+            turn_cost_by_key: Dict[str, float] = {}
             step_idx_by_msg_key: Dict[Tuple[str, str], int] = {}
             unmetered_p_bytes_by_model: Dict[str, List[int]] = {}
+            ordered_tools: List[Dict[str, Any]] = []
+            seen_tool_use_ids: set[str] = set()
+            tool_entry_by_id: Dict[str, Dict[str, Any]] = {}
+            turn0_declared_mcps: List[str] = []
+            turn0_declared_set: set[str] = set()
+            unbounded_read_calls = 0
+            noisy_bash_calls = 0
             line_idx = 0
             with open(jpath, "r", encoding="utf-8", errors="ignore") as fh:
                 for line in fh:
@@ -1019,12 +2028,19 @@ def scan_claude_code_harness(
                         continue
                     if not isinstance(obj, dict):
                         continue
+                    if not eff_inc_bench and line_idx <= 12 and obj.get("cwd"):
+                        if _is_rel_transcript_benchmark(jpath, claude_dir, cwd_hint=str(obj.get("cwd"))):
+                            skip_benchmark_cwd = True
+                            break
                     msg_dict = obj.get("message") if isinstance(obj.get("message"), dict) else {}
                     ev_ts = _parse_iso_or_epoch_ts(
                         obj.get("timestamp") or obj.get("created_at") or msg_dict.get("created_at")
                     )
-                    if ev_ts > last_event_ts:
-                        last_event_ts = ev_ts
+                    if ev_ts > 0.0:
+                        if first_event_ts <= 0.0 or ev_ts < first_event_ts:
+                            first_event_ts = ev_ts
+                        if ev_ts > last_event_ts:
+                            last_event_ts = ev_ts
                     role = str(
                         obj.get("type")
                         or obj.get("role")
@@ -1044,25 +2060,122 @@ def scan_claude_code_harness(
                                     or any(mk in actx for mk in _WBC_TRANSCRIPT_HOOK_MARKERS)
                                 ):
                                     wbc_hook_fired = True
-                        elif role in ("system", "progress") and "body-immune-hook" in s:
+                        elif role in ("system", "progress") and (
+                            "body-immune-hook" in s
+                            or any(mk in s for mk in _WBC_TRANSCRIPT_HOOK_MARKERS)
+                        ):
                             wbc_hook_fired = True
+                    # Capture Turn-0 declared MCP servers from system/init records if present
+                    for t_list_key in ("tools", "mcp_servers"):
+                        t_list = obj.get(t_list_key)
+                        if isinstance(t_list, list):
+                            for entry in t_list:
+                                if isinstance(entry, str):
+                                    if entry.startswith("mcp__"):
+                                        parts = entry.split("__", 2)
+                                        if len(parts) >= 2 and parts[1] and parts[1] not in turn0_declared_set:
+                                            turn0_declared_set.add(parts[1])
+                                            turn0_declared_mcps.append(parts[1])
+                                    elif t_list_key == "mcp_servers" and entry.strip() and entry.strip() not in turn0_declared_set:
+                                        turn0_declared_set.add(entry.strip())
+                                        turn0_declared_mcps.append(entry.strip())
+                                elif isinstance(entry, dict):
+                                    ename = str(entry.get("name") or "")
+                                    if t_list_key == "mcp_servers" and ename and ename not in turn0_declared_set:
+                                        turn0_declared_set.add(ename)
+                                        turn0_declared_mcps.append(ename)
+                                    elif ename.startswith("mcp__"):
+                                        parts = ename.split("__", 2)
+                                        if len(parts) >= 2 and parts[1] and parts[1] not in turn0_declared_set:
+                                            turn0_declared_set.add(parts[1])
+                                            turn0_declared_mcps.append(parts[1])
                     raw_model = str(msg_dict.get("model") or obj.get("model") or "")
                     if raw_model and raw_model != "<synthetic>":
                         active_model = raw_model
                     is_p = role in ("assistant", "model", "planner_response")
+                    msg_id = str(msg_dict.get("id") or obj.get("messageId") or "").strip()
+                    req_id = str(obj.get("requestId") or msg_dict.get("requestId") or "").strip()
+                    dedup_key = (msg_id, req_id) if (msg_id or req_id) else (f"_line_{line_idx}", "")
+                    turn_key_str = f"{dedup_key[0]}|{dedup_key[1]}"
                     msg_content = msg_dict.get("content") if "content" in msg_dict else obj.get("content")
+                    if not wbc_hook_fired and role in ("assistant", "model", "planner_response", "system", "progress"):
+                        if isinstance(msg_content, str) and any(mk in msg_content for mk in _WBC_TRANSCRIPT_HOOK_MARKERS):
+                            wbc_hook_fired = True
                     if isinstance(msg_content, list):
                         for blk in msg_content:
-                            if isinstance(blk, dict) and blk.get("type") == "tool_use":
+                            if not isinstance(blk, dict):
+                                continue
+                            btype = blk.get("type")
+                            if not wbc_hook_fired and role in ("assistant", "model", "planner_response", "system", "progress"):
+                                blk_text = str(blk.get("text") or blk.get("thinking") or blk.get("content") or "")
+                                if blk_text and any(mk in blk_text for mk in _WBC_TRANSCRIPT_HOOK_MARKERS):
+                                    wbc_hook_fired = True
+                            if btype == "tool_use":
                                 tname = str(blk.get("name") or "tool")
+                                tid = str(blk.get("id") or "").strip()
                                 tool_counts[tname] = tool_counts.get(tname, 0) + 1
+                                if tid and tid in seen_tool_use_ids:
+                                    continue
+                                if tid:
+                                    seen_tool_use_ids.add(tid)
+                                norm_name = tname.strip().lower()
+                                inp = blk.get("input") if isinstance(blk.get("input"), dict) else {}
+                                cmd_str = str(inp.get("command") or "") if norm_name == "bash" else ""
+                                cat_lbl = None
+                                verb_lbl = ""
+                                is_noisy_cmd = False
+                                if norm_name == "bash" and cmd_str:
+                                    cat_lbl, verb_lbl, is_noisy_cmd = _classify_bash_command(cmd_str)
+                                has_read_bounds = bool(inp.get("limit") or inp.get("offset") or inp.get("lines"))
+                                is_unbounded_read = False
+                                if is_noisy_cmd:
+                                    noisy_bash_calls += 1
+                                mcp_srv = ""
+                                if norm_name.startswith("mcp__"):
+                                    mparts = tname.split("__", 2)
+                                    if len(mparts) >= 2:
+                                        mcp_srv = mparts[1]
+                                t_entry = {
+                                    "tool": tname,
+                                    "norm": norm_name,
+                                    "cmd": _redact_audit_secrets(cmd_str)[:200] if cmd_str else "",
+                                    "cat": cat_lbl,
+                                    "verb": verb_lbl,
+                                    "turn_key": turn_key_str,
+                                    "has_read_bounds": has_read_bounds,
+                                    "unbounded_read": is_unbounded_read,
+                                    "noisy_bash": is_noisy_cmd,
+                                    "mcp_server": mcp_srv,
+                                }
+                                ordered_tools.append(t_entry)
+                                if tid:
+                                    tool_entry_by_id[tid] = t_entry
+                            elif btype == "tool_result":
+                                tr_id = str(blk.get("tool_use_id") or "").strip()
+                                tr_content = blk.get("content")
+                                tr_str = (
+                                    tr_content
+                                    if isinstance(tr_content, str)
+                                    else (json.dumps(tr_content or "", ensure_ascii=False) if tr_content is not None else "")
+                                )
+                                if not wbc_hook_fired and tr_str and any(mk in tr_str for mk in _WBC_TRANSCRIPT_HOOK_MARKERS):
+                                    wbc_hook_fired = True
+                                tr_entry = tool_entry_by_id.get(tr_id)
+                                if tr_entry is not None:
+                                    tr_bytes = len(tr_str.encode("utf-8", errors="ignore"))
+                                    tr_lines = len(tr_str.splitlines()) if tr_str else 0
+                                    if tr_entry["norm"] in ("read", "notebookread"):
+                                        if not tr_entry.get("has_read_bounds") and (tr_bytes > 2000 or tr_lines > 50):
+                                            if not tr_entry["unbounded_read"]:
+                                                tr_entry["unbounded_read"] = True
+                                                unbounded_read_calls += 1
+                                    elif tr_entry["norm"] == "bash" and tr_bytes > 2000 and not tr_entry["noisy_bash"]:
+                                        tr_entry["noisy_bash"] = True
+                                        noisy_bash_calls += 1
                     b_len = len(s.encode("utf-8"))
                     u_dict = msg_dict.get("usage") if isinstance(msg_dict.get("usage"), dict) else None
                     if not isinstance(u_dict, dict):
                         u_dict = obj.get("usage") if isinstance(obj.get("usage"), dict) else None
-                    msg_id = str(msg_dict.get("id") or obj.get("messageId") or "").strip()
-                    req_id = str(obj.get("requestId") or msg_dict.get("requestId") or "").strip()
-                    dedup_key = (msg_id, req_id) if (msg_id or req_id) else (f"_line_{line_idx}", "")
                     is_new_turn_msg = dedup_key not in seen_usage_by_msg_key
                     if isinstance(u_dict, dict) and (
                         "input_tokens" in u_dict
@@ -1090,6 +2203,10 @@ def scan_claude_code_harness(
                         if is_p and (msg_id or req_id):
                             step_idx_by_msg_key[dedup_key] = len(step_tuples)
                         step_tuples.append((is_p, b_len, b_len > 16000))
+
+            if skip_benchmark_cwd:
+                _bump_excluded_stat(excluded_stats, "claude_code", 1)
+                continue
 
             for _dkey, (u_dict, turn_model) in seen_usage_by_msg_key.items():
                 t_in = int(u_dict.get("input_tokens") or 0)
@@ -1129,6 +2246,8 @@ def scan_claude_code_harness(
                 fresh_usd += t_fresh
                 cache_usd += t_cache
                 out_usd += t_out_u
+                tkey_str = f"{_dkey[0]}|{_dkey[1]}"
+                turn_cost_by_key[tkey_str] = turn_cost_by_key.get(tkey_str, 0.0) + (t_fresh + t_cache + t_out_u)
                 if turn_model:
                     _record_turn_model_usage(
                         model_usage_map,
@@ -1191,6 +2310,15 @@ def scan_claude_code_harness(
                 model_usage=model_usage_map,
             )
             rec["_wbc_hook_fired"] = wbc_hook_fired
+            rec["_lowering_trace"] = {
+                "ordered_tools": ordered_tools,
+                "turn0_declared_mcps": turn0_declared_mcps,
+                "unbounded_read_calls": unbounded_read_calls,
+                "noisy_bash_calls": noisy_bash_calls,
+                "turn_cost_by_key": turn_cost_by_key,
+                "min_event_ts": first_event_ts,
+                "max_event_ts": last_event_ts,
+            }
             records.append(rec)
         except Exception:
             continue
@@ -1203,10 +2331,13 @@ def scan_goose_harness(
     now: float,
     in_price_per_m: float,
     out_price_per_m: float,
+    include_benchmarks: bool = False,
+    excluded_stats: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     if not goose_db.is_file():
         return records
+    eff_inc_bench = _resolve_include_benchmarks(include_benchmarks)
 
     try:
         mtime = os.path.getmtime(goose_db)
@@ -1245,6 +2376,9 @@ def scan_goose_harness(
                     is_p = role_s in ("assistant", "model")
                     by_sid.setdefault(sid, []).append((is_p, b_len, b_len > 16000))
                 for sid, st_list in by_sid.items():
+                    if not eff_inc_bench and _is_benchmark_path_or_cwd(sid):
+                        _bump_excluded_stat(excluded_stats, "goose", 1)
+                        continue
                     sess_ts = latest_ts_by_sid.get(sid, 0.0) or mtime
                     if window_seconds > 0 and (now - sess_ts) > window_seconds:
                         continue
@@ -1554,11 +2688,14 @@ def _scan_cursor_agent_transcripts_jsonl(
     now: float,
     in_price_per_m: float,
     out_price_per_m: float,
+    include_benchmarks: bool = False,
+    excluded_stats: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     """Scan modern Cursor `~/.cursor/projects/**/agent-transcripts/**/*.jsonl` transcripts."""
     records: List[Dict[str, Any]] = []
     if not projects_root.exists():
         return records
+    eff_inc_bench = _resolve_include_benchmarks(include_benchmarks)
     jfiles: List[Path] = []
     try:
         if projects_root.is_file() and projects_root.suffix == ".jsonl":
@@ -1574,6 +2711,9 @@ def _scan_cursor_agent_transcripts_jsonl(
         try:
             mtime = os.path.getmtime(jpath)
             if window_seconds > 0 and (now - mtime) > window_seconds:
+                continue
+            if not eff_inc_bench and _is_rel_transcript_benchmark(jpath, projects_root):
+                _bump_excluded_stat(excluded_stats, "cursor", 1)
                 continue
             conv_bytes = os.path.getsize(jpath)
             step_tuples: List[Tuple[bool, int, bool]] = []
@@ -1624,10 +2764,13 @@ def scan_cursor_harness(
     now: float = 0.0,
     in_price_per_m: float = 5.0,
     out_price_per_m: float = 25.0,
+    include_benchmarks: bool = False,
+    excluded_stats: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     if now <= 0.0:
         now = time.time()
+    eff_inc_bench = _resolve_include_benchmarks(include_benchmarks)
 
     roots: List[Path] = []
     transcript_roots: List[Path] = []
@@ -1712,6 +2855,17 @@ def scan_cursor_harness(
                 mtime = os.path.getmtime(db_p)
                 if window_seconds > 0 and (now - mtime) > window_seconds:
                     continue
+                if not eff_inc_bench:
+                    ws_json_p = db_p.parent / "workspace.json"
+                    ws_folder = ""
+                    if ws_json_p.is_file():
+                        try:
+                            ws_folder = str(json.loads(ws_json_p.read_text(encoding="utf-8", errors="ignore")).get("folder") or "")
+                        except Exception:
+                            ws_folder = ""
+                    if _is_rel_transcript_benchmark(db_p, root, cwd_hint=ws_folder):
+                        _bump_excluded_stat(excluded_stats, "cursor", 1)
+                        continue
                 conn = sqlite3.connect(f"file:{db_p}?mode=ro", uri=True, timeout=1.5)
                 tables = {
                     r[0]
@@ -1763,7 +2917,15 @@ def scan_cursor_harness(
             continue
         seen_t_roots.add(rp)
         records.extend(
-            _scan_cursor_agent_transcripts_jsonl(tr, window_seconds, now, in_price_per_m, out_price_per_m)
+            _scan_cursor_agent_transcripts_jsonl(
+                tr,
+                window_seconds,
+                now,
+                in_price_per_m,
+                out_price_per_m,
+                include_benchmarks=eff_inc_bench,
+                excluded_stats=excluded_stats,
+            )
         )
 
     return _dedup_records(records)
@@ -1775,11 +2937,14 @@ def scan_gemini_cli_harness(
     now: float = 0.0,
     in_price_per_m: float = 5.0,
     out_price_per_m: float = 25.0,
+    include_benchmarks: bool = False,
+    excluded_stats: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     """Scan Google Gemini CLI (`~/.gemini/tmp/*/chats/session-*.{json,jsonl}`) sessions."""
     records: List[Dict[str, Any]] = []
     if now <= 0.0:
         now = time.time()
+    eff_inc_bench = _resolve_include_benchmarks(include_benchmarks)
 
     roots: List[Path] = []
     if gemini_cli_dir is not None:
@@ -1828,6 +2993,10 @@ def scan_gemini_cli_harness(
 
     for mtime, spath in recent_files[:600]:
         try:
+            g_root = next((r for r in roots if r.is_dir() and str(spath).startswith(str(r))), None)
+            if not eff_inc_bench and _is_rel_transcript_benchmark(spath, g_root or spath):
+                _bump_excluded_stat(excluded_stats, "gemini_cli", 1)
+                continue
             conv_bytes = os.path.getsize(spath)
             msgs_by_id: Dict[str, Dict[str, Any]] = {}
             session_id = spath.stem
@@ -2000,10 +3169,13 @@ def scan_codex_harness(
     in_price_per_m: float = 5.0,
     out_price_per_m: float = 25.0,
     explicit_price_override: bool = False,
+    include_benchmarks: bool = False,
+    excluded_stats: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     if now <= 0.0:
         now = time.time()
+    eff_inc_bench = _resolve_include_benchmarks(include_benchmarks)
 
     candidates: List[Path] = []
     if codex_dir is not None:
@@ -2057,18 +3229,25 @@ def scan_codex_harness(
             mtime = os.path.getmtime(jpath)
             if window_seconds > 0 and (now - mtime) > window_seconds:
                 continue
+            codex_root = next((c for c in candidates if c.is_dir() and str(jpath).startswith(str(c))), None)
+            if not eff_inc_bench and _is_rel_transcript_benchmark(jpath, codex_root or jpath):
+                _bump_excluded_stat(excluded_stats, "codex", 1)
+                continue
             conv_bytes = os.path.getsize(jpath)
             step_tuples: List[Tuple[bool, int, bool]] = []
             tool_counts: Dict[str, int] = {}
             first_prompt = ""
             active_model = ""
             last_event_ts = 0.0
+            skip_codex_bench = False
             m_turns = m_in = m_cc = m_cr = m_out = m_matched = typed_prompt_tok = 0
             fresh_usd = cache_usd = out_usd = 0.0
             prev_tot_tuple: Optional[Tuple[int, int, int, int]] = None
             model_usage_map: Dict[str, Dict[str, Any]] = {}
+            codex_ln_idx = 0
             with open(jpath, "r", encoding="utf-8", errors="ignore") as fh:
                 for line in fh:
+                    codex_ln_idx += 1
                     s = line.strip()
                     if not s:
                         continue
@@ -2080,6 +3259,11 @@ def scan_codex_harness(
                         continue
                     msg_obj = obj.get("message") if isinstance(obj.get("message"), dict) else {}
                     pay_obj = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+                    if not eff_inc_bench and codex_ln_idx <= 10:
+                        c_cwd = str(obj.get("cwd") or pay_obj.get("cwd") or "").strip()
+                        if c_cwd and _is_rel_transcript_benchmark(jpath, codex_root or jpath, cwd_hint=c_cwd):
+                            skip_codex_bench = True
+                            break
                     ev_ts = _parse_iso_or_epoch_ts(
                         obj.get("timestamp") or obj.get("created_at") or pay_obj.get("timestamp")
                     )
@@ -2248,6 +3432,9 @@ def scan_codex_harness(
                         tname = str(obj.get("tool_name"))
                         tool_counts[tname] = tool_counts.get(tname, 0) + 1
                     step_tuples.append((is_p, b_len, b_len > 16000))
+            if skip_codex_bench:
+                _bump_excluded_stat(excluded_stats, "codex", 1)
+                continue
             if not step_tuples and m_turns == 0:
                 continue
             if not step_tuples and m_turns > 0:
@@ -2299,10 +3486,13 @@ def scan_cline_roo_harness(
     now: float = 0.0,
     in_price_per_m: float = 5.0,
     out_price_per_m: float = 25.0,
+    include_benchmarks: bool = False,
+    excluded_stats: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     if now <= 0.0:
         now = time.time()
+    eff_inc_bench = _resolve_include_benchmarks(include_benchmarks)
 
     roots: List[Path] = []
     if cline_dir is not None:
@@ -2367,6 +3557,10 @@ def scan_cline_roo_harness(
         try:
             mtime = os.path.getmtime(jpath)
             if window_seconds > 0 and (now - mtime) > window_seconds:
+                continue
+            cl_root = next((r for r in roots if r.is_dir() and str(jpath).startswith(str(r))), None)
+            if not eff_inc_bench and _is_rel_transcript_benchmark(jpath, cl_root or jpath):
+                _bump_excluded_stat(excluded_stats, "cline_roo", 1)
                 continue
             conv_bytes = os.path.getsize(jpath)
             raw_text = jpath.read_text(encoding="utf-8", errors="ignore")
@@ -2439,10 +3633,13 @@ def scan_windsurf_harness(
     now: float = 0.0,
     in_price_per_m: float = 5.0,
     out_price_per_m: float = 25.0,
+    include_benchmarks: bool = False,
+    excluded_stats: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     if now <= 0.0:
         now = time.time()
+    eff_inc_bench = _resolve_include_benchmarks(include_benchmarks)
 
     roots: List[Path] = []
     if windsurf_dir is not None:
@@ -2489,6 +3686,17 @@ def scan_windsurf_harness(
                 mtime = os.path.getmtime(db_p)
                 if window_seconds > 0 and (now - mtime) > window_seconds:
                     continue
+                if not eff_inc_bench:
+                    ws_json_p = db_p.parent / "workspace.json"
+                    ws_folder = ""
+                    if ws_json_p.is_file():
+                        try:
+                            ws_folder = str(json.loads(ws_json_p.read_text(encoding="utf-8", errors="ignore")).get("folder") or "")
+                        except Exception:
+                            ws_folder = ""
+                    if _is_rel_transcript_benchmark(db_p, root, cwd_hint=ws_folder):
+                        _bump_excluded_stat(excluded_stats, "windsurf", 1)
+                        continue
                 conn = sqlite3.connect(f"file:{db_p}?mode=ro", uri=True, timeout=1.5)
                 rows = conn.execute(
                     "SELECT key, value FROM ItemTable WHERE key LIKE '%cascade%' OR key LIKE '%codeium%' OR key LIKE '%windsurf%' OR key LIKE '%aichat%' OR key LIKE '%composer%' LIMIT 40"
@@ -2621,10 +3829,13 @@ def scan_aider_harness(
     now: float = 0.0,
     in_price_per_m: float = 5.0,
     out_price_per_m: float = 25.0,
+    include_benchmarks: bool = False,
+    excluded_stats: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     if now <= 0.0:
         now = time.time()
+    eff_inc_bench = _resolve_include_benchmarks(include_benchmarks)
 
     candidates: List[Path] = []
     if aider_path is not None:
@@ -2670,6 +3881,14 @@ def scan_aider_harness(
         try:
             mtime = os.path.getmtime(fpath)
             if window_seconds > 0 and (now - mtime) > window_seconds:
+                continue
+            a_root = (
+                next((c for c in candidates if c.is_dir() and str(fpath).startswith(str(c))), fpath)
+                if (aider_path is not None or os.environ.get("AIDER_HISTORY_PATH"))
+                else None
+            )
+            if not eff_inc_bench and _is_rel_transcript_benchmark(fpath, a_root):
+                _bump_excluded_stat(excluded_stats, "aider", 1)
                 continue
             conv_bytes = os.path.getsize(fpath)
             if conv_bytes <= 0:
@@ -2766,10 +3985,13 @@ def scan_continue_dev_harness(
     now: float = 0.0,
     in_price_per_m: float = 5.0,
     out_price_per_m: float = 25.0,
+    include_benchmarks: bool = False,
+    excluded_stats: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     if now <= 0.0:
         now = time.time()
+    eff_inc_bench = _resolve_include_benchmarks(include_benchmarks)
 
     target_dir = Path(
         continue_dir
@@ -2789,6 +4011,9 @@ def scan_continue_dev_harness(
         try:
             mtime = os.path.getmtime(jpath)
             if window_seconds > 0 and (now - mtime) > window_seconds:
+                continue
+            if not eff_inc_bench and _is_rel_transcript_benchmark(jpath, target_dir):
+                _bump_excluded_stat(excluded_stats, "continue_dev", 1)
                 continue
             conv_bytes = os.path.getsize(jpath)
             data = json.loads(jpath.read_text(encoding="utf-8", errors="ignore"))
@@ -2843,10 +4068,13 @@ def scan_zed_harness(
     now: float = 0.0,
     in_price_per_m: float = 5.0,
     out_price_per_m: float = 25.0,
+    include_benchmarks: bool = False,
+    excluded_stats: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     if now <= 0.0:
         now = time.time()
+    eff_inc_bench = _resolve_include_benchmarks(include_benchmarks)
 
     roots: List[Path] = []
     if zed_dir is not None:
@@ -2890,6 +4118,10 @@ def scan_zed_harness(
         try:
             mtime = os.path.getmtime(fpath)
             if window_seconds > 0 and (now - mtime) > window_seconds:
+                continue
+            z_root = next((r for r in roots if r.is_dir() and str(fpath).startswith(str(r))), fpath)
+            if not eff_inc_bench and _is_rel_transcript_benchmark(fpath, z_root):
+                _bump_excluded_stat(excluded_stats, "zed", 1)
                 continue
             conv_bytes = os.path.getsize(fpath)
             step_tuples: List[Tuple[bool, int, bool]] = []
@@ -3038,16 +4270,183 @@ def _format_turn0_rel_path(fpath: Path, ws_dir: Path, home_dir: Path) -> str:
         return f"<local>/{fpath.name}"
 
 
+def _parse_turn0_rule_frontmatter(raw: str) -> Tuple[bool, str, str]:
+    """Parse YAML frontmatter on rule files -> (is_conditional, description, normalized_body)."""
+    s = raw.lstrip()
+    if not s.startswith("---"):
+        return False, "", re.sub(r"\s+", " ", s.strip())
+    parts = s.split("---", 2)
+    if len(parts) < 3:
+        return False, "", re.sub(r"\s+", " ", s.strip())
+    fm = parts[1]
+    body = parts[2]
+    trigger_val = ""
+    always_apply_val = ""
+    desc_parts: List[str] = []
+    in_desc = False
+    for line in fm.splitlines():
+        if not line.strip():
+            continue
+        indented = line.startswith((" ", "\t"))
+        ls = line.strip()
+        low = ls.lower()
+        if not indented and low.startswith("trigger:"):
+            in_desc = False
+            trigger_val = ls.split(":", 1)[1].strip().strip("'\"").lower()
+        elif not indented and low.startswith("alwaysapply:"):
+            in_desc = False
+            always_apply_val = ls.split(":", 1)[1].strip().strip("'\"").lower()
+        elif not indented and low.startswith("description:"):
+            in_desc = True
+            dval = ls.split(":", 1)[1].strip().strip("'\"")
+            if dval and dval not in ("|", ">", "|-", ">-"):
+                desc_parts.append(dval)
+        elif in_desc and (indented or ":" not in ls):
+            desc_parts.append(ls)
+        else:
+            in_desc = False
+    is_cond = trigger_val in ("model_decision", "manual", "glob", "on_demand") or always_apply_val in (
+        "false",
+        "no",
+        "0",
+    )
+    return is_cond, " ".join(desc_parts).strip(), re.sub(r"\s+", " ", body.strip())
+
+
+def _scan_turn0_installed_skills(
+    ws_dir: Path, h_dir: Path, strict_containment: bool = False
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Scan installed SKILL.md frontmatter across workspace, ~/.agents, enabled plugins, and builtin."""
+    disabled_plugins: set[str] = set()
+    cfg_path = h_dir / ".gemini" / "config" / "config.json"
+    if cfg_path.is_file():
+        try:
+            cfg_data = json.loads(cfg_path.read_text(encoding="utf-8", errors="ignore"))
+            if isinstance(cfg_data, dict):
+                pmap = cfg_data.get("plugins")
+                if isinstance(pmap, dict):
+                    for pk, pv in pmap.items():
+                        if isinstance(pv, dict) and pv.get("enabled") is False:
+                            disabled_plugins.add(str(pk).split("/")[-1])
+                for dkey in ("disabledPlugins", "disabled_plugins"):
+                    dlist = cfg_data.get(dkey)
+                    if isinstance(dlist, list):
+                        for item in dlist:
+                            if isinstance(item, str):
+                                disabled_plugins.add(item.split("/")[-1])
+        except Exception:
+            pass
+
+    skill_roots: List[Tuple[Path, str, Path]] = [
+        (ws_dir / ".agents" / "skills", "workspace", ws_dir),
+        (h_dir / ".agents" / "skills", "user_global", h_dir),
+    ]
+    plugins_dir = h_dir / ".gemini" / "config" / "plugins"
+    if plugins_dir.is_dir():
+        try:
+            for p_dir in sorted(plugins_dir.iterdir())[:48]:
+                if not p_dir.is_dir() or p_dir.name.startswith(".") or p_dir.name in disabled_plugins:
+                    continue
+                p_json = p_dir / "plugin.json"
+                if p_json.is_file():
+                    try:
+                        p_meta = json.loads(p_json.read_text(encoding="utf-8", errors="ignore"))
+                        if isinstance(p_meta, dict) and p_meta.get("disabled") is True:
+                            continue
+                    except Exception:
+                        pass
+                if (p_dir / "skills").is_dir():
+                    skill_roots.append((p_dir / "skills", "plugin", h_dir))
+        except OSError:
+            pass
+    skill_roots.append((h_dir / ".gemini" / "antigravity" / "builtin" / "skills", "builtin", h_dir))
+
+    seen_skill_rp: set[str] = set()
+    skills_list: List[Dict[str, Any]] = []
+    total_skill_tok = 0
+
+    for s_root, s_scope, contain_root in skill_roots:
+        if not s_root.is_dir():
+            continue
+        try:
+            for s_dir in sorted(s_root.iterdir())[:96]:
+                if not s_dir.is_dir() or s_dir.name.startswith("."):
+                    continue
+                s_md = s_dir / "SKILL.md"
+                if strict_containment:
+                    if not _is_safe_contained_file(s_md, contain_root):
+                        continue
+                elif not s_md.is_file():
+                    continue
+                try:
+                    rp = os.path.realpath(s_md)
+                except OSError:
+                    continue
+                if rp in seen_skill_rp:
+                    continue
+                seen_skill_rp.add(rp)
+                try:
+                    with open(s_md, "r", encoding="utf-8", errors="ignore") as fh:
+                        head = fh.read(4096)
+                except OSError:
+                    continue
+                fm_name = s_dir.name
+                desc_parts: List[str] = []
+                in_desc = False
+                hs = head.lstrip()
+                if hs.startswith("---"):
+                    fparts = hs.split("---", 2)
+                    if len(fparts) >= 3:
+                        for fln in fparts[1].splitlines():
+                            if not fln.strip():
+                                continue
+                            ind = fln.startswith((" ", "\t"))
+                            fs = fln.strip()
+                            flow = fs.lower()
+                            if not ind and flow.startswith("name:"):
+                                in_desc = False
+                                nval = fs.split(":", 1)[1].strip().strip("'\"")
+                                if nval:
+                                    fm_name = nval
+                            elif not ind and flow.startswith("description:"):
+                                in_desc = True
+                                dval = fs.split(":", 1)[1].strip().strip("'\"")
+                                if dval and dval not in ("|", ">", "|-", ">-"):
+                                    desc_parts.append(dval)
+                            elif in_desc and (ind or ":" not in fs):
+                                desc_parts.append(fs)
+                            else:
+                                in_desc = False
+                desc_str = " ".join(desc_parts).strip()
+                safe_name = _sanitize_turn0_label(fm_name or s_dir.name)
+                s_tok = max(12, (len(fm_name) + len(desc_str) + 48) // 4)
+                total_skill_tok += s_tok
+                skills_list.append(
+                    {
+                        "name": safe_name,
+                        "scope": s_scope,
+                        "tokens": s_tok,
+                    }
+                )
+        except OSError:
+            continue
+
+    skills_list.sort(key=lambda x: int(x.get("tokens", 0)), reverse=True)
+    return skills_list, total_skill_tok
+
+
 def audit_turn0_static_overhead(
     workspace_dir: Optional[Path] = None,
     home_dir: Optional[Path] = None,
     sessions_count: int = 0,
     in_price_per_m: float = 5.0,
+    strict_containment: bool = False,
 ) -> Dict[str, Any]:
     """
     Blood-Brain Barrier - Turn-0 Fixed Context Tax Audit (<50ms, 100% stdlib, 0 PII leaks):
-    Scans static instruction files (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`, etc.)
-    and MCP server tool configurations/schemas vs `0` MCP schema tokens for `body` OS hooks.
+    Scans static instruction files (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`, etc.),
+    conditional rules, installed `<skills>` index descriptions, and MCP server schemas
+    vs `0` MCP schema tokens for `body` OS hooks.
     """
     t0 = time.perf_counter()
     ws_dir = Path(
@@ -3091,13 +4490,19 @@ def audit_turn0_static_overhead(
                 pass
 
     seen_realpaths: set[str] = set()
+    seen_rule_entries: Dict[Tuple[str, str], Dict[str, Any]] = {}
     instruction_files: List[Dict[str, Any]] = []
+    duplicate_instruction_files: List[Dict[str, Any]] = []
     instruction_bytes = 0
     instruction_tokens = 0
 
     for cand_p, scope in instruction_candidates:
         try:
-            if not cand_p.is_file():
+            if strict_containment:
+                cand_root = ws_dir if scope == "workspace" else h_dir
+                if not _is_safe_contained_file(cand_p, cand_root):
+                    continue
+            elif not cand_p.is_file():
                 continue
             rp = os.path.realpath(cand_p)
             if rp in seen_realpaths:
@@ -3107,17 +4512,41 @@ def audit_turn0_static_overhead(
             if not raw.strip():
                 continue
             b_len = len(raw.encode("utf-8"))
-            tok = _estimate_static_context_tokens(raw, is_json=False)
+            full_tok = _estimate_static_context_tokens(raw, is_json=False)
+            is_cond, cond_desc, norm_body = _parse_turn0_rule_frontmatter(raw)
+            active_tok = max(12, len(cond_desc) // 4 + 12) if is_cond else full_tok
+            rel_p = _format_turn0_rel_path(cand_p, ws_dir, h_dir)
+            is_rule_dir_file = cand_p.parent.name == "rules"
+            if is_rule_dir_file:
+                dup_key = (cand_p.name.lower(), norm_body)
+                if dup_key in seen_rule_entries:
+                    canon = seen_rule_entries[dup_key]
+                    canon.setdefault("duplicate_paths", []).append(rel_p)
+                    duplicate_instruction_files.append(
+                        {
+                            "path": rel_p,
+                            "scope": scope,
+                            "duplicate_of": canon["path"],
+                            "bytes": b_len,
+                            "tokens": active_tok,
+                            "full_tokens": full_tok,
+                            "conditional": is_cond,
+                        }
+                    )
+                    continue
+            entry_dict: Dict[str, Any] = {
+                "path": rel_p,
+                "scope": scope,
+                "bytes": b_len,
+                "tokens": active_tok,
+                "full_tokens": full_tok,
+                "conditional": is_cond,
+            }
+            if is_rule_dir_file:
+                seen_rule_entries[(cand_p.name.lower(), norm_body)] = entry_dict
             instruction_bytes += b_len
-            instruction_tokens += tok
-            instruction_files.append(
-                {
-                    "path": _format_turn0_rel_path(cand_p, ws_dir, h_dir),
-                    "scope": scope,
-                    "bytes": b_len,
-                    "tokens": tok,
-                }
-            )
+            instruction_tokens += active_tok
+            instruction_files.append(entry_dict)
         except OSError:
             continue
 
@@ -3132,11 +4561,16 @@ def audit_turn0_static_overhead(
             for srv_dir in sorted(schema_root.iterdir())[:32]:
                 if not srv_dir.is_dir() or srv_dir.name.startswith("."):
                     continue
+                if strict_containment and srv_dir.is_symlink():
+                    continue
                 s_name = _sanitize_turn0_label(srv_dir.name)
                 s_files = 0
                 s_toks = 0
                 for jf in sorted(srv_dir.glob("*.json"))[:64]:
-                    if not jf.is_file():
+                    if strict_containment:
+                        if not _is_safe_contained_file(jf, schema_root):
+                            continue
+                    elif not jf.is_file():
                         continue
                     try:
                         j_raw = jf.read_text(encoding="utf-8", errors="ignore")
@@ -3161,6 +4595,9 @@ def audit_turn0_static_overhead(
         h_dir / ".claude.json",
         h_dir / ".claude" / "mcp.json",
         h_dir / ".claude" / "claude_desktop_config.json",
+        h_dir / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
+        h_dir / "AppData" / "Roaming" / "Claude" / "claude_desktop_config.json",
+        h_dir / ".config" / "Claude" / "claude_desktop_config.json",
         h_dir / ".cursor" / "mcp.json",
         h_dir / ".gemini" / "antigravity" / "mcp_config.json",
         h_dir / ".gemini" / "settings.json",
@@ -3239,7 +4676,10 @@ def audit_turn0_static_overhead(
     agy_cfg_path = h_dir / ".gemini" / "antigravity" / "mcp_config.json"
     for cfg_p in mcp_config_candidates:
         try:
-            if not cfg_p.is_file():
+            if strict_containment:
+                if not (_is_safe_contained_file(cfg_p, ws_dir) or _is_safe_contained_file(cfg_p, h_dir)):
+                    continue
+            elif not cfg_p.is_file():
                 continue
             if cfg_p == agy_cfg_path:
                 agy_mcp_config_present = True
@@ -3282,6 +4722,10 @@ def audit_turn0_static_overhead(
                     "provenance": "measured_disk_schema",
                 }
 
+    skills_list, skills_turn0_tokens = _scan_turn0_installed_skills(
+        ws_dir=ws_dir, h_dir=h_dir, strict_containment=strict_containment
+    )
+
     mcp_servers_list = sorted(
         mcp_servers_map.values(), key=lambda x: int(x.get("tokens", 0)), reverse=True
     )
@@ -3297,7 +4741,7 @@ def audit_turn0_static_overhead(
     )
     mcp_measured_schemas_count = sum(int(s["schema_files"]) for s in mcp_servers_list)
     mcp_turn0_tokens = mcp_measured_tokens + mcp_estimated_tokens
-    total_turn0_per_session = instruction_tokens + mcp_turn0_tokens
+    total_turn0_per_session = instruction_tokens + skills_turn0_tokens + mcp_turn0_tokens
 
     wbc_hook_active = any(
         p.is_file()
@@ -3322,9 +4766,15 @@ def audit_turn0_static_overhead(
         status_tier = "LEAN"
 
     scan_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+    skills_summary_part = (
+        f"{skills_turn0_tokens:,} `<skills>` tok across {len(skills_list)} skills + "
+        if skills_list
+        else ""
+    )
     summary = (
         f"{total_turn0_per_session:,} tok/session "
         f"({instruction_tokens:,} instruction tok across {len(instruction_files)} files + "
+        f"{skills_summary_part}"
         f"{mcp_turn0_tokens:,} MCP schema tok across {len(mcp_servers_list)} servers vs 0 MCP tok for `body` OS hooks)"
     )
 
@@ -3335,6 +4785,12 @@ def audit_turn0_static_overhead(
         "instruction_bytes": instruction_bytes,
         "instruction_tokens": instruction_tokens,
         "instruction_files": instruction_files,
+        "conditional_rules_count": sum(1 for f in instruction_files if f.get("conditional")),
+        "duplicate_rules_count": len(duplicate_instruction_files),
+        "duplicate_instruction_files": duplicate_instruction_files,
+        "installed_skills_count": len(skills_list),
+        "skills_turn0_tokens": skills_turn0_tokens,
+        "skills": skills_list[:64],
         "mcp_servers_count": len(mcp_servers_list),
         "mcp_tool_schemas_measured_count": mcp_measured_schemas_count,
         "mcp_measured_schema_tokens": mcp_measured_tokens,
@@ -3350,6 +4806,73 @@ def audit_turn0_static_overhead(
         "estimated_30d_mcp_bloat_usd": est_30d_mcp_bloat_usd,
         "summary": summary,
     }
+
+
+_AUDIT_REPO_ROOT_RESOLVED = Path(__file__).resolve().parents[1]
+_AUDIT_FILE_READ_TOOLS_AGY = frozenset({"read_file", "view_file"})
+_AUDIT_FILE_READ_TOOLS_CC = frozenset({"read", "notebookread"})
+_AUDIT_FILE_READ_TOOLS_CURSOR = frozenset({"beforereadfile", "pre_read_code"})
+_AUDIT_FILE_READ_TOOLS_CODEX = frozenset({"developer__text_editor"})
+
+
+def _normalize_audit_target_label(target: str, home_dir: Optional[Path] = None) -> str:
+    """CWD-independent stdlib target normalization mirroring `shield._normalize_target_label`."""
+    raw = str(target or "").strip()
+    if not raw:
+        return "unknown"
+    if raw.startswith("foveal:") or raw.endswith(":actuate"):
+        return raw[:140]
+    if "/" in raw or "\\" in raw:
+        norm = raw.replace("\\", "/")
+        h_res = (home_dir or Path.home()).resolve()
+        h_norm = str(h_res).replace("\\", "/").lstrip("/")
+        p_res = (h_res / "Projects").resolve()
+        if h_norm and norm.startswith(h_norm + "/"):
+            raw = "/" + norm
+            norm = raw
+        elif norm.startswith("Projects/") and len(norm.split("/")) >= 3:
+            raw = str(h_res / norm)
+            norm = raw.replace("\\", "/")
+        elif " " in norm and not norm.startswith(("/", "~", "./", "../")):
+            if not norm.split(" ", 1)[0].endswith((".py", ".ts", ".js", ".md", ".json", ".jsonl", ".log")):
+                return raw[:140]
+        if not norm.startswith(("/", "~")):
+            while norm.startswith("./"):
+                norm = norm[2:]
+            return (norm or raw)[:140]
+        try:
+            if norm.startswith("~/"):
+                p = (h_res / norm[2:]).resolve()
+            else:
+                p = Path(os.path.expanduser(norm)).resolve()
+            try:
+                return str(p.relative_to(_AUDIT_REPO_ROOT_RESOLVED)).replace("\\", "/")[:140]
+            except ValueError:
+                pass
+            try:
+                rel_proj = p.relative_to(p_res)
+                if len(rel_proj.parts) >= 2:
+                    return str(rel_proj).replace("\\", "/")[:140]
+            except ValueError:
+                pass
+            return (p.name or raw)[:140]
+        except Exception:
+            return (Path(norm).name or raw)[:140]
+    return raw[:140]
+
+
+def _audit_harness_read_ceiling(tool_name: str) -> Optional[int]:
+    """Return native IDE read ceiling (tokens) for file-read tools, or None for non-read tools."""
+    tl = str(tool_name or "").strip().lower()
+    if tl in _AUDIT_FILE_READ_TOOLS_AGY:
+        return 11_520
+    if tl in _AUDIT_FILE_READ_TOOLS_CC:
+        return 25_000
+    if tl in _AUDIT_FILE_READ_TOOLS_CURSOR:
+        return 15_000
+    if tl in _AUDIT_FILE_READ_TOOLS_CODEX:
+        return 20_000
+    return None
 
 
 def _collect_wbc_shield_actuals(
@@ -3380,6 +4903,8 @@ def _collect_wbc_shield_actuals(
             "unwired_active_harnesses": [],
             "unwired_projected_save_usd": round(sum(float(r.get("hal_saved_usd", 0.0)) for r in all_records), 2),
             "measured_bounded_slices": 0,
+            "measured_active_slices": 0,
+            "measured_voluntary_bounded_reads": 0,
             "measured_direct_tokens_saved": 0,
             "measured_hook_events": 0,
         }
@@ -3415,13 +4940,16 @@ def _collect_wbc_shield_actuals(
     cut_ts = (now - window_seconds) if window_seconds > 0 else 0.0
     seen_ev: set[Tuple[Any, ...]] = set()
     dedup_file_credits: Dict[Tuple[str, str], int] = {}
+    bare_seen_credits: Dict[Tuple[str, str], int] = {}
     immune_conv_ids: set[str] = set()
-    bounded_slices = 0
+    active_slices = 0
+    voluntary_bounded_reads = 0
     direct_tok_saved = 0
     hook_events = 0
+    explicit_audit_env = bool(os.environ.get("WBC_IMMUNE_AUDIT_PATH"))
 
     audit_paths: List[Path] = []
-    if os.environ.get("WBC_IMMUNE_AUDIT_PATH"):
+    if explicit_audit_env:
         audit_paths.append(Path(os.environ["WBC_IMMUNE_AUDIT_PATH"]).expanduser())
     else:
         audit_paths.extend(
@@ -3457,16 +4985,50 @@ def _collect_wbc_shield_actuals(
                     hook_events += 1
                     if cid and cid not in ("global", "default-session", "local"):
                         immune_conv_ids.add(cid)
-                    if ev.get("bounded_slice_read") or ev.get("read_auto_sliced"):
-                        bounded_slices += 1
+
+                    dec_low = str(ev.get("decision") or "").strip().lower()
+                    is_active_slice = bool(ev.get("read_auto_sliced") or ev.get("post_output_sliced"))
+                    is_active_interception = bool(
+                        is_active_slice
+                        or ev.get("context_gate_triggered")
+                        or ev.get("auto_healed")
+                        or dec_low in ("deny", "ask", "force_ask")
+                    )
+                    if is_active_slice:
+                        active_slices += 1
+                    elif ev.get("bounded_slice_read"):
+                        voluntary_bounded_reads += 1
+
+                    if not is_active_interception:
+                        continue
+
                     raw_sav = max(0, int(ev.get("direct_tokens_saved") or 0))
                     if raw_sav > 0:
-                        tgt = str(ev.get("target") or "").strip()
-                        if tgt:
-                            dk = (cid or "global", tgt)
-                            prev_c = dedup_file_credits.get(dk, 0)
+                        raw_tgt = str(ev.get("target") or "").strip()
+                        norm_raw = raw_tgt.replace("\\", "/")
+                        if not explicit_audit_env and norm_raw.startswith(
+                            ("/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/")
+                        ):
+                            continue
+                        read_ceil = _audit_harness_read_ceiling(str(ev.get("tool") or ""))
+                        if read_ceil is not None:
+                            raw_sav = min(read_ceil, raw_sav)
+                        norm_tgt = _normalize_audit_target_label(raw_tgt, home_dir=home_dir) if raw_tgt else ""
+                        if norm_tgt and norm_tgt != "unknown":
+                            sess_k = cid or "global"
+                            dk = (sess_k, norm_tgt)
+                            b_only = Path(norm_tgt).name if "/" in norm_tgt else norm_tgt
+                            bk = (sess_k, b_only)
+                            if "/" not in norm_tgt:
+                                prev_c = max(dedup_file_credits.get(dk, 0), bare_seen_credits.get(bk, 0))
+                            else:
+                                prev_c = max(dedup_file_credits.get(dk, 0), dedup_file_credits.get(bk, 0))
                             eff_s = max(0, max(prev_c, raw_sav) - prev_c)
-                            dedup_file_credits[dk] = prev_c + eff_s
+                            new_hwm = prev_c + eff_s
+                            dedup_file_credits[dk] = new_hwm
+                            bare_seen_credits[bk] = max(bare_seen_credits.get(bk, 0), new_hwm)
+                            if "/" in norm_tgt and bk in dedup_file_credits:
+                                dedup_file_credits[bk] = max(dedup_file_credits[bk], new_hwm)
                             direct_tok_saved += eff_s
                         else:
                             direct_tok_saved += raw_sav
@@ -3525,7 +5087,9 @@ def _collect_wbc_shield_actuals(
         "per_session_cost_drop_pct": drop_pct,
         "unwired_active_harnesses": sorted(unwired_harnesses_set),
         "unwired_projected_save_usd": unwired_save_usd,
-        "measured_bounded_slices": bounded_slices,
+        "measured_bounded_slices": active_slices,
+        "measured_active_slices": active_slices,
+        "measured_voluntary_bounded_reads": voluntary_bounded_reads,
         "measured_direct_tokens_saved": direct_tok_saved,
         "measured_hook_events": hook_events,
     }
@@ -3912,6 +5476,262 @@ def compute_model_opportunity_insights(
     }
 
 
+def discover_standalone_cloud_exports(
+    downloads_dir: Optional[Path] = None,
+    max_age_days: int = 14,
+) -> List[Path]:
+    """Opt-in helper (`--auto-downloads` / `--import auto`): find recent Claude `.zip`/`conversations.json` & Console `.csv` files."""
+    import zipfile as _zf
+
+    env_dl = os.environ.get("WBC_DOWNLOADS_DIR", "").strip()
+    dl_root = Path(downloads_dir or env_dl or (Path.home() / "Downloads")).expanduser()
+    if not dl_root.is_dir():
+        return []
+
+    now_ts = time.time()
+    max_age_sec = max(1, int(max_age_days)) * 86400.0
+    max_bytes = 256 * 1024 * 1024
+    candidates: List[Tuple[float, Path]] = []
+
+    try:
+        entries = list(dl_root.iterdir())
+    except OSError:
+        return []
+
+    for entry in entries:
+        try:
+            if not entry.is_file() or entry.name.startswith("."):
+                continue
+            st = entry.stat()
+            if st.st_size <= 0 or st.st_size > max_bytes or (now_ts - st.st_mtime) > max_age_sec:
+                continue
+            low_name = entry.name.lower()
+            suf = entry.suffix.lower()
+            if low_name == "conversations.json":
+                candidates.append((st.st_mtime, entry))
+            elif suf == ".zip":
+                try:
+                    with _zf.ZipFile(entry, "r") as zf:
+                        if any(
+                            (n == "conversations.json" or n.endswith("/conversations.json"))
+                            and ".." not in Path(n).parts
+                            for n in zf.namelist()[:200]
+                        ):
+                            candidates.append((st.st_mtime, entry))
+                except Exception:
+                    continue
+            elif suf == ".csv" and st.st_size <= 32 * 1024 * 1024:
+                with open(entry, "r", encoding="utf-8", errors="ignore") as fh:
+                    hdr = fh.readline(4096).lower()
+                cols = {c.strip().strip('"') for c in hdr.split(",") if c.strip()}
+                has_tok = bool(
+                    cols & {"input_tokens", "uncached_input_tokens", "cache_read_input_tokens", "prompt_tokens"}
+                ) and bool(
+                    cols & {"output_tokens", "completion_tokens", "cost_usd", "total_cost_usd", "amount_usd", "cost", "amount"}
+                )
+                has_console = (
+                    any(k in low_name for k in ("anthropic", "claude"))
+                    and bool(cols & {"cost_usd", "total_cost_usd", "amount_usd", "cost", "amount", "usd"})
+                    and bool(cols & {"date", "usage_date", "timestamp", "created_at", "bucket_start", "day", "model", "workspace"})
+                )
+                if has_tok or has_console:
+                    candidates.append((st.st_mtime, entry))
+        except OSError:
+            continue
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    picked: List[Path] = []
+    seen_kinds: set[str] = set()
+    for _mt, p in candidates:
+        kind = "csv" if p.suffix.lower() == ".csv" else "claude_chat"
+        if kind not in seen_kinds:
+            seen_kinds.add(kind)
+            picked.append(p)
+    return picked
+
+
+def scan_claude_export_records(
+    import_paths: List[Any],
+    window_seconds: float,
+    now: float,
+    in_price_per_m: float,
+    out_price_per_m: float,
+    explicit_price_override: bool = False,
+) -> List[Dict[str, Any]]:
+    """Convert imported Claude.ai `conversations.json` / `.zip` threads into full FinOps & CSI session records."""
+    import zipfile as _zf
+
+    records: List[Dict[str, Any]] = []
+    max_bytes = 256 * 1024 * 1024
+    seen_conv_ids: set[str] = set()
+
+    for raw_path in import_paths or []:
+        try:
+            p = Path(str(raw_path)).expanduser().resolve()
+            if not p.is_file():
+                continue
+            suf = p.suffix.lower()
+            if suf == ".csv":
+                continue
+            if p.stat().st_size > max_bytes:
+                continue
+
+            if suf == ".zip":
+                with _zf.ZipFile(p, "r") as zf:
+                    member = next(
+                        (
+                            n
+                            for n in zf.namelist()
+                            if (n == "conversations.json" or n.endswith("/conversations.json"))
+                            and ".." not in Path(n).parts
+                        ),
+                        None,
+                    )
+                    if not member or zf.getinfo(member).file_size > max_bytes:
+                        continue
+                    with zf.open(member, "r") as mfp:
+                        raw_bytes = mfp.read(max_bytes + 1)
+                    if len(raw_bytes) > max_bytes:
+                        continue
+                    payload = json.loads(raw_bytes.decode("utf-8", errors="ignore"))
+            else:
+                payload = json.loads(p.read_text(encoding="utf-8", errors="ignore"))
+
+            convs = (
+                payload
+                if isinstance(payload, list)
+                else (payload.get("conversations", []) if isinstance(payload, dict) else [])
+            )
+            file_mtime = os.path.getmtime(p)
+
+            for idx_c, conv in enumerate(convs):
+                if not isinstance(conv, dict):
+                    continue
+                conv_ts = _parse_iso_or_epoch_ts(conv.get("updated_at") or conv.get("created_at"))
+                eff_mtime = conv_ts if conv_ts > 0 else file_mtime
+                if window_seconds > 0 and conv_ts > 0 and (now - conv_ts) > window_seconds:
+                    continue
+
+                msgs = conv.get("chat_messages") or conv.get("messages") or []
+                if not isinstance(msgs, list) or not msgs:
+                    continue
+
+                cid = str(conv.get("uuid") or conv.get("id") or f"claude-chat-{idx_c}").strip()
+                if cid in seen_conv_ids:
+                    continue
+                seen_conv_ids.add(cid)
+
+                step_tuples: List[Tuple[bool, int, bool]] = []
+                tool_counts: Dict[str, int] = {}
+                conv_bytes = 0
+                first_prompt = str(conv.get("name") or conv.get("title") or "").strip()
+                conv_model = str(conv.get("model") or "")
+                model_usage_map: Dict[str, Dict[str, Any]] = {}
+
+                for msg in msgs:
+                    if not isinstance(msg, dict):
+                        continue
+                    sender = str(msg.get("sender") or msg.get("role") or "").lower()
+                    is_p = sender in ("assistant", "model", "ai")
+
+                    chunks: List[str] = []
+                    base_txt = str(msg.get("text") or "")
+                    if base_txt:
+                        chunks.append(base_txt)
+                    c_list = msg.get("content")
+                    if isinstance(c_list, list):
+                        for blk in c_list:
+                            if not isinstance(blk, dict):
+                                continue
+                            btype = str(blk.get("type") or "").lower()
+                            if btype in ("tool_use", "mcp_tool_use"):
+                                tname = str(blk.get("name") or "mcp_tool")
+                                tool_counts[tname] = tool_counts.get(tname, 0) + 1
+                            b_txt = str(blk.get("text") or blk.get("content") or "")
+                            if b_txt and b_txt != base_txt:
+                                chunks.append(b_txt)
+                            elif btype in ("tool_use", "tool_result") and blk.get("input"):
+                                chunks.append(json.dumps(blk.get("input")))
+
+                    att_bytes = 0
+                    for ak in ("attachments", "files", "files_v2"):
+                        atts = msg.get(ak)
+                        if isinstance(atts, list) and atts:
+                            tool_counts["file_attachment"] = tool_counts.get("file_attachment", 0) + len(atts)
+                            for att in atts:
+                                if isinstance(att, dict):
+                                    ext_c = str(att.get("extracted_content") or att.get("content") or "")
+                                    if ext_c:
+                                        att_bytes += len(ext_c.encode("utf-8"))
+                                    elif att.get("file_size"):
+                                        try:
+                                            att_bytes += min(200_000, int(att["file_size"]))
+                                        except (TypeError, ValueError):
+                                            pass
+
+                    joined_txt = " ".join(c for c in chunks if c)
+                    if not first_prompt and not is_p and joined_txt:
+                        first_prompt = joined_txt[:240]
+
+                    b_len = max(32, len(joined_txt.encode("utf-8")) + att_bytes)
+                    conv_bytes += b_len
+                    step_tuples.append((is_p, b_len, b_len > 16_000))
+
+                    if is_p and conv_model:
+                        est_out_tok = max(20, b_len // 4)
+                        tin_p, tout_p, _ = _resolve_model_rates(
+                            conv_model, in_price_per_m, out_price_per_m, explicit_price_override
+                        )
+                        _record_turn_model_usage(
+                            model_usage_map,
+                            conv_model,
+                            turns=1,
+                            output_tokens=est_out_tok,
+                            output_usd=(est_out_tok / 1_000_000.0) * tout_p,
+                        )
+
+                if not step_tuples:
+                    continue
+
+                top_tool = (
+                    max(tool_counts.items(), key=lambda kv: kv[1])[0]
+                    if tool_counts
+                    else "claude_chat"
+                )
+                eff_in_p, eff_out_p, _ = _resolve_model_rates(
+                    conv_model, in_price_per_m, out_price_per_m, explicit_price_override
+                )
+                rec = _evaluate_step_sequence(
+                    step_Tuples=step_tuples,
+                    conv_bytes=conv_bytes,
+                    short_id=cid[:8],
+                    conv_id=cid,
+                    harness="claude_chat",
+                    mtime=eff_mtime,
+                    in_price_per_m=eff_in_p,
+                    out_price_per_m=eff_out_p,
+                    top_tool_override=top_tool,
+                    first_prompt=first_prompt,
+                    model_usage=model_usage_map,
+                )
+                full_kb = round(conv_bytes / 1024.0, 1)
+                csi_val = round(
+                    max(len(step_tuples) / 850.0, full_kb / 1800.0)
+                    + 0.05 * min(1.0, rec["truncated_steps"] / 25.0),
+                    3,
+                )
+                rec["csi"] = csi_val
+                rec["health_tier"] = (
+                    "RED"
+                    if (len(step_tuples) >= 850 or full_kb >= 1800.0 or csi_val >= 1.0)
+                    else ("YELLOW" if (len(step_tuples) >= 600 or full_kb >= 1200.0 or csi_val >= 0.70) else "GREEN")
+                )
+                records.append(rec)
+        except Exception:
+            continue
+    return records
+
+
 def run_multi_harness_finops_audit(
     days: int = 30,
     price_per_m: float = 5.0,
@@ -3932,17 +5752,26 @@ def run_multi_harness_finops_audit(
     home_dir: Optional[Path] = None,
     explicit_price_override: bool = False,
     unshielded_only: bool = False,
+    import_paths: Optional[List[Any]] = None,
+    shield_ledger_summary: Optional[Dict[str, Any]] = None,
+    ci_dir: Optional[Path] = None,
+    lowering: bool = False,
+    include_benchmarks: bool = False,
 ) -> Dict[str, Any]:
     now = time.time()
     window_seconds = max(1, int(days)) * 86400.0 if days > 0 else 0.0
     in_price = float(price_per_m)
     out_price = round(in_price * 5.0, 2)
+    eff_inc_bench = _resolve_include_benchmarks(include_benchmarks)
+    excluded_stats: Dict[str, int] = {}
 
+    agy_env = os.environ.get("AGY_BRAIN_DIR") or os.environ.get("ANTIGRAVITY_BRAIN_DIR")
     any_custom_override = any(
         x is not None
         for x in (
             agy_dir,
             claude_dir,
+            ci_dir,
             goose_db,
             cursor_dir,
             codex_dir,
@@ -3957,6 +5786,7 @@ def run_multi_harness_finops_audit(
         os.environ.get(k)
         for k in (
             "AGY_BRAIN_DIR",
+            "ANTIGRAVITY_BRAIN_DIR",
             "CLAUDE_CODE_DIR",
             "GOOSE_SESSIONS_DB",
             "CURSOR_STORAGE_DIR",
@@ -3973,15 +5803,20 @@ def run_multi_harness_finops_audit(
 
     candidate_homes = _iter_candidate_user_homes()
     agy_roots = (
-        [Path(agy_dir or os.environ["AGY_BRAIN_DIR"]).expanduser()]
-        if (agy_dir is not None or os.environ.get("AGY_BRAIN_DIR"))
+        [Path(agy_dir or agy_env).expanduser()]
+        if (agy_dir is not None or agy_env)
         else [h / ".gemini" / "antigravity" / "brain" for h in candidate_homes]
     )
-    claude_roots = (
-        [Path(claude_dir or os.environ["CLAUDE_CODE_DIR"]).expanduser()]
-        if (claude_dir is not None or os.environ.get("CLAUDE_CODE_DIR"))
-        else [h / ".claude" / "projects" for h in candidate_homes]
-    )
+    if ci_dir is not None:
+        claude_roots = [Path(ci_dir).expanduser()]
+        if claude_dir is not None:
+            claude_roots.append(Path(claude_dir).expanduser())
+    else:
+        claude_roots = (
+            [Path(claude_dir or os.environ["CLAUDE_CODE_DIR"]).expanduser()]
+            if (claude_dir is not None or os.environ.get("CLAUDE_CODE_DIR"))
+            else [h / ".claude" / "projects" for h in candidate_homes]
+        )
     goose_roots = (
         [Path(goose_db or os.environ["GOOSE_SESSIONS_DB"]).expanduser()]
         if (goose_db is not None or os.environ.get("GOOSE_SESSIONS_DB"))
@@ -4006,15 +5841,30 @@ def run_multi_harness_finops_audit(
                 r
                 for root in agy_roots
                 for r in scan_antigravity_harness(
-                    root, window_seconds, now, in_price, out_price, explicit_price_override=explicit_price_override
+                    root,
+                    window_seconds,
+                    now,
+                    in_price,
+                    out_price,
+                    explicit_price_override=explicit_price_override,
+                    include_benchmarks=eff_inc_bench,
+                    excluded_stats=excluded_stats,
                 )
             ]
         )
-        if (not any_custom_override or agy_dir is not None or os.environ.get("AGY_BRAIN_DIR"))
+        if (not any_custom_override or agy_dir is not None or agy_env)
         else []
     )
     gemini_cli_recs = (
-        scan_gemini_cli_harness(gemini_cli_dir, window_seconds, now, in_price, out_price)
+        scan_gemini_cli_harness(
+            gemini_cli_dir,
+            window_seconds,
+            now,
+            in_price,
+            out_price,
+            include_benchmarks=eff_inc_bench,
+            excluded_stats=excluded_stats,
+        )
         if (not any_custom_override or gemini_cli_dir is not None or os.environ.get("GEMINI_CLI_DIR"))
         else []
     )
@@ -4024,11 +5874,18 @@ def run_multi_harness_finops_audit(
                 r
                 for root in claude_roots
                 for r in scan_claude_code_harness(
-                    root, window_seconds, now, in_price, out_price, explicit_price_override=explicit_price_override
+                    root,
+                    window_seconds,
+                    now,
+                    in_price,
+                    out_price,
+                    explicit_price_override=explicit_price_override,
+                    include_benchmarks=eff_inc_bench,
+                    excluded_stats=excluded_stats,
                 )
             ]
         )
-        if (not any_custom_override or claude_dir is not None or os.environ.get("CLAUDE_CODE_DIR"))
+        if (not any_custom_override or ci_dir is not None or claude_dir is not None or os.environ.get("CLAUDE_CODE_DIR"))
         else []
     )
     goose_recs = (
@@ -4036,14 +5893,30 @@ def run_multi_harness_finops_audit(
             [
                 r
                 for root in goose_roots
-                for r in scan_goose_harness(root, window_seconds, now, in_price, out_price)
+                for r in scan_goose_harness(
+                    root,
+                    window_seconds,
+                    now,
+                    in_price,
+                    out_price,
+                    include_benchmarks=eff_inc_bench,
+                    excluded_stats=excluded_stats,
+                )
             ]
         )
         if (not any_custom_override or goose_db is not None or os.environ.get("GOOSE_SESSIONS_DB"))
         else []
     )
     cursor_recs = (
-        scan_cursor_harness(cursor_override, window_seconds, now, in_price, out_price)
+        scan_cursor_harness(
+            cursor_override,
+            window_seconds,
+            now,
+            in_price,
+            out_price,
+            include_benchmarks=eff_inc_bench,
+            excluded_stats=excluded_stats,
+        )
         if (not any_custom_override or cursor_dir is not None or os.environ.get("CURSOR_STORAGE_DIR"))
         else []
     )
@@ -4055,6 +5928,8 @@ def run_multi_harness_finops_audit(
             in_price,
             out_price,
             explicit_price_override=explicit_price_override,
+            include_benchmarks=eff_inc_bench,
+            excluded_stats=excluded_stats,
         )
         if (
             not any_custom_override
@@ -4065,28 +5940,80 @@ def run_multi_harness_finops_audit(
         else []
     )
     cline_recs = (
-        scan_cline_roo_harness(cline_dir, window_seconds, now, in_price, out_price)
+        scan_cline_roo_harness(
+            cline_dir,
+            window_seconds,
+            now,
+            in_price,
+            out_price,
+            include_benchmarks=eff_inc_bench,
+            excluded_stats=excluded_stats,
+        )
         if (not any_custom_override or cline_dir is not None or os.environ.get("CLINE_STORAGE_DIR"))
         else []
     )
     windsurf_recs = (
-        scan_windsurf_harness(windsurf_dir, window_seconds, now, in_price, out_price)
+        scan_windsurf_harness(
+            windsurf_dir,
+            window_seconds,
+            now,
+            in_price,
+            out_price,
+            include_benchmarks=eff_inc_bench,
+            excluded_stats=excluded_stats,
+        )
         if (not any_custom_override or windsurf_dir is not None or os.environ.get("WINDSURF_STORAGE_DIR"))
         else []
     )
     aider_recs = (
-        scan_aider_harness(aider_path, window_seconds, now, in_price, out_price)
+        scan_aider_harness(
+            aider_path,
+            window_seconds,
+            now,
+            in_price,
+            out_price,
+            include_benchmarks=eff_inc_bench,
+            excluded_stats=excluded_stats,
+        )
         if (not any_custom_override or aider_path is not None or os.environ.get("AIDER_HISTORY_PATH"))
         else []
     )
     continue_recs = (
-        scan_continue_dev_harness(continue_dir, window_seconds, now, in_price, out_price)
+        scan_continue_dev_harness(
+            continue_dir,
+            window_seconds,
+            now,
+            in_price,
+            out_price,
+            include_benchmarks=eff_inc_bench,
+            excluded_stats=excluded_stats,
+        )
         if (not any_custom_override or continue_dir is not None or os.environ.get("CONTINUE_SESSIONS_DIR"))
         else []
     )
     zed_recs = (
-        scan_zed_harness(zed_dir, window_seconds, now, in_price, out_price)
+        scan_zed_harness(
+            zed_dir,
+            window_seconds,
+            now,
+            in_price,
+            out_price,
+            include_benchmarks=eff_inc_bench,
+            excluded_stats=excluded_stats,
+        )
         if (not any_custom_override or zed_dir is not None or os.environ.get("ZED_THREADS_DIR"))
+        else []
+    )
+    claude_chat_recs = (
+        scan_claude_export_records(
+            list(import_paths),
+            window_seconds,
+            now,
+            in_price,
+            out_price,
+            explicit_price_override=explicit_price_override,
+        )
+        if import_paths
         else []
     )
 
@@ -4094,6 +6021,7 @@ def run_multi_harness_finops_audit(
         agy_recs
         + gemini_cli_recs
         + claude_recs
+        + claude_chat_recs
         + goose_recs
         + cursor_recs
         + codex_recs
@@ -4144,6 +6072,10 @@ def run_multi_harness_finops_audit(
         "continue_dev": _summarize_harness("Continue.dev", continue_recs),
         "zed": _summarize_harness("Zed AI", zed_recs),
     }
+    if claude_chat_recs:
+        harness_breakdown["claude_chat"] = _summarize_harness(
+            "Claude.ai / Desktop Chat", claude_chat_recs
+        )
 
     total_steps = sum(r["steps"] for r in all_records)
     total_planner_turns = sum(r["planner_turns"] for r in all_records)
@@ -4182,6 +6114,9 @@ def run_multi_harness_finops_audit(
     }
     model_usage_by_id: Dict[str, Dict[str, Dict[str, Any]]] = {
         str(r.get("conv_id", "")): (r.pop("_model_usage", None) or {}) for r in all_records
+    }
+    lowering_traces_by_id: Dict[str, Dict[str, Any]] = {
+        str(r.get("conv_id", "")): (r.pop("_lowering_trace", None) or {}) for r in all_records
     }
     model_opportunities = compute_model_opportunity_insights(
         all_records=all_records,
@@ -4423,7 +6358,10 @@ def run_multi_harness_finops_audit(
         },
     }
 
-    fallback_custom_root = agy_roots[0].parent if agy_roots else Path.cwd()
+    if ci_dir is not None and agy_dir is None and not agy_env:
+        fallback_custom_root = Path(ci_dir).expanduser()
+    else:
+        fallback_custom_root = agy_roots[0].parent if agy_roots else Path.cwd()
     resolved_turn0_ws = (
         workspace_dir
         if workspace_dir is not None
@@ -4451,6 +6389,7 @@ def run_multi_harness_finops_audit(
         home_dir=resolved_turn0_home,
         sessions_count=len(all_records),
         in_price_per_m=in_price,
+        strict_containment=(ci_dir is not None),
     )
     t0_per_sess_tok = int(turn0_static_overhead.get("total_turn0_tokens_per_session", 0))
     metered_sessions_cnt = sum(1 for r in all_records if int(r.get("metered_turns", 0)) >= 1)
@@ -4485,6 +6424,39 @@ def run_multi_harness_finops_audit(
         enabled=(not any_custom_override or home_dir is not None or bool(os.environ.get("WBC_IMMUNE_AUDIT_PATH"))),
         hook_fired_by_id=hook_fired_by_id,
     )
+    if isinstance(shield_ledger_summary, dict):
+        l_events = int(shield_ledger_summary.get("total_events", 0) or 0)
+        l_turns = int(shield_ledger_summary.get("actual_turns_observed", 0) or 0)
+        l_dtok = int(shield_ledger_summary.get("direct_tokens_saved", 0) or 0)
+        l_ctok = int(shield_ledger_summary.get("cumulative_tokens_saved", l_dtok) or 0)
+        l_usd = float(shield_ledger_summary.get("api_dollars_saved_est", 0.0) or 0.0)
+        l_dusd = float(shield_ledger_summary.get("api_dollars_saved_direct", 0.0) or 0.0)
+        l_sec = int(shield_ledger_summary.get("secrets_blocked", 0) or 0)
+        l_bots = [str(b) for b in (shield_ledger_summary.get("bots_protected") or []) if b]
+        wbc_shield_telemetry["ledger_synced"] = True
+        wbc_shield_telemetry["ledger_events"] = l_events
+        wbc_shield_telemetry["ledger_turns"] = l_turns
+        wbc_shield_telemetry["measured_direct_tokens_saved"] = l_dtok
+        wbc_shield_telemetry["measured_cumulative_tokens_saved"] = l_ctok
+        wbc_shield_telemetry["measured_usd_saved"] = round(l_usd, 2)
+        wbc_shield_telemetry["measured_direct_usd_saved"] = round(l_dusd, 4)
+        wbc_shield_telemetry["measured_secrets_blocked"] = l_sec
+        wbc_shield_telemetry["bots_protected"] = l_bots
+        bot_to_harness = {
+            "antigravity": "antigravity",
+            "claude-code": "claude_code",
+            "cursor": "cursor",
+            "codex": "codex",
+            "goose": "goose",
+        }
+        merged_wired = set(wbc_shield_telemetry.get("wired_harnesses") or [])
+        for b_lbl in l_bots:
+            mapped_h = bot_to_harness.get(b_lbl.strip().lower())
+            if mapped_h:
+                merged_wired.add(mapped_h)
+        wbc_shield_telemetry["wired_harnesses"] = sorted(merged_wired)
+        if l_events > 0 or l_dtok > 0 or l_sec > 0:
+            wbc_shield_telemetry["wbc_active_on_machine"] = True
 
     # Do not project additional savings on sessions where WBC hooks already fired
     unshielded_projected_saved = round(
@@ -4505,6 +6477,8 @@ def run_multi_harness_finops_audit(
         eff_wbc_spend = hal_wbc_spend_total
     eff_monthly_saved = round(eff_saved_total * scale_30d_hal, 2)
     eff_annual_saved = round(eff_monthly_saved * 12.0, 2)
+    projected_savings["counterfactual_saved_usd"] = hal_saved_total
+    projected_savings["counterfactual_annual_saved_usd"] = hal_annual_saved
     projected_savings["projected_saved_usd"] = eff_saved_total
     projected_savings["projected_wbc_spend_usd"] = eff_wbc_spend
     projected_savings["projected_monthly_saved_usd"] = eff_monthly_saved
@@ -4514,11 +6488,33 @@ def run_multi_harness_finops_audit(
     projected_savings["hal_monthly_saved_usd"] = eff_monthly_saved
     projected_savings["hal_annual_saved_usd"] = eff_annual_saved
 
-    return {
+    lowering_analysis: Optional[Dict[str, Any]] = None
+    if lowering:
+        active_claude_recs = [r for r in all_records if r.get("harness") == "claude_code"]
+        lowering_analysis = _analyze_claude_lowering_choreography(
+            claude_recs=active_claude_recs,
+            traces_by_id=lowering_traces_by_id,
+            turn0_static_overhead=turn0_static_overhead,
+            ws_dir=resolved_turn0_ws,
+            h_dir=resolved_turn0_home,
+            ci_dir=ci_dir,
+            days=days,
+            in_price=in_price,
+            total_monthly_usd=round(float(estimated_frontier_spend_usd) * scale_30d_hal, 2),
+            hook_fired_by_id=hook_fired_by_id,
+        )
+
+    excluded_total = int(excluded_stats.get("_total", 0))
+    excluded_by_harness = {k: int(v) for k, v in excluded_stats.items() if k != "_total" and int(v) > 0}
+
+    result_payload: Dict[str, Any] = {
         "window_days": int(days),
         "input_price_per_m": in_price,
         "output_price_per_m": out_price,
         "seats": int(seats),
+        "include_benchmarks": eff_inc_bench,
+        "excluded_benchmark_conversations": excluded_total,
+        "excluded_benchmark_by_harness": excluded_by_harness,
         "conversations_scanned": len(all_records),
         "total_steps": total_steps,
         "total_planner_turns": total_planner_turns,
@@ -4546,6 +6542,7 @@ def run_multi_harness_finops_audit(
         "roi_multiple_vs_team_tier": round(eff_monthly_saved / 79.0, 1) if metered_turns_total > 0 else real_p["roi_multiple_vs_team_tier"],
         "measured_spend": {
             "conversations_scanned": len(all_records),
+            "excluded_benchmark_conversations": excluded_total,
             "total_planner_turns": total_planner_turns,
             "metered_turns": metered_turns_total,
             "model_matched_turns": model_matched_turns_total,
@@ -4573,6 +6570,9 @@ def run_multi_harness_finops_audit(
         "_local_titles_by_id": local_titles_by_id,
         "generated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
+    if lowering_analysis is not None:
+        result_payload["lowering_analysis"] = lowering_analysis
+    return result_payload
 
 
 def _humanize_bloat_trigger(trigger: str) -> str:
@@ -4606,6 +6606,7 @@ def format_standalone_receipt(
     audit: Dict[str, Any],
     color: Optional[bool] = None,
     show_team: bool = False,
+    cli_mode: bool = False,
 ) -> str:
     if color is None:
         color = bool(
@@ -4712,19 +6713,6 @@ def format_standalone_receipt(
     cut_pct = int(round(cut_pct_f)) if hal_saved_usd > 0 else 0
     cut_badge = f"(-{cut_pct}% est.)" if cut_pct > 0 else ""
 
-    eff_mult = round(1.0 / max(0.25, 1.0 - (cut_pct_f / 100.0)), 1) if cut_pct_f > 0 else 1.0
-    if q_mult > 0:
-        q_lo = max(1.1, min(q_mult, eff_mult))
-        q_hi = max(q_mult, eff_mult)
-    else:
-        q_lo = q_hi = max(1.1, eff_mult)
-    mult_s = f"~{eff_mult:.1f}x" if abs(q_hi - q_lo) < 0.15 else f"{q_lo:.1f}x-{q_hi:.1f}x"
-    quota_str = (
-        f"{BOLD}{CYAN}{mult_s}{RESET} longer Pro/Max quota before rate limits"
-        if convs > 0 and cut_pct > 0
-        else f"{DIM}Longer Pro/Max quota before rate-limit lockouts{RESET}"
-    )
-
     wbc_st = audit.get("wbc_shield_telemetry", {}) or {}
     wbc_active = bool(wbc_st.get("wbc_active_on_machine", False))
     wired_set = set(wbc_st.get("wired_harnesses", []) or [])
@@ -4739,6 +6727,43 @@ def format_standalone_receipt(
     unwired_save = float(wbc_st.get("unwired_projected_save_usd", 0.0))
     meas_slices = int(wbc_st.get("measured_bounded_slices", 0))
     meas_dtok = int(wbc_st.get("measured_direct_tokens_saved", 0))
+    meas_ctok = int(wbc_st.get("measured_cumulative_tokens_saved", meas_dtok))
+    meas_usd = float(wbc_st.get("measured_usd_saved", 0.0))
+    ledger_synced = bool(wbc_st.get("ledger_synced", False))
+    ledger_events = int(wbc_st.get("ledger_events", 0))
+    mo_top = audit.get("model_opportunities", {}) or {}
+    top_opp_usd = float(mo_top.get("total_opportunity_usd", 0.0))
+    top_opp_yr = float(mo_top.get("projected_annual_opportunity_usd", 0.0))
+
+    show_wbc_active_header = wbc_active and ((convs > 0 and sh_n > 0) or (cli_mode and ledger_events > 0))
+    eff_mult = round(1.0 / max(0.25, 1.0 - (cut_pct_f / 100.0)), 1) if cut_pct_f > 0 else 1.0
+    if show_wbc_active_header:
+        cf_saved_usd = float(hal.get("counterfactual_saved_usd", hal_saved_usd))
+        cf_cut_pct_f = (cf_saved_usd / exact_usd * 100.0) if exact_usd > 0 else cut_pct_f
+        cf_mult = round(1.0 / max(0.25, 1.0 - (cf_cut_pct_f / 100.0)), 1) if cf_cut_pct_f > 0 else 1.0
+        active_mult = round(max(q_mult, cf_mult), 1) if (q_mult > 1.0 or cf_mult > 1.0) else eff_mult
+        if convs > 0 and active_mult > 1.0:
+            if cut_pct > 0 and eff_mult >= 1.1 and eff_mult < active_mult - 0.05:
+                quota_str = (
+                    f"{BOLD}{CYAN}~{active_mult:.1f}x{RESET} longer Pro/Max quota "
+                    f"{DIM}(+{eff_mult:.1f}x more upside){RESET}"
+                )
+            else:
+                quota_str = f"{BOLD}{CYAN}~{active_mult:.1f}x{RESET} longer Pro/Max quota before rate limits"
+        else:
+            quota_str = f"{DIM}Longer Pro/Max quota before rate-limit lockouts{RESET}"
+    else:
+        if q_mult > 0:
+            q_lo = max(1.1, min(q_mult, eff_mult))
+            q_hi = max(q_mult, eff_mult)
+        else:
+            q_lo = q_hi = max(1.1, eff_mult)
+        mult_s = f"~{eff_mult:.1f}x" if abs(q_hi - q_lo) < 0.15 else f"{q_lo:.1f}x-{q_hi:.1f}x"
+        quota_str = (
+            f"{BOLD}{CYAN}{mult_s}{RESET} longer Pro/Max quota before rate limits"
+            if convs > 0 and cut_pct > 0
+            else f"{DIM}Longer Pro/Max quota before rate-limit lockouts{RESET}"
+        )
 
     lines: List[str] = [
         "",
@@ -4748,46 +6773,69 @@ def format_standalone_receipt(
         "",
     ]
 
-    if wbc_active and convs > 0 and sh_n > 0:
+    if show_wbc_active_header:
         wired_lbl = ", ".join(h.replace("_", "-") for h in sorted(wired_set))[:32] or "local hooks"
+        tot_lbl = f"Total {days}d API-Equiv"
         lines.append(
-            f"  {BOLD}Total {days}d API-Equiv{RESET}       {BOLD}${exact_usd:,.2f}{RESET}  {GREEN}(WBC active: {wired_lbl}){RESET}"
+            f"  {BOLD}{tot_lbl:<26}{RESET}{BOLD}${exact_usd:,.2f}{RESET}  {GREEN}(WBC active: {wired_lbl}){RESET}"
         )
-        if un_n > 0:
-            bar_sh = _bar(sh_n / max(1, convs), width=14, fill_color=GREEN)
-            bar_un = _bar(un_n / max(1, convs), width=14, fill_color=YELLOW)
-            sh_cnt = f"{sh_n:,}/{convs:,} sess"
-            un_cnt = f"{un_n:,}/{convs:,} sess"
-            cnt_w = max(len(sh_cnt), len(un_cnt))
+        if convs > 0 and sh_n > 0:
+            cov_ratio = max(0.0, min(1.0, sh_n / float(max(1, convs))))
+            cov_pct = int(round(cov_ratio * 100.0))
+            bar_sh = _bar(cov_ratio, width=12, fill_color=GREEN)
+            cov_lbl = f"{cov_pct}% of sessions"
             lines.append(
-                f"  {GREEN}WBC-Shielded Sessions{RESET}     {bar_sh}  {BOLD}{GREEN}{sh_cnt:>{cnt_w}}{RESET}  {DIM}(${sh_usd:,.0f}, ${sh_avg:,.2f}/s){RESET}"
-            )
-            lines.append(
-                f"  {YELLOW}Unshielded / Bypassed{RESET}     {bar_un}  {BOLD}{un_cnt:>{cnt_w}}{RESET}  {DIM}(${un_usd:,.0f}, ${un_avg:,.2f}/s){RESET}"
-            )
-        else:
-            lines.append(
-                f"  {GREEN}WBC-Shielded Sessions{RESET}     {BOLD}{GREEN}{sh_n:,} / {convs:,} sessions{RESET}  (${sh_avg:,.2f}/sess avg)"
+                f"  {GREEN}{'Shield Coverage':<26}{RESET}{bar_sh}  {BOLD}{GREEN}{cov_lbl}{RESET}  {DIM}({sh_n:,}/{convs:,} sess){RESET}"
             )
         lines.append("")
-        if meas_dtok > 0 or meas_slices > 0:
-            lines.append(
-                f"  {BOLD}Measured Hook Shield{RESET}      {GREEN}{meas_slices:,} bounded slices{RESET} • {_fmt_tok(meas_dtok)} direct tok blocked"
+        if ledger_synced and (ledger_events > 0 or meas_dtok > 0):
+            full_sh_plain = (
+                f"${meas_usd:,.2f} saved • {_fmt_tok(meas_ctok)} cum "
+                f"({_fmt_tok(meas_dtok)} dir, {ledger_events:,} gates)"
             )
-        lines.append(f"  {BOLD}Estimated Limit Multiplier{RESET} {quota_str}")
+            if 28 + len(full_sh_plain) <= 78:
+                lines.append(
+                    f"  {BOLD}{'Verified WBC Shield':<26}{RESET}{GREEN}${meas_usd:,.2f} saved{RESET} • "
+                    f"{_fmt_tok(meas_ctok)} cum ({_fmt_tok(meas_dtok)} dir, {ledger_events:,} gates)"
+                )
+            else:
+                lines.append(
+                    f"  {BOLD}{'Verified WBC Shield':<26}{RESET}{GREEN}${meas_usd:,.2f} saved{RESET} • "
+                    f"{_fmt_tok(meas_ctok)} cum tok ({ledger_events:,} gates)"
+                )
+        elif meas_dtok > 0 or meas_slices > 0:
+            sh_hdr = "Verified WBC Shield" if cli_mode else "Measured Hook Shield"
+            lines.append(
+                f"  {BOLD}{sh_hdr:<26}{RESET}{GREEN}{meas_slices:,} active AST slices{RESET} • {_fmt_tok(meas_dtok)} direct tok blocked"
+            )
+        elif cli_mode:
+            lines.append(
+                f"  {BOLD}{'Verified WBC Shield':<26}{RESET}{DIM}0 gates in {days}d (see body savings){RESET}"
+            )
+        lines.append(f"  {BOLD}{'Subscription Impact':<26}{RESET}{quota_str}")
         if unwired_save > 0 and unwired_harnesses:
             uw_lbl = ", ".join(h.replace("_", "-") for h in unwired_harnesses[:2])
-            lines.append(
-                f"  {BOLD}Remaining Opportunity{RESET}     {BOLD}{GREEN}Save ${unwired_save:,.2f} / {days}d{RESET} by wiring {uw_lbl}"
-            )
-        elif un_n > 0:
-            lines.append(
-                f"  {BOLD}Unshielded Spend{RESET}          {DIM}${un_usd:,.2f} across {un_n:,} sessions without hook telemetry{RESET}"
-            )
-        else:
-            lines.append(
-                f"  {BOLD}Unwired Opportunity{RESET}       {DIM}$0.00 uncaptured (all active harnesses protected){RESET}"
-            )
+            uw_plain = f"Save ${unwired_save:,.2f} / {days}d by wiring {uw_lbl}"
+            if 28 + len(uw_plain) <= 78:
+                lines.append(
+                    f"  {BOLD}{'Remaining Opportunity':<26}{RESET}{BOLD}{GREEN}Save ${unwired_save:,.2f} / {days}d{RESET} by wiring {uw_lbl}"
+                )
+            else:
+                lines.append(
+                    f"  {BOLD}{'Remaining Opportunity':<26}{RESET}{BOLD}{GREEN}Save ${unwired_save:,.2f} / {days}d{RESET} (run body begin)"
+                )
+        if cli_mode and top_opp_usd >= 0.05:
+            up_plain = f"~{_fmt_usd(top_opp_usd)} / {days}d (~${top_opp_yr:,.0f}/yr • flush + model fit)"
+            if 28 + len(up_plain) <= 78:
+                lines.append(
+                    f"  {BOLD}{'Remaining Upside':<26}{RESET}{GREEN}~{_fmt_usd(top_opp_usd)} / {days}d{RESET} "
+                    f"{DIM}(~${top_opp_yr:,.0f}/yr • flush + model fit){RESET}"
+                )
+            else:
+                lines.append(
+                    f"  {BOLD}{'Remaining Upside':<26}{RESET}{GREEN}~{_fmt_usd(top_opp_usd)} / {days}d{RESET} "
+                    f"{DIM}(~${top_opp_yr:,.0f}/yr){RESET}"
+                )
     else:
         cur_usd_s = f"${exact_usd:,.2f}"
         wbc_usd_s = f"${hal_wbc_usd:,.2f}"
@@ -4803,18 +6851,26 @@ def format_standalone_receipt(
         )
 
     if show_team or seats > 1:
-        base_yr = (unwired_save * (30.0 / max(1, days)) * 12.0) if (wbc_active and unwired_save > 0) else hal_yr_saved
+        cf_yr = float(hal.get("counterfactual_annual_saved_usd", hal_yr_saved))
+        if wbc_active and unwired_save > 0:
+            base_yr = unwired_save * (30.0 / max(1, days)) * 12.0
+        elif hal_yr_saved > 0:
+            base_yr = hal_yr_saved
+        else:
+            meas_yr = meas_usd * (30.0 / max(1, days)) * 12.0
+            base_yr = max(cf_yr, meas_yr + top_opp_yr)
         team_hal_yr = base_yr * max(1, seats)
         lines.append(
             f"  {BOLD}{MAGENTA}Team Projection ({seats} Seats){RESET} {BOLD}{MAGENTA}${team_hal_yr:,.0f} / yr{RESET} projected savings"
         )
 
-    flush_steps = _resolve_flush_step_interval()
-    projection_note = (
-        f"Projection: AST slicing (>2KB tool out -> 500-tok outline) + flush @{flush_steps}t"
-    )
     lines.append(f"  {DIM}{rate_note}{RESET}")
-    lines.append(f"  {DIM}{projection_note}{RESET}")
+    if not (wbc_active and convs > 0 and sh_n > 0):
+        flush_steps = _resolve_flush_step_interval()
+        projection_note = (
+            f"Projection: AST slicing (>2KB tool out -> 500-tok outline) + flush @{flush_steps}t"
+        )
+        lines.append(f"  {DIM}{projection_note}{RESET}")
 
     hb = audit.get("harness_breakdown", {})
     active_harnesses: List[Tuple[str, Dict[str, Any]]] = []
@@ -4823,6 +6879,7 @@ def format_standalone_receipt(
         "antigravity",
         "gemini_cli",
         "claude_code",
+        "claude_chat",
         "cursor",
         "goose",
         "codex",
@@ -5081,6 +7138,32 @@ def format_standalone_receipt(
                 f"({GREEN}~${yr_opp_u:,.0f}/yr{RESET} • read-only)"
             )
 
+    la = audit.get("lowering_analysis")
+    if isinstance(la, dict) and la.get("enabled"):
+        def _fmt_mo(val: float) -> str:
+            return f"${val:,.0f}" if val >= 1000.0 else f"${val:,.2f}"
+
+        def _fmt_pct(val: float) -> str:
+            return f"{int(round(val))}%" if abs(val - round(val)) < 0.05 else f"{val:.1f}%"
+
+        s_code = float(la.get("code_lowering_monthly_usd", 0.0))
+        y_pct = _fmt_pct(float(la.get("code_lowering_turn_pct", 0.0)))
+        n_pat = int(la.get("recurring_patterns_count", 0))
+        s_wbc = float(la.get("wbc_shield_monthly_usd", 0.0))
+        z_pct = _fmt_pct(float(la.get("wbc_shield_rem_pct", 0.0)))
+        s_tot = float(la.get("combined_monthly_usd", 0.0))
+        p_pct = _fmt_pct(float(la.get("combined_net_pct", 0.0)))
+        p_unit = str(la.get("period_unit") or "/mo")
+        lines.extend(
+            [
+                "",
+                f"{BOLD}SAVINGS BREAKDOWN{RESET}",
+                f"  1. Automate {n_pat} repeatable loops:  {_fmt_mo(s_code)}{p_unit}  ({y_pct} of turns)",
+                f"  2. Cut log, file & MCP bloat:      {_fmt_mo(s_wbc)}{p_unit}  ({z_pct} on remaining turns)",
+                f"  Total:                             {_fmt_mo(s_tot)}{p_unit}  ({p_pct} less spend)",
+            ]
+        )
+
     top_convs = audit.get("top_bloated_conversations", [])
     titles_map = audit.get("_local_titles_by_id", {}) or {}
     if top_convs:
@@ -5089,6 +7172,7 @@ def format_standalone_receipt(
         harness_short_map = {
             "antigravity": "antigravity",
             "claude_code": "claude-code",
+            "claude_chat": "claude-chat",
             "gemini_cli": "gemini-cli",
             "cursor": "cursor",
             "goose": "goose",
@@ -5121,19 +7205,42 @@ def format_standalone_receipt(
                 f"{idx_s} {BOLD}{spend_s:>9}{RESET}  {h_short:<11} {t_str:>6}  {desc_str}  {CYAN}{sid_s}{RESET}"
             )
 
-    lines.extend(
-        [
-            "",
-            divider,
-            f"{BOLD}{GREEN}Start Saving Now - Copy & Paste to Install (100% Free Open-Core):{RESET}",
-            f"  • {BOLD}Install:{RESET}   {CYAN}curl -fsSL https://wholebodycompute.com/begin/audit | sh{RESET}",
-            f"               {DIM}Wires automatic hooks into your active agents - just restart them & code normally.{RESET}",
-            f"  • {BOLD}Alt:{RESET}       {DIM}uv tool install whole-body-compute && body begin{RESET}",
-            f"  • {BOLD}Share:{RESET}     {DIM}curl -sSL https://wholebodycompute.com/audit.py | python3{RESET}",
-            f"  • {BOLD}Privacy:{RESET}   {DIM}Read-only scan; 1 anon ping (--offline or DO_NOT_TRACK=1){RESET}",
-            "",
-        ]
-    )
+    if cli_mode:
+        lines.extend(["", divider, f"{BOLD}NEXT STEPS{RESET}"])
+        if not wbc_active or unwired_harnesses:
+            lines.append(
+                f"  • {BOLD}Shield agents:{RESET} {CYAN}body begin{RESET}  {DIM}(wire automatic PreToolUse/PostToolUse hooks){RESET}"
+            )
+        if marathon_cnt > 0 or float((mo.get("marathon_reread_drag") or {}).get("savable_usd", 0.0)) >= 0.50:
+            lines.append(
+                f"  • {BOLD}Cut re-reads:{RESET}  {CYAN}body flush --auto{RESET}  {DIM}(compact 50+ turn marathon sessions){RESET}"
+            )
+        if t0_mcp >= 2000 or t0_tot >= 8000:
+            lines.append(
+                f"  • {BOLD}Trim Turn-0:{RESET}   {CYAN}body skills audit{RESET}  {DIM}(prune dormant MCP & skill schemas){RESET}"
+            )
+        sav_cmd = f"body savings --window {days}d" if days in (1, 7, 30) else "body savings"
+        lines.append(
+            f"  • {BOLD}Organ ledger:{RESET}  {CYAN}{sav_cmd}{RESET}  {DIM}(live organ & hook receipt){RESET}"
+        )
+        lines.append(
+            f"  • {BOLD}Team report:{RESET}   {DIM}body audit --seats 10 --export-receipt ROI_RECEIPT.md{RESET}"
+        )
+        lines.append("")
+    else:
+        lines.extend(
+            [
+                "",
+                divider,
+                f"{BOLD}{GREEN}Start Saving Now - Copy & Paste to Install (100% Free Open-Core):{RESET}",
+                f"  • {BOLD}Install:{RESET}   {CYAN}curl -fsSL https://wholebodycompute.com/begin/audit | sh{RESET}",
+                f"               {DIM}Wires automatic hooks into active agents - just restart & code.{RESET}",
+                f"  • {BOLD}Alt:{RESET}       {DIM}uv tool install whole-body-compute && body begin{RESET}",
+                f"  • {BOLD}Share:{RESET}     {DIM}curl -sSL https://wholebodycompute.com/audit.py | python3{RESET}",
+                f"  • {BOLD}Privacy:{RESET}   {DIM}Read-only scan; 1 anon ping (--offline or DO_NOT_TRACK=1){RESET}",
+                "",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -5322,6 +7429,8 @@ def _emit_audit_telemetry(audit: Dict[str, Any], no_telemetry: bool = False) -> 
             "mode": "standalone_audit_py",
             "acquisition_source": acq_source,
             "utm_source": acq_source if acq_source != "direct" else None,
+            **({"audit_channel_group": "cloud_ci"} if acq_source in ("cloud", "ci") else {}),
+            "lowering_enabled": bool(audit.get("lowering_analysis")),
             "is_qualified_audit": convs_scanned > 0,
             "window_days": int(audit.get("window_days", 30)),
             "conversations_scanned": convs_scanned,
@@ -5439,42 +7548,94 @@ def _collect_standalone_cloud_sources(
                     if cv > 0:
                         exp_usd += cv
                         has_cost = True
-                usd = round(exp_usd, 2) if has_cost else round((in_t / 1e6) * price_per_m + (cr_t / 1e6) * (price_per_m * 0.1) + (out_t / 1e6) * (price_per_m * 5.0), 2)
-                results.append({"ok": True, "source": "billing_csv", "label": p.name, "rows": rows_m, "total_tokens": in_t + cr_t + out_t, "estimated_spend_usd": usd, "exact_cost_reported": has_cost})
-            else:
-                if suf == ".zip":
-                    with _zf.ZipFile(p, "r") as z:
-                        m = next((n for n in z.namelist() if n.endswith("conversations.json")), None)
-                        if not m:
-                            results.append({"ok": False, "source": "import", "label": p.name, "error": "No conversations.json in zip"})
-                            continue
-                        payload = json.loads(z.read(m).decode("utf-8", errors="ignore"))
+                mod_in = (in_t / 1e6) * price_per_m + (cr_t / 1e6) * (price_per_m * 0.1)
+                mod_out = (out_t / 1e6) * (price_per_m * 5.0)
+                usd = round(exp_usd, 2) if has_cost else round(mod_in + mod_out, 2)
+                tot_in = in_t + cr_t
+                ch_pct = round((cr_t / float(max(1, tot_in))) * 100.0, 1) if tot_in > 0 else 0.0
+                if tot_in > 0:
+                    in_sh = mod_in / max(0.01, mod_in + mod_out)
+                    sav_u = round(usd * in_sh * (0.62 if ch_pct < 35.0 else 0.42), 2)
                 else:
-                    payload = json.loads(p.read_text(encoding="utf-8", errors="ignore"))
-                convs = payload if isinstance(payload, list) else (payload.get("conversations", []) if isinstance(payload, dict) else [])
-                c_cnt = m_cnt = ei = eo = 0
-                for c in convs:
-                    if not isinstance(c, dict):
-                        continue
-                    ts = _parse_dt(c.get("updated_at") or c.get("created_at"))
-                    if ts is not None and ts < cutoff:
-                        continue
-                    msgs = c.get("chat_messages") or c.get("messages") or []
-                    if not isinstance(msgs, list):
-                        continue
-                    c_cnt += 1
-                    run_c = 0
-                    for msg in msgs:
-                        if not isinstance(msg, dict):
-                            continue
-                        m_cnt += 1
-                        txt = str(msg.get("text") or "")
-                        run_c += len(txt)
-                        if str(msg.get("sender") or msg.get("role") or "").lower() in ("assistant", "model"):
-                            eo += max(1, len(txt) // 4) if txt else 0
-                            ei += max(1, run_c // 4) if run_c else 0
-                usd = round((ei / 1e6) * price_per_m + (eo / 1e6) * (price_per_m * 5.0), 2)
-                results.append({"ok": True, "source": "claude_export_json", "label": p.name, "conversations": c_cnt, "messages": m_cnt, "total_tokens": ei + eo, "estimated_spend_usd": usd, "exact_cost_reported": False})
+                    sav_u = round(usd * 0.35, 2) if usd > 0 else 0.0
+                results.append(
+                    {
+                        "ok": True,
+                        "source": "billing_csv",
+                        "label": p.name,
+                        "rows": rows_m,
+                        "input_tokens": in_t,
+                        "cache_read_tokens": cr_t,
+                        "output_tokens": out_t,
+                        "total_tokens": in_t + cr_t + out_t,
+                        "cache_hit_rate_pct": ch_pct,
+                        "estimated_spend_usd": usd,
+                        "estimated_wbc_savable_usd": sav_u,
+                        "exact_cost_reported": has_cost,
+                    }
+                )
+            else:
+                chat_recs = scan_claude_export_records(
+                    [str(p)],
+                    max(1, int(days)) * 86400.0 if days > 0 else 0.0,
+                    time.time(),
+                    price_per_m,
+                    round(price_per_m * 5.0, 2),
+                )
+                if not chat_recs:
+                    if suf == ".zip":
+                        with _zf.ZipFile(p, "r") as z:
+                            m = next((n for n in z.namelist() if n.endswith("conversations.json")), None)
+                            if not m:
+                                results.append({"ok": False, "source": "import", "label": p.name, "error": "No conversations.json in zip"})
+                                continue
+                    results.append(
+                        {
+                            "ok": True,
+                            "source": "claude_export_json",
+                            "label": p.name,
+                            "conversations": 0,
+                            "messages": 0,
+                            "total_tokens": 0,
+                            "estimated_spend_usd": 0.0,
+                            "exact_cost_reported": False,
+                        }
+                    )
+                    continue
+                c_cnt = len(chat_recs)
+                m_cnt = sum(int(r["steps"]) for r in chat_recs)
+                ei = sum(int(r["actual_cumulative_input_tokens"]) for r in chat_recs)
+                eo = sum(int(r["output_tokens"]) for r in chat_recs)
+                ew = sum(int(r["wasted_bloat_tokens"]) for r in chat_recs)
+                eopt = sum(int(r["bbb_optimized_tokens"]) for r in chat_recs)
+                usd = round(sum(float(r["exact_api_spend_usd"]) for r in chat_recs), 2)
+                sav_u = round(sum(float(r["hal_saved_usd"]) for r in chat_recs), 2)
+                red_n = sum(1 for r in chat_recs if r.get("health_tier") == "RED")
+                yel_n = sum(1 for r in chat_recs if r.get("health_tier") == "YELLOW")
+                mar_n = sum(1 for r in chat_recs if int(r.get("planner_turns", 0)) >= 25)
+                bloat_p = round((ew / float(max(1, ei))) * 100.0, 1) if ei > 0 else 0.0
+                q_mult = round(float(ei) / float(max(1, eopt)), 2) if ei > 0 and eopt > 0 else 1.0
+                results.append(
+                    {
+                        "ok": True,
+                        "source": "claude_export_json",
+                        "label": p.name,
+                        "conversations": c_cnt,
+                        "messages": m_cnt,
+                        "input_tokens": ei,
+                        "output_tokens": eo,
+                        "wasted_bloat_tokens": ew,
+                        "avoidable_bloat_pct": bloat_p,
+                        "quota_stretch_multiple": q_mult,
+                        "csi_red_threads": red_n,
+                        "csi_yellow_threads": yel_n,
+                        "marathon_threads": mar_n,
+                        "total_tokens": ei + eo,
+                        "estimated_spend_usd": usd,
+                        "estimated_wbc_savable_usd": sav_u,
+                        "exact_cost_reported": False,
+                    }
+                )
         except Exception as exc:
             results.append({"ok": False, "source": "import", "label": p.name, "error": str(exc)})
 
@@ -5517,19 +7678,37 @@ def _collect_standalone_cloud_sources(
 
 
 def _format_standalone_cloud_section(cloud_sources: List[Dict[str, Any]]) -> str:
-    lines = ["", "☁️  Cloud Usage & Spend (Opt-In - Reported Separately from Local Transcripts):"]
+    lines = ["", "CLOUD & ANTHROPIC CONSOLE AUDIT (OPT-IN)"]
     for src in cloud_sources:
-        lbl = src.get("label", src.get("source", "cloud"))
+        lbl = str(src.get("label", src.get("source", "cloud")))[:28]
         if not src.get("ok"):
-            lines.append(f"  • {lbl}: [SKIPPED] {src.get('error', 'unknown error')}")
+            err_s = str(src.get("error", "unknown error"))[:42]
+            lines.append(f"  • {lbl}: [SKIPPED] {err_s}")
             continue
         extra = ""
         if "conversations" in src:
-            extra = f" | {int(src['conversations']):,} convs, {int(src.get('messages', 0)):,} msgs"
+            extra = f" | {int(src['conversations']):,} convs"
         elif "rows" in src:
             extra = f" | {int(src['rows']):,} rows"
         tag = "exact" if src.get("exact_cost_reported") else "est."
-        lines.append(f"  • {lbl}: {int(src.get('total_tokens', 0)):,} tokens ({tag} ${float(src.get('estimated_spend_usd', 0.0)):,.2f}){extra}")
+        usd = float(src.get("estimated_spend_usd", 0.0))
+        tok_s = f"{int(src.get('total_tokens', 0)):,}"
+        lines.append(f"  • {lbl}: {tok_s} tok ({tag} ${usd:,.2f}){extra}"[:78])
+        if src.get("source") == "claude_export_json" and int(src.get("conversations", 0)) > 0:
+            bp = float(src.get("avoidable_bloat_pct", 0.0))
+            qm = float(src.get("quota_stretch_multiple", 1.0))
+            rn = int(src.get("csi_red_threads", 0))
+            yn = int(src.get("csi_yellow_threads", 0))
+            mn = int(src.get("marathon_threads", 0))
+            lines.append(
+                f"    CSI: {rn} RED, {yn} YELLOW, {mn} marathons • {bp:.0f}% bloat (~{qm:.1f}x quota)"[:78]
+            )
+        elif src.get("source") == "billing_csv":
+            ch = float(src.get("cache_hit_rate_pct", 0.0))
+            sv = float(src.get("estimated_wbc_savable_usd", 0.0))
+            lines.append(
+                f"    Console API: {ch:.1f}% cache hit • est. WBC save ~${sv:,.2f}"[:78]
+            )
     return "\n".join(lines)
 
 
@@ -5567,7 +7746,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="append",
         default=[],
         metavar="PATH",
-        help="Opt-in offline cloud export to include (`conversations.json`, `.zip`, or Anthropic billing `.csv`)",
+        help="Opt-in offline cloud export (`conversations.json`, `.zip`, Console `.csv`, or `auto`)",
+    )
+    parser.add_argument(
+        "--auto-downloads",
+        dest="auto_downloads",
+        action="store_true",
+        help="Opt-in: auto-discover recent Claude `.zip`/`conversations.json` & Console `.csv` in ~/Downloads",
     )
     parser.add_argument(
         "--cloud",
@@ -5583,7 +7768,48 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="Output structured JSON")
     parser.add_argument("--unshielded-only", action="store_true", help="Analyze only unshielded sessions as if WBC were not yet installed")
+    parser.add_argument(
+        "--include-benchmarks",
+        action="store_true",
+        dest="include_benchmarks",
+        help="Include synthetic benchmark, SWE-bench, AgentDojo, and /tmp test sessions in spend audit",
+    )
+    parser.add_argument(
+        "--lowering",
+        action="store_true",
+        help="Analyze deterministic Bash/tool loops for Tier 0/1 code lowering vs WBC Linux Shield savings",
+    )
+    parser.add_argument(
+        "--ci-dir",
+        dest="ci_dir",
+        default=None,
+        metavar="PATH",
+        help="Optional path to exported CI Claude Code JSONL transcripts to audit exclusively",
+    )
     args = parser.parse_args(argv)
+
+    raw_imports = list(getattr(args, "import_paths", None) or [])
+    use_auto_dl = bool(getattr(args, "auto_downloads", False)) or any(
+        str(p).strip().lower() == "auto" for p in raw_imports
+    )
+    import_paths: List[str] = [str(p) for p in raw_imports if str(p).strip().lower() != "auto"]
+    auto_dl_missing = False
+    if use_auto_dl:
+        env_dl_override = os.environ.get("WBC_DOWNLOADS_DIR", "").strip()
+        dl_base = (
+            Path(env_dl_override).expanduser()
+            if env_dl_override
+            else ((Path(args.home_dir).expanduser() / "Downloads") if args.home_dir else None)
+        )
+        found_dl = discover_standalone_cloud_exports(downloads_dir=dl_base)
+        if not found_dl:
+            auto_dl_missing = True
+        for dp in found_dl:
+            if str(dp) not in import_paths:
+                import_paths.append(str(dp))
+
+    edge_acq = (os.environ.get("WBC_AUDIT_SOURCE") or WBC_EDGE_AUDIT_SOURCE or "").strip().lower()
+    enable_lowering = bool(args.lowering) or (edge_acq in ("cloud", "ci"))
 
     audit = run_multi_harness_finops_audit(
         days=args.days,
@@ -5605,10 +7831,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         home_dir=Path(args.home_dir) if args.home_dir else None,
         explicit_price_override=explicit_price,
         unshielded_only=bool(args.unshielded_only),
+        import_paths=import_paths,
+        ci_dir=Path(args.ci_dir) if args.ci_dir else None,
+        lowering=enable_lowering,
+        include_benchmarks=bool(getattr(args, "include_benchmarks", False)),
     )
 
     cloud_sources: List[Dict[str, Any]] = []
-    import_paths = getattr(args, "import_paths", None) or []
     use_cloud_api = bool(getattr(args, "cloud", False))
     admin_key = getattr(args, "anthropic_admin_key", None) or (
         os.environ.get("ANTHROPIC_ADMIN_API_KEY") if use_cloud_api else None
@@ -5632,6 +7861,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             encoding="utf-8",
         )
 
+    dl_hint = "No ~/Downloads file: console.anthropic.com/settings/cost or claude.ai export"
+    if auto_dl_missing:
+        audit["cloud_download_hint"] = dl_hint
+
     if args.json:
         json_audit = dict(audit)
         json_audit.pop("_local_titles_by_id", None)
@@ -5641,6 +7874,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(format_standalone_receipt(audit, color=use_color, show_team=show_team), flush=True)
         if cloud_sources:
             print(_format_standalone_cloud_section(cloud_sources), flush=True)
+        if auto_dl_missing:
+            print(f"  {dl_hint}", flush=True)
 
     _emit_audit_telemetry(audit, no_telemetry=bool(getattr(args, "no_telemetry", False)))
     return 0

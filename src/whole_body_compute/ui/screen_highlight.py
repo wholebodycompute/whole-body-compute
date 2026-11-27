@@ -170,6 +170,18 @@ class PalHighlightOverlay:
             "badge_bg": (0.04, 0.32, 0.25, 0.92),
             "text": "🎙️ Codex Listening",
         },
+        "ears": {
+            "border": (1.0, 0.165, 0.165, 0.98),  # Whole Body Compute Electric Red (#FF2A2A)
+            "tint": None,
+            "badge_bg": (0.45, 0.06, 0.08, 0.92),
+            "text": "🎙️ Listening",
+        },
+        "ears_hands_free": {
+            "border": (1.0, 0.24, 0.14, 0.98),  # Warm Electric Coral-Red
+            "tint": None,
+            "badge_bg": (0.48, 0.10, 0.06, 0.92),
+            "text": "🔒 Hands-Free",
+        },
     }
 
     @classmethod
@@ -270,6 +282,65 @@ class PalHighlightOverlay:
             except Exception:
                 pass
             self._auto_hide_timer = None
+
+    def show_for_ears_target(
+        self,
+        mode: str = "ptt",
+        target: str = "auto",
+        max_duration_s: Optional[float] = 95.0,
+    ) -> str:
+        """
+        Highlight the focused text input box during `body ears` dictation, falling back
+        automatically to the focused window (or screen perimeter) if no distinct input box is exposed.
+        Returns resolved target kind: `'text_box'`, `'window'`, or `'screen'`.
+        """
+        color_map = {
+            "hands_free": "ears_hands_free",
+            "opt+space": "ears_hands_free",
+        }
+        color_type = color_map.get(mode, "ears")
+        self._current_mode = "ears_window" if target == "window" else "ears_auto"
+        self._current_color_type = color_type
+        self._want_visible = True
+        self._show_seq += 1
+        seq = self._show_seq
+        self._start_auto_hide_timer(max_duration_s)
+        if is_headless():
+            return "window" if target == "window" else "text_box"
+
+        resolved_kind = {"kind": "window"}
+
+        def _present():
+            if not self._want_visible or seq != self._show_seq:
+                return
+            if not self._panel:
+                self._init_window()
+
+            self._apply_style(color_type, None)
+            box_rect = None if target == "window" else self._query_focused_text_box_frame()
+            if box_rect is not None:
+                resolved_kind["kind"] = "text_box"
+                self._update_panel_frame(box_rect)
+            else:
+                win_rect = self._query_focused_window_frame()
+                if win_rect is not None:
+                    resolved_kind["kind"] = "window"
+                    self._update_panel_frame(win_rect)
+                else:
+                    resolved_kind["kind"] = "screen"
+                    self._fallback_to_screen()
+
+            if self._panel and self._want_visible and seq == self._show_seq:
+                self._panel.orderFrontRegardless()
+                self._panel.setAlphaValue_(1.0)
+                self._is_visible = True
+                self._start_tracking_loop()
+
+        if threading.current_thread() is threading.main_thread():
+            _present()
+        else:
+            AppHelper.callAfter(_present)
+        return resolved_kind["kind"]
 
     def show_for_focused_window(
         self,
@@ -500,23 +571,101 @@ class PalHighlightOverlay:
             by = rect.size.height - 35.0
             self._badge.setFrame_(NSRect(NSPoint(bx, by), NSSize(140.0, 24.0)))
 
+    def _query_focused_text_box_frame(self) -> Optional[NSRect]:
+        """
+        Query the frontmost app's focused input element (`AXTextField`, `AXTextArea`,
+        `AXSearchField`, `AXComboBox`, or editable group) in <1ms and convert Quartz -> Cocoa.
+        Returns None when no distinct input box is focused (or on `AXSecureTextField`),
+        so callers fall back cleanly to `_query_focused_window_frame()`.
+        """
+        try:
+            ws = NSWorkspace.sharedWorkspace()
+            front = ws.frontmostApplication()
+            if not front:
+                return None
+
+            pid = front.processIdentifier()
+            app_ax = AXUIElementCreateApplication(pid)
+            err_f, focused = AXUIElementCopyAttributeValue(app_ax, "AXFocusedUIElement", None)
+            if err_f != 0 or not focused:
+                return None
+
+            err_w, win = AXUIElementCopyAttributeValue(app_ax, "AXFocusedWindow", None)
+            win_area = 0.0
+            if err_w == 0 and win:
+                _, wpos = AXUIElementCopyAttributeValue(win, "AXPosition", None)
+                _, wsz = AXUIElementCopyAttributeValue(win, "AXSize", None)
+                if wpos and wsz:
+                    ok_wp, _ = AXValueGetValue(wpos, kAXValueCGPointType, None)
+                    ok_ws, win_sz = AXValueGetValue(wsz, kAXValueCGSizeType, None)
+                    if ok_wp and ok_ws and win_sz.width > 50 and win_sz.height > 50:
+                        win_area = float(win_sz.width) * float(win_sz.height)
+
+            text_roles = {"AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"}
+            chosen_pt = None
+            chosen_sz = None
+            curr = focused
+            for _ in range(6):
+                if not curr:
+                    break
+                _, role = AXUIElementCopyAttributeValue(curr, "AXRole", None)
+                _, subrole = AXUIElementCopyAttributeValue(curr, "AXSubrole", None)
+                role_s = str(role or "")
+                sub_s = str(subrole or "")
+                if role_s == "AXSecureTextField" or sub_s == "AXSecureTextField":
+                    return None
+                if role_s in ("AXWindow", "AXApplication"):
+                    break
+                _, editable = AXUIElementCopyAttributeValue(curr, "AXEditable", None)
+                if role_s in text_roles or bool(editable):
+                    _, pval = AXUIElementCopyAttributeValue(curr, "AXPosition", None)
+                    _, sval = AXUIElementCopyAttributeValue(curr, "AXSize", None)
+                    if pval and sval:
+                        ok1, pt = AXValueGetValue(pval, kAXValueCGPointType, None)
+                        ok2, sz = AXValueGetValue(sval, kAXValueCGSizeType, None)
+                        if ok1 and ok2 and sz.width >= 36 and sz.height >= 16:
+                            if win_area <= 0 or (float(sz.width) * float(sz.height)) < win_area * 0.84:
+                                chosen_pt, chosen_sz = pt, sz
+                err_p, parent = AXUIElementCopyAttributeValue(curr, "AXParent", None)
+                curr = parent if err_p == 0 else None
+
+            if chosen_pt is None or chosen_sz is None:
+                return None
+
+            screens = NSScreen.screens()
+            if not screens:
+                return None
+            screen_h = screens[0].frame().size.height
+            padding = 5.0
+            cocoa_x = chosen_pt.x - padding
+            cocoa_y = (screen_h - (chosen_pt.y + chosen_sz.height)) - padding
+            cocoa_w = chosen_sz.width + (padding * 2.0)
+            cocoa_h = chosen_sz.height + (padding * 2.0)
+            return NSRect(NSPoint(cocoa_x, cocoa_y), NSSize(cocoa_w, cocoa_h))
+        except Exception:
+            return None
+
     def _start_tracking_loop(self) -> None:
-        """Poll focused window every 150ms while active to follow window movements."""
+        """Poll focused text box / window every 150ms while active to follow focus & resize."""
         self._stop_tracking_loop()
-        if not self._is_visible or self._current_mode != "focused_window":
+        if not self._is_visible or self._current_mode not in ("focused_window", "ears_auto", "ears_window"):
             return
 
         def _tick():
             if not self._is_visible:
                 return
-            rect = self._query_focused_window_frame()
+            rect = None
+            if self._current_mode == "ears_auto":
+                rect = self._query_focused_text_box_frame()
+            if rect is None:
+                rect = self._query_focused_window_frame()
             if rect:
                 AppHelper.callAfter(self._update_panel_frame, rect)
-            self._track_timer = threading.Timer(0.18, _tick)
+            self._track_timer = threading.Timer(0.16, _tick)
             self._track_timer.daemon = True
             self._track_timer.start()
 
-        self._track_timer = threading.Timer(0.18, _tick)
+        self._track_timer = threading.Timer(0.16, _tick)
         self._track_timer.daemon = True
         self._track_timer.start()
 

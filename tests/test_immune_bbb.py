@@ -369,13 +369,13 @@ def test_compute_split_dynamic_from_live_telemetry(tmp_path: Path, monkeypatch: 
 
     now = time.time()
     events = [
-        # Op 1: Local - bounded slice read
+        # Op 1: Local - active auto-sliced read
         {
             "timestamp": now - 100,
             "phase": "pre",
             "tool": "read_file",
             "target": "src/foo.py",
-            "bounded_slice_read": True,
+            "read_auto_sliced": True,
             "decision": "allow",
         },
         # Op 2: Local - pytest CLI execution
@@ -529,8 +529,8 @@ def test_git_diff_and_show_auto_heal_and_read_auto_slice(
         audit_log_path=tmp_path / "audit_git.jsonl",
     )
     assert hook_git["decision"] == "allow"
-    assert hook_git["overwrite"]["CommandLine"] == "git show HEAD --stat"
-    assert hook_git["overwrite_args"]["CommandLine"] == "git show HEAD --stat"
+    assert hook_git["overwrite"]["CommandLine"] == "git show --stat HEAD"
+    assert hook_git["overwrite_args"]["CommandLine"] == "git show --stat HEAD"
 
     # Verify WBC_AUTO_SLICE_READ=1 auto-slices >250 line file reads and injects AST map
     large_py = tmp_path / "big_service.py"
@@ -631,6 +631,7 @@ def test_hybrid_router_warm_first_routing() -> None:
     router._warm_ps_cache = ["qwen2.5-coder:1.5b", "gemma2:2b"]
     router._warm_ps_ts = time.time()
     router._installed_cache = [
+        "body-coder-mlx",
         "voicefi-coder-mlx",
         "tev1:0.8b",
         "qwen2.5-coder:1.5b",
@@ -647,12 +648,12 @@ def test_hybrid_router_warm_first_routing() -> None:
     assert decision_scout.selected_model == "qwen2.5-coder:1.5b"
     assert decision_scout.is_local is True
     assert decision_scout.cascaded is True
-    assert decision_scout.cascaded_from == "voicefi-coder-mlx"
+    assert decision_scout.cascaded_from == "body-coder-mlx"
     assert "Warm-first fast-path" in (decision_scout.cascade_reason or "")
 
     decision_reflex = router.resolve_model(task_type="tier0_reflex")
     assert decision_reflex.selected_model == "qwen2.5-coder:1.5b"
-    assert decision_reflex.cascaded_from == "tev1:0.8b"
+    assert decision_reflex.cascaded_from == "body-coder-mlx"
 
     # 3. When only gemma2:2b is warm in Ollama ps, selects gemma2:2b
     router._warm_ps_cache = ["gemma2:2b"]
@@ -791,7 +792,7 @@ def test_split_shifting_organ_10_upgrades(
             "phase": "pre",
             "tool": "read_file",
             "target": "src/foo.py",
-            "event": "pre_tool_slice_allowed",
+            "event": "pre_tool_auto_slice",
             "decision": "allow",
         },
         {
